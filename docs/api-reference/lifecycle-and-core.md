@@ -1,0 +1,204 @@
+# 生命周期与 Core 服务
+
+对应头文件：`plugin.h`、`services/core.h`、`services/plugin_state.h`、`services/localization.h`。通用约定见 [API 参考总览](README.md)。
+
+## 插件入口
+
+插件 DLL 导出一个名为 `AnomalyPluginEntryV1`（= `ANOMALY_PLUGIN_V1_ENTRY_NAME`）的函数，宿主调用它来填写描述符：
+
+```c
+typedef AnomalyStatusV1 (ANOMALY_CALL *AnomalyPluginEntryV1Fn)(
+    AnomalyPluginDescriptorV1* descriptor);
+```
+
+入口应先校验 `descriptor->struct_size` 至少覆盖基础字段和 `on_draw`，再填入这些字段。V1 尾部新增字段
+只能在宿主提供的 `struct_size` 覆盖对应位置时写入，以保持旧宿主兼容。
+
+### `AnomalyPluginDescriptorV1`
+
+```c
+typedef struct AnomalyPluginDescriptorV1 {
+    uint32_t struct_size; uint16_t api_major; uint16_t api_minor;
+    AnomalyStringViewV1 id; AnomalyStringViewV1 name;
+    AnomalyStringViewV1 author; AnomalyStringViewV1 version;
+    AnomalyStatusV1 (ANOMALY_CALL *on_load)(const AnomalyHostApiV1* host, void** plugin_context);
+    AnomalyStatusV1 (ANOMALY_CALL *on_start)(void* plugin_context);
+    AnomalyStatusV1 (ANOMALY_CALL *on_stop)(void* plugin_context, uint32_t deadline_milliseconds);
+    void (ANOMALY_CALL *on_unload)(void* plugin_context);
+    void (ANOMALY_CALL *on_update)(void* plugin_context, double delta_seconds);
+    void (ANOMALY_CALL *on_draw)(void* plugin_context, const AnomalyUiServiceV1* ui);
+    void (ANOMALY_CALL *on_overlay)(void* plugin_context, const AnomalyUiServiceV1* ui);
+} AnomalyPluginDescriptorV1;
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `api_major` / `api_minor` | 填 `ANOMALY_PLUGIN_API_V1_MAJOR` / `_MINOR` |
+| `id` / `name` / `author` / `version` | 插件元数据（与 Manifest 一致） |
+| `on_load` | 查询服务、注册资源；通过 `plugin_context` 返回自有上下文指针 |
+| `on_start` | 激活 |
+| `on_stop` | 在 `deadline_milliseconds` 内停止并提交状态 |
+| `on_unload` | 卸载前清理 |
+| `on_update` | 每 tick 逻辑更新（Game 域）；可为 `NULL` |
+| `on_draw` | 每帧绘制（Render 域）；可为 `NULL` |
+| `on_overlay` | 每个渲染帧调用（Render 域），不受插件窗口是否打开影响；只用于 `draw_screen_primitives` 等持久世界覆盖层，可为 `NULL` |
+
+停用或热重载时，宿主先冻结普通回调来源并等待已在执行的回调结束，再调用 `on_stop`。插件在
+`on_stop` 中仍可释放自己注册的 hook 和其他 scoped 资源；宿主随后回收剩余资源作为兜底。若兜底
+回收仍无法安全 drain，插件 generation 会进入 quarantine，而不会直接卸载其 DLL。
+
+`on_overlay` 是 V1 描述符尾部的可选字段。宿主只有在 `struct_size` 覆盖该字段且回调非空时才会调用；
+插件需要兼容旧宿主时可保留 `on_draw` 中的降级绘制路径。
+
+回调的线程域见[插件开发 · 生命周期](../developer-guide/plugin-development.md#3-生命周期与入口)。
+
+### `AnomalyHostApiV1`
+
+`on_load` 收到宿主 API：
+
+```c
+typedef struct AnomalyHostApiV1 {
+    uint32_t struct_size; uint16_t api_major; uint16_t api_minor; void* host_context;
+    AnomalyAllocatorV1 allocator;
+    AnomalyStatusV1 (ANOMALY_CALL *query_service)(void* host_context,
+        AnomalyStringViewV1 service_id, uint32_t minimum_version, const void** service);
+} AnomalyHostApiV1;
+```
+
+`query_service` 是获取一切服务表的唯一入口。用 C++ wrapper `anomaly::sdk::Host(host).Query<T>(id, version)` 更安全。
+
+---
+
+## `anomaly.core`
+
+- **ID**：`ANOMALY_CORE_SERVICE_V1_ID` = `"anomaly.core"`
+- **版本**：`ANOMALY_CORE_SERVICE_V1_VERSION` = 1
+- **capability**：无需（但 `read_memory` / `write_memory` 分别需要 `memory-read` / `memory-write` grant）
+
+```c
+typedef struct AnomalyCoreServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    void (ANOMALY_CALL *log)(void* user, uint32_t level, AnomalyStringViewV1 message);
+    AnomalyStatusV1 (ANOMALY_CALL *read_memory)(void* user, uintptr_t address, AnomalyMutableByteSpanV1 destination);
+    AnomalyStatusV1 (ANOMALY_CALL *write_memory)(void* user, uintptr_t address, AnomalyByteSpanV1 source);
+    AnomalyStatusV1 (ANOMALY_CALL *plugin_directory)(void* user, char* destination, size_t* inout_size);
+} AnomalyCoreServiceV1;
+```
+
+| 函数 | 说明 |
+| --- | --- |
+| `log(level, message)` | 写日志，`level` 见下表 |
+| `read_memory(address, destination)` | 读进程内存到 `destination`；需要 `memory-read`，否则 `PERMISSION_DENIED` |
+| `write_memory(address, source)` | 写进程内存；需要 `memory-write`，否则 `PERMISSION_DENIED` |
+| `plugin_directory(destination, inout_size)` | 取本插件包目录（两段式缓冲协议） |
+
+日志级别 `AnomalyCoreLogLevelV1`：`TRACE=0`、`INFO=1`、`WARNING=2`、`ERROR=3`。
+
+> [!NOTE]
+> `anomaly.core` 不会自动授予原始内存访问；新插件应优先使用语义 [NTE snapshot 服务](nte-services.md) 而非自行读游戏对象。
+
+---
+
+## `anomaly.plugin-state`
+
+- **ID**：`"anomaly.plugin-state"` · **版本** 1 · **capability** `configuration`
+
+```c
+typedef struct AnomalyPluginStateServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    AnomalyStatusV1 (ANOMALY_CALL *directory)(void* user, char* destination, size_t* inout_size);
+} AnomalyPluginStateServiceV1;
+```
+
+`directory` 返回插件私有状态目录（两段式缓冲协议）。持久化的结构化设置建议用 [`anomaly.config`](platform-services.md#anomalyconfig)。
+
+---
+
+## `anomaly.localization`
+
+- **ID**：`"anomaly.localization"` · **版本** 1 · **capability** `ui`
+
+```c
+typedef struct AnomalyLocalizationServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    AnomalyStatusV1 (ANOMALY_CALL *locale)(void* user, char* destination, size_t* inout_size);
+    AnomalyStatusV1 (ANOMALY_CALL *translate)(void* user,
+        AnomalyStringViewV1 key, AnomalyStringViewV1 english_fallback,
+        const AnomalyStringViewV1* arguments, size_t argument_count,
+        char* destination, size_t* inout_size);
+} AnomalyLocalizationServiceV1;
+```
+
+| 函数 | 说明 |
+| --- | --- |
+| `locale(destination, inout_size)` | 当前 locale（如 `zh-CN`），两段式缓冲协议 |
+| `translate(key, english_fallback, arguments, argument_count, destination, inout_size)` | 按 `key` 翻译，缺失时用 `english_fallback`；`arguments` 是位置参数数组（≤8）。`destination = NULL` 时按两段式缓冲协议只回报所需字节数（含结尾 NUL），status 为 `OK` 或 `BUFFER_TOO_SMALL` |
+
+> [!NOTE]
+> `anomaly.localization` 与 `anomaly.ui` 共用 `ui` capability。
+
+### 文案目录
+
+插件用它自己的包目录里的 `locales/<locale>.json` 提供翻译（与 `manifest.json` 同级，文件名即 locale 名）：
+
+```json
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "messages": {
+    "window.title": "我的插件",
+    "plugin.description": "展示当前玩家与会话诊断。",
+    "status.cached": "已缓存 {0} 条"
+  }
+}
+```
+
+| 约束 | 说明 |
+| --- | --- |
+| `schemaVersion` | 必须是 `1` |
+| `locale` | 必须与请求的 locale 名一致 |
+| key | 只允许 `[a-z0-9._-]`，长度 ≤255 |
+| 消息 | 非空字符串 |
+| 占位符 | 只允许 `{0}`..`{7}`，字面花括号写 `{{` / `}}`；**中文条目的占位符集合必须与英文回退完全一致**，否则该条静默回退英文 |
+| 体积 | 文件 ≤1 MiB，条目 ≤4096 |
+
+**目录是整体生效的**：只要有一条不合规（key 非法、消息为空、花括号未转义、占位符写法错误等），整个目录会被判为无效，该插件的每一次 `translate` 都退回英文，日志里只留一条 `plugin localization fallback`。新增条目后要整体校验，不要指望单条容错。
+
+宿主另外从同一个目录读两个固定 key 用于管理界面：`window.title` 作显示名、`plugin.description` 作简介，缺失时才回退到 manifest 的 `name` / `description`。因此这两个 manifest 字段应写英文回退值，中文放进目录。
+
+当前语言在进程生命周期内固定，切换语言需重启游戏进程，所以文案可以在产生它的位置直接解析，不必推迟到绘制。
+
+C++ 侧直接用 SDK 的 `anomaly::sdk::Localizer`（`include/anomaly/sdk/localization.hpp`），它封装 `Text` / `Format` / `Label` 与超长消息的两段式重试；用法见 [插件开发 · 文本本地化](../developer-guide/plugin-development.md#文本本地化)。
+
+
+## `anomaly.mods`（v1）
+
+头文件：`anomaly/sdk/services/mods.h`，capability：`mods`。由当前进程的 Pak Runtime 发布。
+所有服务表与行结构都带 `struct_size`，调用前检查所需尾字段。服务受插件 generation lease 约束。
+
+| 方法 | 线程 | 语义 |
+| --- | --- | --- |
+| `compatibility_mode` | 任意 | 进程实际启动模式，0 热加载、1 兼容；文件中的模式修改不改变此值 |
+| `enumerate` | Lifecycle / Worker | 同步遍历目录索引分析结果及共享开关，回调返回 0 停止遍历 |
+| `set_enabled` | Lifecycle / Worker | 保存开关；启用时关闭资源重叠或相同车型模型替换项，成功仅表示选择已保存 |
+| `assets` | Lifecycle / Worker | 遍历完整索引中的 `/game/...` 包路径，去掉扩展名；任一容器不可读时返回不可用 |
+| `synchronize` | Worker | 应用保存的选择并核对挂载集合；不执行 UObject 清理，未收敛时返回非 OK |
+
+`AnomalyModEntryV1` 包含 `enabled`、`disabled_files`、`index_complete`、相对选择 key、名称、
+以逗号和空格分隔的车型资源标识以及原始分析错误。字符串视图仅在回调内有效；宿主不保留回调，
+调用者不得跨 C ABI 抛出异常。非 OK 时丢弃本次部分枚举。已标记 `.disabled` 的文件须先在 Launcher 恢复。
+相对选择 key 是容器相对 `~mods` 的路径：目录型模组以 `/` 结尾，松散容器使用 `.pak` 文件名。
+目录型 key 可以是多层（`角色A/ModB/`），因为只聚集模组的文件夹是分类而不是模组本身；
+写在分类文件夹上的 key（`角色A/`）按前缀覆盖它下面的全部模组，因此分类整理移动目录后必须同时迁移 key。
+尾字段 `resource_groups` 是从资源目录识别出的分组标识，以逗号和空格分隔；读取前检查
+`struct_size >= offsetof(AnomalyModEntryV1, resource_groups) + sizeof(entry.resource_groups)`，旧宿主没有该字段时可使用 `vehicles` 展示。
+每个标识是两层：`Player_051/female` 表示 `Player_051` 分组内的 `female` 皮肤，`Vehicle_037`、`Pendant_07`
+以及以 `/` 开头的内容目录（如 `/game/wwiseaudio`）表示整个分组、没有皮肤。只有内容目录以 `/` 开头，
+因此第一个字符之后出现的 `/` 一定是分组与皮肤的分界；宿主不解析不合规标识时按整组处理。
+
+尾字段 `parent_folder` 是模组所在文件夹相对 `~mods` 的路径，使用 `/` 分隔并保留目录名大小写。根目录项返回空字符串。
+读取前检查 `struct_size >= offsetof(AnomalyModEntryV1, parent_folder) + sizeof(entry.parent_folder)`。
+旧宿主可从选择 key 取父路径，路径大小写以 key 为准。
+该字段只用于分类，不改变资源冲突判断；覆盖多个皮肤的 mod 列出全部皮肤，而不是列出皮肤组合；
+非载具分组不能用于车辆清理。
+兼容模式拒绝 `set_enabled` 与 `synchronize`。完整资源索引仅描述覆盖路径，不代表已加载对象或所有依赖关系。

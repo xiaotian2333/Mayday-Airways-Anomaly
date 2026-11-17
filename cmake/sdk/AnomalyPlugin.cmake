@@ -1,0 +1,140 @@
+include(CMakeParseArguments)
+
+# anomaly_add_plugin(<target>
+#     SOURCES <source>...
+#     MANIFEST <manifest.json>
+#     [PACKAGE_NAME <name>] [OUTPUT_DIRECTORY <directory>]
+#     [RESOURCE_DIRECTORIES <directory>...]
+#     [BUNDLED_TARGETS <target>...]
+#     [C_ONLY] [NO_RELEASE] [TEST_PLUGIN])
+#
+# Builds one plugin package and owns its packaging rules, so a package can never be
+# missing from a runtime tree: `plugin.dll` and the manifest land in the package
+# directory, and the same package directory is what gets installed.
+#
+#   - the package installs into `Anomaly/plugins/<PACKAGE_NAME>` of the GameRuntime
+#     component, and the `locales`, `assets` and `profile` directories next to the manifest are
+#     mirrored into the package directory and installed with it;
+#   - TEST_PLUGIN marks a developer test package: it is built and installed only when
+#     ANOMALY_BUILD_TEST_PLUGINS is ON, and it then installs into the TestPlugins component
+#     instead of GameRuntime;
+#   - NO_RELEASE builds the package without installing it at all.
+#   - RESOURCE_DIRECTORIES adds package data beside the standard resource folders;
+#     BUNDLED_TARGETS adds companion executables/libraries to the same package.
+function(anomaly_add_plugin target)
+    set(options C_ONLY NO_RELEASE TEST_PLUGIN)
+    set(oneValueArgs MANIFEST PACKAGE_NAME OUTPUT_DIRECTORY)
+    set(multiValueArgs SOURCES RESOURCE_DIRECTORIES BUNDLED_TARGETS)
+    cmake_parse_arguments(ANOMALY "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+    # A test package is opt-in: without the switch it is not built at all, so nothing has to
+    # depend on, install or validate a target that does not exist. ANOMALY_BUILD_TEST_PLUGINS
+    # is declared by the Anomaly build; a project that does not define it builds no test
+    # package.
+    if(ANOMALY_TEST_PLUGIN AND NOT ANOMALY_BUILD_TEST_PLUGINS)
+        return()
+    endif()
+    if(NOT ANOMALY_SOURCES)
+        message(FATAL_ERROR "anomaly_add_plugin(${target}) requires SOURCES")
+    endif()
+    if(NOT ANOMALY_MANIFEST)
+        message(FATAL_ERROR "anomaly_add_plugin(${target}) requires MANIFEST")
+    endif()
+    if(NOT IS_ABSOLUTE "${ANOMALY_MANIFEST}")
+        set(ANOMALY_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/${ANOMALY_MANIFEST}")
+    endif()
+    if(NOT EXISTS "${ANOMALY_MANIFEST}")
+        message(FATAL_ERROR "plugin manifest does not exist: ${ANOMALY_MANIFEST}")
+    endif()
+    if(NOT ANOMALY_PACKAGE_NAME)
+        set(ANOMALY_PACKAGE_NAME "${target}")
+    endif()
+    if(NOT ANOMALY_OUTPUT_DIRECTORY)
+        set(ANOMALY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/package/${ANOMALY_PACKAGE_NAME}")
+    endif()
+    add_library(${target} SHARED ${ANOMALY_SOURCES})
+    target_link_libraries(${target} PRIVATE Anomaly::sdk)
+    set_target_properties(${target} PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "plugin"
+        # Every plugin package produces `plugin.dll`, so the symbols are named after the
+        # package instead: a shared PDB name would make the packages indistinguishable in
+        # the Symbols component.
+        PDB_NAME "${ANOMALY_PACKAGE_NAME}"
+        RUNTIME_OUTPUT_DIRECTORY "$<1:${ANOMALY_OUTPUT_DIRECTORY}>"
+        LIBRARY_OUTPUT_DIRECTORY "$<1:${ANOMALY_OUTPUT_DIRECTORY}>"
+        ARCHIVE_OUTPUT_DIRECTORY "$<1:${ANOMALY_OUTPUT_DIRECTORY}>"
+        PDB_OUTPUT_DIRECTORY "$<1:${ANOMALY_OUTPUT_DIRECTORY}>")
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 $<$<COMPILE_LANGUAGE:CXX>:/permissive->)
+        if(NOT ANOMALY_C_ONLY)
+            target_compile_options(${target} PRIVATE /EHsc)
+        endif()
+    endif()
+    # Package data stays beside the manifest in both the build tree and installation.
+    # Profiles hold plugin-owned signatures and layouts, separate from other assets.
+    get_filename_component(anomaly_package_source_directory "${ANOMALY_MANIFEST}" DIRECTORY)
+    set(anomaly_package_resource_directories locales assets profile ${ANOMALY_RESOURCE_DIRECTORIES})
+    list(REMOVE_DUPLICATES anomaly_package_resource_directories)
+    set(anomaly_existing_resource_directories)
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${ANOMALY_MANIFEST}" "$<TARGET_FILE_DIR:${target}>/manifest.json"
+        VERBATIM)
+    foreach(anomaly_resource_directory IN LISTS anomaly_package_resource_directories)
+        if(EXISTS "${anomaly_package_source_directory}/${anomaly_resource_directory}")
+            list(APPEND anomaly_existing_resource_directories "${anomaly_resource_directory}")
+            if(anomaly_resource_directory STREQUAL "profile")
+                add_custom_command(TARGET ${target} POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E rm -rf "$<TARGET_FILE_DIR:${target}>/profile"
+                    VERBATIM)
+            endif()
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                        "${anomaly_package_source_directory}/${anomaly_resource_directory}"
+                        "$<TARGET_FILE_DIR:${target}>/${anomaly_resource_directory}"
+                VERBATIM)
+        endif()
+    endforeach()
+    set_property(TARGET ${target} PROPERTY ANOMALY_PACKAGE_DIRECTORY "${ANOMALY_OUTPUT_DIRECTORY}")
+    set_target_properties(${target} PROPERTIES
+        ANOMALY_PACKAGE_NAME "${ANOMALY_PACKAGE_NAME}"
+        ANOMALY_PACKAGE_MANIFEST "${ANOMALY_MANIFEST}"
+        ANOMALY_PACKAGE_RESOURCE_DIRECTORIES "${anomaly_existing_resource_directories}"
+        ANOMALY_PACKAGE_BUNDLED_TARGETS "${ANOMALY_BUNDLED_TARGETS}")
+    foreach(anomaly_bundled_target IN LISTS ANOMALY_BUNDLED_TARGETS)
+        add_dependencies(${target} ${anomaly_bundled_target})
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "$<TARGET_FILE:${anomaly_bundled_target}>"
+                    "$<TARGET_FILE_DIR:${target}>/$<TARGET_FILE_NAME:${anomaly_bundled_target}>"
+            VERBATIM)
+    endforeach()
+    if(ANOMALY_NO_RELEASE)
+        return()
+    endif()
+    set_property(GLOBAL APPEND PROPERTY ANOMALY_RELEASE_PLUGIN_TARGETS "${target}")
+    if(ANOMALY_TEST_PLUGIN)
+        set(anomaly_package_component TestPlugins)
+    else()
+        set(anomaly_package_component GameRuntime)
+    endif()
+    set_property(TARGET ${target} PROPERTY ANOMALY_PACKAGE_INSTALL_COMPONENT "${anomaly_package_component}")
+    set(anomaly_package_directory "Anomaly/plugins/${ANOMALY_PACKAGE_NAME}")
+    install(TARGETS ${target}
+        RUNTIME DESTINATION "${anomaly_package_directory}" COMPONENT ${anomaly_package_component}
+        LIBRARY DESTINATION "${anomaly_package_directory}" COMPONENT ${anomaly_package_component})
+    if(ANOMALY_BUNDLED_TARGETS)
+        install(TARGETS ${ANOMALY_BUNDLED_TARGETS}
+            RUNTIME DESTINATION "${anomaly_package_directory}" COMPONENT ${anomaly_package_component}
+            LIBRARY DESTINATION "${anomaly_package_directory}" COMPONENT ${anomaly_package_component})
+    endif()
+    install(FILES "${ANOMALY_MANIFEST}"
+        DESTINATION "${anomaly_package_directory}" COMPONENT ${anomaly_package_component})
+    foreach(anomaly_resource_directory IN LISTS anomaly_package_resource_directories)
+        if(EXISTS "${anomaly_package_source_directory}/${anomaly_resource_directory}")
+            install(DIRECTORY "${anomaly_package_source_directory}/${anomaly_resource_directory}/"
+                DESTINATION "${anomaly_package_directory}/${anomaly_resource_directory}"
+                COMPONENT ${anomaly_package_component})
+        endif()
+    endforeach()
+endfunction()

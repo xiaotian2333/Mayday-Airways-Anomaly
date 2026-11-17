@@ -1,0 +1,350 @@
+# UI 服务
+
+对应头文件：`services/ui.h`（`anomaly.ui`）与 `services/ui_resources.h`（`window` / `font` / `texture` / `input`）。这些是宿主拥有的 C facade——**没有任何 ImGui 类型、context、allocator 或 draw-list 指针跨越 ABI**。通用约定见 [API 参考总览](README.md)。
+
+## `anomaly.ui`
+
+- **ID**：`"anomaly.ui"` · **版本** 1 · **capability** `ui`
+
+`anomaly.ui` 只发布 `AnomalyUiServiceV1`。窗口和控件调用仅在当前 `on_draw` 回调内有效；
+`draw_screen_primitives` 也可在 `on_overlay` 中调用。`developer_mode_enabled` 还可在
+`on_update` 中调用。
+
+### 通用类型
+
+```c
+#define ANOMALY_RGBA_V1(r, g, b, a) /* 打包为 uint32_t（R 低位） */
+
+typedef struct AnomalyEspCameraV1 {
+    uint32_t struct_size; uint32_t flags;
+    double position[3]; double rotation[3];
+    float horizontal_fov_degrees; uint32_t reserved;
+} AnomalyEspCameraV1;
+typedef struct AnomalyEspEntityBoundsV1 {
+    uint32_t struct_size; uint32_t flags; double center[3]; double extent[3];
+} AnomalyEspEntityBoundsV1;
+typedef struct AnomalyEspBoxStyleV1 {
+    uint32_t struct_size; uint32_t flags;         // AnomalyEspBoxFlagsV1
+    uint32_t color_rgba; uint32_t outline_color_rgba;
+    float thickness; float outline_thickness;
+} AnomalyEspBoxStyleV1;
+// AnomalyEspBoxFlagsV1: ANOMALY_ESP_BOX_V1_NONE = 0, ANOMALY_ESP_BOX_V1_OUTLINE = 1<<0
+
+typedef enum AnomalyUiScreenPrimitiveKindV1 {
+    ANOMALY_UI_SCREEN_PRIMITIVE_V1_LINE = 1,
+    ANOMALY_UI_SCREEN_PRIMITIVE_V1_FILLED_RECT = 2,
+    ANOMALY_UI_SCREEN_PRIMITIVE_V1_OUTLINE_RECT = 3,
+    ANOMALY_UI_SCREEN_PRIMITIVE_V1_FILLED_CIRCLE = 4,
+    ANOMALY_UI_SCREEN_PRIMITIVE_V1_OUTLINE_CIRCLE = 5
+} AnomalyUiScreenPrimitiveKindV1;
+
+typedef struct AnomalyUiScreenPrimitiveV1 {
+    uint32_t struct_size; uint32_t kind; uint32_t color_rgba;
+    float x, y, width, height, thickness;
+} AnomalyUiScreenPrimitiveV1;
+```
+
+`LINE` 的 `x/y` 和 `width/height` 分别是两个端点；矩形以 `x/y` 为左上角、`width/height`
+为尺寸；圆以 `x/y` 为圆心、`width` 为半径。`thickness` 用于线和空心图形。
+
+### 服务表
+
+```c
+typedef struct AnomalyUiServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    void (ANOMALY_CALL *set_next_window_size)(void* user, float width, float height, uint32_t condition);
+    int  (ANOMALY_CALL *begin_window)(void* user, AnomalyStringViewV1 title, int* open, uint32_t flags);
+    void (ANOMALY_CALL *end_window)(void* user);
+    void (ANOMALY_CALL *text)(void* user, AnomalyStringViewV1 text);
+    int  (ANOMALY_CALL *button)(void* user, AnomalyStringViewV1 label, float width, float height);
+    int  (ANOMALY_CALL *draw_entity_bbox)(void* user, const AnomalyEspCameraV1*, const AnomalyEspEntityBoundsV1*, const AnomalyEspBoxStyleV1*);
+    int  (ANOMALY_CALL *checkbox)(void* user, AnomalyStringViewV1 label, int* value);
+    int  (ANOMALY_CALL *slider_float)(void* user, AnomalyStringViewV1 label, float* value, float minimum, float maximum);
+    int  (ANOMALY_CALL *color_edit4)(void* user, AnomalyStringViewV1 label, float rgba[4]);
+    int  (ANOMALY_CALL *draw_entity_box3d)(void* user, const AnomalyEspCameraV1*, const AnomalyEspEntityBoundsV1*, const AnomalyEspBoxStyleV1*);
+    int  (ANOMALY_CALL *draw_entity_label)(void* user, const AnomalyEspCameraV1*, const AnomalyEspEntityBoundsV1*, AnomalyStringViewV1 text, uint32_t color_rgba);
+    void (ANOMALY_CALL *separator)(void* user);
+    int  (ANOMALY_CALL *begin_child)(void* user, AnomalyStringViewV1 id, float width, float height, uint32_t flags);
+    void (ANOMALY_CALL *end_child)(void* user);
+    int  (ANOMALY_CALL *begin_table)(void* user, AnomalyStringViewV1 id, int32_t columns, uint32_t flags, float outer_width, float outer_height);
+    void (ANOMALY_CALL *table_next_row)(void* user);
+    int  (ANOMALY_CALL *table_next_column)(void* user);
+    void (ANOMALY_CALL *end_table)(void* user);
+    int  (ANOMALY_CALL *begin_menu)(void* user, AnomalyStringViewV1 label, int enabled);
+    void (ANOMALY_CALL *end_menu)(void* user);
+    void (ANOMALY_CALL *open_popup)(void* user, AnomalyStringViewV1 id);
+    int  (ANOMALY_CALL *begin_popup_modal)(void* user, AnomalyStringViewV1 id, int* open, uint32_t flags);
+    void (ANOMALY_CALL *end_popup)(void* user);
+    void (ANOMALY_CALL *close_current_popup)(void* user);
+    int  (ANOMALY_CALL *filter_match)(void* user, AnomalyStringViewV1 filter, AnomalyStringViewV1 value);
+    uint32_t (ANOMALY_CALL *frame_state)(void* user);
+    void (ANOMALY_CALL *set_next_window_size_constraints)(void* user, float minimum_width, float minimum_height, float maximum_width, float maximum_height);
+    void (ANOMALY_CALL *get_window_size)(void* user, float* width, float* height);
+    int  (ANOMALY_CALL *input_uint32)(void* user, AnomalyStringViewV1 label, uint32_t* value, uint32_t step, uint32_t step_fast);
+    int  (ANOMALY_CALL *input_double)(void* user, AnomalyStringViewV1 label, double* value, double step, double step_fast);
+    int  (ANOMALY_CALL *developer_mode_enabled)(void* user);
+    int  (ANOMALY_CALL *input_text)(void* user, AnomalyStringViewV1 label, char* buffer, size_t buffer_capacity, uint32_t flags);
+    int  (ANOMALY_CALL *button_enabled)(void* user, AnomalyStringViewV1 label, float width, float height, int enabled);
+    void (ANOMALY_CALL *same_line)(void* user, float offset_from_start_x, float spacing);
+    void (ANOMALY_CALL *set_cursor_pos_x)(void* user, float local_x);
+    int  (ANOMALY_CALL *text_link)(void* user, AnomalyStringViewV1 label, AnomalyStringViewV1 url);
+    int  (ANOMALY_CALL *begin_tab_bar)(void* user, AnomalyStringViewV1 id, uint32_t flags);
+    int  (ANOMALY_CALL *begin_tab_item)(void* user, AnomalyStringViewV1 label, int* open, uint32_t flags, int enabled);
+    void (ANOMALY_CALL *end_tab_item)(void* user);
+    void (ANOMALY_CALL *end_tab_bar)(void* user);
+    void (ANOMALY_CALL *text_wrapped)(void* user, AnomalyStringViewV1 text);
+    int  (ANOMALY_CALL *begin_child_auto_fit_y)(void* user, AnomalyStringViewV1 id, float width, float max_height);
+    int  (ANOMALY_CALL *slider_float_enabled)(void* user, AnomalyStringViewV1 label, float* value, float minimum, float maximum, int enabled);
+    void (ANOMALY_CALL *set_next_item_width)(void* user, float width);
+
+    // 可选追加：前景叠加层
+    void (ANOMALY_CALL *overlay_viewport_size)(void* user, float* width, float* height);
+    int  (ANOMALY_CALL *overlay_glass)(void* user, float x, float y, float width, float height, const AnomalyUiGlassStyleV1* style);
+    void (ANOMALY_CALL *overlay_rect_filled)(void* user, float x, float y, float width, float height, uint32_t color_rgba, float rounding);
+    void (ANOMALY_CALL *overlay_line)(void* user, float x0, float y0, float x1, float y1, uint32_t color_rgba, float thickness);
+    void (ANOMALY_CALL *overlay_circle)(void* user, float center_x, float center_y, float radius, uint32_t color_rgba, float thickness);
+    void (ANOMALY_CALL *overlay_ring_sector)(void* user, float center_x, float center_y, float inner_radius, float outer_radius, float angle_start, float angle_end, uint32_t color_rgba);
+    void (ANOMALY_CALL *overlay_measure_text)(void* user, AnomalyStringViewV1 text, float font_size, float* width, float* height);
+    void (ANOMALY_CALL *overlay_text)(void* user, float x, float y, AnomalyStringViewV1 text, uint32_t color_rgba, float font_size);
+    int  (ANOMALY_CALL *overlay_glass_ring_sector)(void* user, float center_x, float center_y, float inner_radius, float outer_radius, float angle_start, float angle_end, const AnomalyUiGlassStyleV1* style);
+    int  (ANOMALY_CALL *draw_screen_primitives)(void* user, const AnomalyUiScreenPrimitiveV1* primitives, size_t count);
+} AnomalyUiServiceV1;
+```
+
+| 函数 | 说明 |
+| --- | --- |
+| `set_next_window_size(w, h, condition)` | 设置下一个窗口尺寸 |
+| `begin_window(title, open, flags)` / `end_window()` | 开始 / 结束窗口，返回是否展开 |
+| `text` / `button` / `button_enabled` / `checkbox` / `slider_float` / `color_edit4` / `input_*` | 基础控件与有界输入 |
+| `same_line` / `set_cursor_pos_x` | 紧凑的内联控件和局部水平定位 |
+| `text_link(label, url)` | 显示左键可点的文本链接；仅接受 `http://` 或 `https://`，点击后由宿主在绘制结束后请求默认浏览器打开 |
+| `begin_child` / `begin_table` / `begin_menu` / `begin_popup_modal` 及对应 `end_*` | 作用域 UI 容器 |
+| `begin_tab_bar` / `begin_tab_item` 及对应 `end_*` | 原生选项卡容器；只有 begin 返回 1 时才调用匹配的 end 函数 |
+| `filter_match` / `frame_state` / `developer_mode_enabled` | 当前帧和会话状态查询 |
+| `draw_entity_bbox` | 用 Unreal rotator 约定投影一个轴对齐世界盒并在前景绘制；仅当可见时返回 1 |
+| `draw_entity_box3d` | 投影并绘制世界盒的全部 12 条棱 |
+| `draw_entity_label` | 投影盒并在其 2D 边界上方绘制居中标签 |
+| `draw_screen_primitives` | 一次提交一批位于插件窗口下方的屏幕空间线段、矩形或圆形；可在 `on_draw` 或 `on_overlay` 中调用 |
+
+> [!NOTE]
+> `draw_entity_*`（ESP 绘制）需要 `entity-esp` capability。它们仅为 ABI v1 兼容而保留；新插件应使用
+> [`anomaly.ue5.ahud`](ue5-services.md#anomalyue5ahud) 的 Game-thread 绘制回调。`Entity ESP` 已采用该路径。
+> `AnomalyPluginDescriptorV1::on_draw` 收到的 `ui` 就是 `AnomalyUiServiceV1*`。
+
+相关枚举：
+
+```c
+typedef enum AnomalyUiFrameStateV1 {   // frame_state() 返回值的位
+    ANOMALY_UI_FRAME_V1_NONE = 0,
+    ANOMALY_UI_FRAME_V1_ITEM_HOVERED = 1<<0, ANOMALY_UI_FRAME_V1_WINDOW_FOCUSED = 1<<1,
+    ANOMALY_UI_FRAME_V1_ITEM_ACTIVE = 1<<2, ANOMALY_UI_FRAME_V1_WANT_CAPTURE_MOUSE = 1<<3,
+    ANOMALY_UI_FRAME_V1_WANT_CAPTURE_KEYBOARD = 1<<4, ANOMALY_UI_FRAME_V1_WANT_TEXT_INPUT = 1<<5
+} AnomalyUiFrameStateV1;
+typedef enum AnomalyUiTextInputFlagsV1 {
+    ANOMALY_UI_TEXT_INPUT_V1_NONE = 0, ANOMALY_UI_TEXT_INPUT_V1_DIGITS = 1<<0
+} AnomalyUiTextInputFlagsV1;
+typedef enum AnomalyUiTableFlagsV1 {
+    ANOMALY_UI_TABLE_V1_NONE = 0, ANOMALY_UI_TABLE_V1_SIZING_FIXED_FIT = 1<<0
+} AnomalyUiTableFlagsV1;
+typedef enum AnomalyUiTabBarFlagsV1 {
+    ANOMALY_UI_TAB_BAR_V1_NONE = 0,
+    ANOMALY_UI_TAB_BAR_V1_REORDERABLE = 1<<0,
+    ANOMALY_UI_TAB_BAR_V1_AUTO_SELECT_NEW_TABS = 1<<1,
+    ANOMALY_UI_TAB_BAR_V1_NO_TAB_LIST_SCROLLING_BUTTONS = 1<<2,
+    ANOMALY_UI_TAB_BAR_V1_NO_TOOLTIP = 1<<3,
+    ANOMALY_UI_TAB_BAR_V1_FITTING_POLICY_RESIZE_DOWN = 1<<4,
+    ANOMALY_UI_TAB_BAR_V1_FITTING_POLICY_SCROLL = 1<<5
+} AnomalyUiTabBarFlagsV1;
+typedef enum AnomalyUiTabItemFlagsV1 {
+    ANOMALY_UI_TAB_ITEM_V1_NONE = 0,
+    ANOMALY_UI_TAB_ITEM_V1_UNSAVED_DOCUMENT = 1<<0,
+    ANOMALY_UI_TAB_ITEM_V1_SET_SELECTED = 1<<1,
+    ANOMALY_UI_TAB_ITEM_V1_NO_CLOSE_WITH_MIDDLE_MOUSE_BUTTON = 1<<2,
+    ANOMALY_UI_TAB_ITEM_V1_NO_PUSH_ID = 1<<3,
+    ANOMALY_UI_TAB_ITEM_V1_NO_TOOLTIP = 1<<4
+} AnomalyUiTabItemFlagsV1;
+```
+
+`begin_table` 的 `flags` 只接受 `AnomalyUiTableFlagsV1`。使用
+`ANOMALY_UI_TABLE_V1_SIZING_FIXED_FIT` 让列宽贴合内容，而不是把同一行的列拉伸到可用宽度。
+`same_line(0, spacing)` 可在相邻控件之间使用固定小间隔；`set_cursor_pos_x` 接受窗口本地 X 坐标。
+服务表尾部字段必须先用 `struct_size` 检查后再调用，以兼容尚未提供这些可选控件的 V1 宿主。
+
+`draw_screen_primitives` 是 append-only 的批量绘制入口。插件应先在自有缓冲区构造完整数组再调用一次；
+宿主在调用期间复制绘制数据，不保留数组指针。图元位于插件窗口下方，因此菜单会正常遮住世界标记。
+批量绘制比逐图元调用 AHUD `ProcessEvent` 更适合骨骼点、轨迹和大量调试标记；宿主或插件不支持
+该字段时，应保留已有绘制路径作为降级。
+
+需要在插件窗口关闭后继续显示的覆盖层应通过 `AnomalyPluginDescriptorV1::on_overlay` 提交，而不是依赖
+`on_draw`。`on_overlay` 不参与窗口显示状态，适合骨骼、轨迹和持续存在的调试标记。
+
+`set_next_item_width(width)` 仅影响下一个输入或滑块。负值表示从当前内容区域右边缘保留的距离，例如 `-52` 为右侧标签保留 52 像素，数值输入框占用其余宽度；原生加减按钮保持正常尺寸。调用前检查 `struct_size` 和函数指针。`begin_child` 的 `ANOMALY_UI_CHILD_V1_AUTO_RESIZE_Y`（`1u << 5u`）让面板按实际内容计算高度；不要用占满剩余高度的子面板冒充内容高度。
+
+### 前景叠加层与液态玻璃
+
+`overlay_*` 是追加的可选字段，调用前用 `struct_size` 确认覆盖到 `overlay_text`；宿主只在八个函数都存在时发布这段尾部。它们只在 `on_draw` 内有效，不需要打开窗口，绘制在主视口的前景层（所有窗口之上），坐标为视口像素，原点在左上角。角度单位为弧度，0 指向右方，顺时针为正（屏幕 Y 轴向下）。
+
+```c
+typedef struct AnomalyUiGlassStyleV1 {
+    uint32_t struct_size; uint32_t flags;   // AnomalyUiGlassFlagsV1: NONE=0, NO_SHADOW=1<<0, NO_RIM=1<<1（去掉高光描边与接触细线）
+    uint32_t variant;                        // AnomalyUiGlassVariantV1: REGULAR=0, CLEAR=1, MATERIAL=2, THUMB=3
+    uint32_t tint_rgba;                      // alpha 为 0 时使用变体自带色调
+    float rounding; float scale;             // scale <= 0 视为 1
+    float opacity;                           // 可选，0..1 整体淡入淡出；struct_size 不含此字段时为 1
+    float refraction_scale;                  // 可选，边缘折射倍数，<= 0 或缺省为 1，上限 4
+} AnomalyUiGlassStyleV1;
+```
+
+`overlay_glass` 绘制与管理界面相同的液态玻璃材质：先截取此刻已绘制的帧内容（包括之前的 overlay 调用），再画出带折射、高光边和阴影的圆角矩形；`rounding` 取短边一半即为圆或胶囊。玻璃渲染器不可用或开启"减少透明度"时绘制宿主的实色回退并返回 0。`THUMB` 是不模糊的放大水滴，应先画它再画其上的文字。每次调用都会截取一次背景，同一帧内应控制玻璃面的数量。
+
+`overlay_glass_ring_sector` 用同一种液态玻璃画环形扇区，返回值同 `overlay_glass`；跨度 `angle_end - angle_start` 必须大于 0 且小于 π，`style->rounding` 圆化四个角，上限为环宽的一半。它在 `overlay_text` 之后单独追加，调用前需要再用 `struct_size` 确认。
+
+`overlay_ring_sector` 填充 `inner_radius` 与 `outer_radius` 之间、`angle_start` 到 `angle_end` 的环形扇区；`overlay_text` / `overlay_measure_text` 的 `font_size` 为 0 时使用当前 Anomaly UI 字体大小。
+
+---
+
+## UI 资源服务（`ui_resources.h`）
+
+以下三个资源服务与 `anomaly.input` 让插件拥有 scoped 的窗口、字体、纹理与输入，无需接触 ImGui 类型。所有 handle 绑定 generation。
+
+### `anomaly.window`
+
+- **ID**：`"anomaly.window"` · **版本** 1 · **capability** `ui-window`
+
+```c
+typedef struct AnomalyWindowSpecV1 {
+    uint32_t struct_size; uint32_t flags;      // AnomalyWindowFlagsV1
+    AnomalyStringViewV1 id; AnomalyStringViewV1 title;
+    float initial_width, initial_height;
+    float minimum_width, minimum_height, maximum_width, maximum_height;
+    int32_t default_open; uint32_t reserved;
+} AnomalyWindowSpecV1;
+typedef struct AnomalyWindowStateV1 {
+    uint32_t struct_size; uint32_t flags;
+    float width, height; uint64_t ui_generation; int32_t open; uint32_t reserved;
+} AnomalyWindowStateV1;
+// AnomalyWindowFlagsV1: NONE=0, NO_SAVED_SETTINGS=1<<0, NO_COLLAPSE=1<<1
+
+typedef struct AnomalyWindowServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    AnomalyStatusV1 (ANOMALY_CALL *register_window)(void* user, const AnomalyWindowSpecV1*, AnomalyGenerationHandleV1*);
+    AnomalyStatusV1 (ANOMALY_CALL *release_window)(void* user, AnomalyGenerationHandleV1);
+    AnomalyStatusV1 (ANOMALY_CALL *set_open)(void* user, AnomalyGenerationHandleV1, int32_t open);
+    AnomalyStatusV1 (ANOMALY_CALL *toggle)(void* user, AnomalyGenerationHandleV1);
+    AnomalyStatusV1 (ANOMALY_CALL *state)(void* user, AnomalyGenerationHandleV1, AnomalyWindowStateV1*);
+    AnomalyStatusV1 (ANOMALY_CALL *begin)(void* user, AnomalyGenerationHandleV1, uint32_t flags, int32_t* visible);
+    AnomalyStatusV1 (ANOMALY_CALL *end)(void* user, AnomalyGenerationHandleV1);
+} AnomalyWindowServiceV1;
+```
+
+宿主管理窗口的持久布局与可见性；`begin` / `end` 在 `on_draw` 内包围窗口内容。插件一旦注册
+managed window，插件列表中的打开/隐藏状态就由同一 generation 下的窗口组统一驱动：关闭最后一个
+窗口会把插件 UI 标记为隐藏，从插件列表重新打开时会恢复 `default_open` 窗口；如果没有窗口声明
+`default_open`，宿主会恢复一个确定的回退窗口。隐藏窗口组会关闭全部窗口，重新打开已部分可见的
+窗口组不会额外打开原本关闭的辅助窗口。
+
+### `anomaly.font`
+
+- **ID**：`"anomaly.font"` · **版本** 1 · **capability** `ui-font`
+
+```c
+typedef struct AnomalyFontRequestV1 {
+    uint32_t struct_size; uint32_t flags; AnomalyStringViewV1 relative_path;
+    float size_pixels; uint32_t glyph_range;   // AnomalyGlyphRangeV1
+    uint32_t reserved;
+} AnomalyFontRequestV1;
+typedef struct AnomalyFontStateV1 {
+    uint32_t struct_size; uint32_t flags;       // AnomalyFontStateFlagsV1
+    float effective_size_pixels; float scale;
+    uint64_t device_generation; int32_t ready; uint32_t reserved;
+} AnomalyFontStateV1;
+// AnomalyGlyphRangeV1: DEFAULT=0, LATIN=1, CYRILLIC=2, JAPANESE=3, CHINESE_FULL=4,
+//                      PRIVATE_USE=5（U+E000..U+F8FF，Material Symbols 等图标字体）
+// AnomalyFontStateFlagsV1: NONE=0, QUEUED=1<<0, READY=1<<1, FAILED=1<<2, STALE_DEVICE=1<<3
+
+typedef struct AnomalyFontServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    AnomalyStatusV1 (ANOMALY_CALL *request)(void* user, const AnomalyFontRequestV1*, AnomalyGenerationHandleV1*);
+    AnomalyStatusV1 (ANOMALY_CALL *release)(void* user, AnomalyGenerationHandleV1);
+    AnomalyStatusV1 (ANOMALY_CALL *state)(void* user, AnomalyGenerationHandleV1, AnomalyFontStateV1*);
+    AnomalyStatusV1 (ANOMALY_CALL *push)(void* user, AnomalyGenerationHandleV1);
+    AnomalyStatusV1 (ANOMALY_CALL *pop)(void* user);
+} AnomalyFontServiceV1;
+```
+
+字体异步加载：`request` 返回句柄，`state` 报告 `QUEUED` / `READY` / `FAILED` / `STALE_DEVICE`；就绪后用 `push` / `pop` 在绘制中切换字体。资源未就绪时插件应降级绘制。
+
+### `anomaly.texture`
+
+- **ID**：`"anomaly.texture"` · **版本** 1 · **capability** `ui-texture`
+
+```c
+typedef struct AnomalyTextureRequestV1 {
+    uint32_t struct_size; uint32_t flags; AnomalyStringViewV1 relative_path;
+    AnomalyByteSpanV1 encoded_bytes; uint32_t format;   // AnomalyTextureFormatV1
+    uint32_t width; uint32_t height;                    // RGBA8 必填；编码格式解码时发现
+    uint32_t reserved;
+} AnomalyTextureRequestV1;
+typedef struct AnomalyTextureStateV1 {
+    uint32_t struct_size; uint32_t flags; uint32_t width, height;
+    uint64_t device_generation; uint64_t byte_size;
+} AnomalyTextureStateV1;
+// AnomalyTextureFormatV1: AUTO=0, RGBA8=1
+// AnomalyTextureStateFlagsV1: NONE=0, QUEUED=1<<0, READY=1<<1, FAILED=1<<2, STALE_DEVICE=1<<3
+
+typedef struct AnomalyTextureServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    AnomalyStatusV1 (ANOMALY_CALL *request)(void* user, const AnomalyTextureRequestV1*, AnomalyGenerationHandleV1*);
+    AnomalyStatusV1 (ANOMALY_CALL *release)(void* user, AnomalyGenerationHandleV1);
+    AnomalyStatusV1 (ANOMALY_CALL *state)(void* user, AnomalyGenerationHandleV1, AnomalyTextureStateV1*);
+    AnomalyStatusV1 (ANOMALY_CALL *draw)(void* user, AnomalyGenerationHandleV1, float width, float height, uint32_t tint_rgba);
+    // 可选追加：在主视口前景层 (x, y) 处绘制，坐标与 anomaly.ui 的 overlay_* 相同
+    AnomalyStatusV1 (ANOMALY_CALL *draw_overlay)(void* user, AnomalyGenerationHandleV1, float x, float y, float width, float height, uint32_t tint_rgba);
+} AnomalyTextureServiceV1;
+```
+
+可从相对路径或内嵌 `encoded_bytes` 请求纹理，`draw` 在当前窗口按尺寸与 tint 绘制。`draw_overlay` 是追加的可选字段（先用 `struct_size` 确认），不需要窗口，把纹理画在所有窗口之上，适合与 `overlay_*` 搭配的 HUD。
+
+### `anomaly.input`
+
+- **ID**：`"anomaly.input"` · **版本** 1 · **capability** `input`
+
+```c
+typedef struct AnomalyInputSnapshotV1 {
+    uint32_t struct_size; uint32_t modifiers;   // AnomalyInputModifiersV1
+    uint64_t sequence; uint64_t timestamp_milliseconds;
+    float mouse_x, mouse_y; int32_t mouse_wheel;
+    uint32_t capture_flags;                     // AnomalyInputCaptureFlagsV1
+    uint8_t keys[32]; uint8_t mouse_buttons; uint8_t reserved[7];
+} AnomalyInputSnapshotV1;
+typedef struct AnomalyHotkeySpecV1 {
+    uint32_t struct_size; uint32_t modifiers; uint32_t virtual_key;
+    uint32_t flags;                             // AnomalyHotkeyFlagsV1
+    AnomalyStringViewV1 id;
+} AnomalyHotkeySpecV1;
+typedef void (ANOMALY_CALL *AnomalyHotkeyCallbackV1)(void* user,
+    AnomalyGenerationHandleV1 hotkey, const AnomalyInputSnapshotV1* snapshot);
+
+typedef struct AnomalyInputServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    AnomalyStatusV1 (ANOMALY_CALL *snapshot)(void* user, AnomalyInputSnapshotV1*);
+    AnomalyStatusV1 (ANOMALY_CALL *was_pressed)(void* user, uint32_t virtual_key, int32_t* pressed);
+    AnomalyStatusV1 (ANOMALY_CALL *register_hotkey)(void* user, const AnomalyHotkeySpecV1*,
+        AnomalyHotkeyCallbackV1 callback, void* callback_user, AnomalyGenerationHandleV1*);
+    AnomalyStatusV1 (ANOMALY_CALL *release_hotkey)(void* user, AnomalyGenerationHandleV1);
+    AnomalyStatusV1 (ANOMALY_CALL *capture_state)(void* user, uint32_t* capture_flags);
+} AnomalyInputServiceV1;
+```
+
+标志枚举：
+
+```c
+// AnomalyInputModifiersV1: NONE=0, SHIFT=1<<0, CONTROL=1<<1, ALT=1<<2, SUPER=1<<3
+// AnomalyInputCaptureFlagsV1: NONE=0, MOUSE=1<<0, KEYBOARD=1<<1, TEXT=1<<2
+// AnomalyHotkeyFlagsV1: NONE=0, ALLOW_EXTRA_MODIFIERS=1<<0,
+//                       ALLOW_WHILE_UI_CAPTURED=1<<1, ONLY_WHILE_UI_CAPTURED=1<<2
+```
+
+`register_hotkey` 注册热键回调；默认修饰键精确匹配，可用标志放宽。`capture_state` 报告 UI 是否正在捕获鼠标 / 键盘 / 文本。
+
+完整用法见 [`examples/hello_ui`](../../examples/hello_ui/plugin.c)。

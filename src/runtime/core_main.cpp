@@ -1,0 +1,1907 @@
+#include "analyzer.hpp"
+#include "anomaly/core_api.hpp"
+#include "anomaly/adapter_service_registry.hpp"
+#include "anomaly/crash_reporter.hpp"
+#include "anomaly/embedded_artwork.hpp"
+#include "anomaly/diagnostic_pipe_service.hpp"
+#include "anomaly/i18n.hpp"
+#include "anomaly/nte_profile_runtime.hpp"
+#include "anomaly/nte_pak_signature_bypass.hpp"
+#include "anomaly/pak_mod_runtime.hpp"
+#include "anomaly/pak_mod_catalog.hpp"
+#include "anomaly/pak_mod_settings.hpp"
+#include "anomaly/platform_settings.hpp"
+#include "anomaly/repository_coordinator.hpp"
+#include "anomaly/runtime_session.hpp"
+#include "anomaly/sdk/version.h"
+#include "anomaly/service_graph.hpp"
+#include "anomaly/service_graph_diagnostics.hpp"
+#include "anomaly/structured_logger.hpp"
+#include "anomaly/telemetry.hpp"
+#include "anomaly/websocket_server.hpp"
+#include "config.hpp"
+#include "pipe_server.hpp"
+#include "platform_host.hpp"
+#include "plugin_manager.hpp"
+#include "build_provenance.hpp"
+#include "core_instance_claim.hpp"
+
+#include <Windows.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cwctype>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+namespace {
+
+
+[[nodiscard]] std::vector<std::uint8_t> LoadNteEscMenuLogoBytes() {
+    const auto& bytes = anomaly::artwork::kEscMenuLogo;
+    return {bytes.begin(), bytes.end()};
+}
+struct CoreContext {
+    std::filesystem::path runtime_root;
+    std::filesystem::path log_directory;
+    ue5mem::AnalyzerConfig config;
+    std::shared_ptr<const anomaly::Translator> translator;
+    anomaly::CoreMemoryServices memory_services;
+    std::unique_ptr<anomaly::CrashReporter> crash_reporter;
+    std::shared_ptr<anomaly::DiagnosticPipeService> diagnostic_pipe;
+    std::shared_ptr<anomaly::StructuredLogger> logger;
+    std::shared_ptr<anomaly::TelemetryClient> telemetry;
+    std::shared_ptr<anomaly::PlatformSettingsStore> settings;
+    std::shared_ptr<anomaly::WebSocketServer> websocket;
+    HMODULE game_module{};
+    std::shared_ptr<anomaly::NteProfileRuntime> profile_runtime;
+    mutable std::mutex pak_mods_mutex;
+    std::shared_ptr<anomaly::PakModRuntime> pak_mods;
+    std::shared_ptr<anomaly::Ue5PakBinding> pak_binding;
+    bool pak_settings_valid{};
+    bool pak_compatibility_mode{};
+    bool pak_startup_enabled{true};
+    std::shared_ptr<anomaly::RepositoryCoordinator> repository;
+    std::string repository_diagnostics{
+        "{\"schemaVersion\":1,\"state\":\"unavailable\",\"reason\":\"not-started\"}"};
+    mutable std::mutex plugins_mutex;
+    std::shared_ptr<ue5mem::PluginManager> plugins;
+    std::weak_ptr<anomaly::RuntimeSession> session;
+    std::string plugin_stop_diagnostics{"[]"};
+    std::string profile_diagnostics{"null"};
+    std::weak_ptr<anomaly::ServiceGraph> services;
+};
+
+std::string EscapeJson(std::string_view value);
+
+struct RuntimeControl {
+    std::mutex mutex;
+    anomaly::CoreInstanceClaim process_claim;
+    std::optional<bool> pak_compatibility_mode;
+    // Cache routing and the signature gate remain patched across sessions in this process.
+    // Keep the original validated binding with them; rescanning patched prologues cannot recover it.
+    std::shared_ptr<anomaly::Ue5PakBinding> pak_binding = std::make_shared<anomaly::Ue5PakBinding>();
+    std::shared_ptr<anomaly::RuntimeSession> session;
+    anomaly::RuntimeSessionSnapshot last_snapshot;
+};
+
+HMODULE g_core_module{};
+std::unique_ptr<RuntimeControl> g_runtime_control = std::make_unique<RuntimeControl>();
+// Foreign host payloads (upscaler/frame-gen hosts) loaded before the game's own
+// graphics initialization. They are never unloaded: their hooks must outlive the
+// runtime's teardown, and process exit releases the modules.
+std::vector<HMODULE> g_host_payloads;
+
+DWORD CurrentExceptionError() noexcept {
+    try {
+        throw;
+    } catch (const std::bad_alloc&) {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    } catch (const std::filesystem::filesystem_error&) {
+        return ERROR_PATH_NOT_FOUND;
+    } catch (const std::system_error&) {
+        return ERROR_GEN_FAILURE;
+    } catch (...) {
+        return ERROR_UNHANDLED_EXCEPTION;
+    }
+}
+
+std::filesystem::path ModulePath(HMODULE module) {
+    if (module == nullptr) return {};
+    std::wstring path(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return {};
+    path.resize(length);
+    return path;
+}
+
+std::filesystem::path ModuleDirectory(HMODULE module) {
+    return ModulePath(module).parent_path();
+}
+
+void RuntimeLog(
+    const std::shared_ptr<CoreContext>& context,
+    anomaly::LogLevel level,
+    std::string event_id,
+    std::string message,
+    anomaly::LogThreadDomain thread_domain = anomaly::LogThreadDomain::Lifecycle) {
+    std::ofstream(context->log_directory / L"anomaly-runtime.log", std::ios::app)
+        << "pid=" << GetCurrentProcessId() << ' ' << message << '\n';
+    if (context->logger == nullptr) return;
+    anomaly::LogDetails details;
+    details.thread_domain = thread_domain;
+    details.event_id = std::move(event_id);
+    static_cast<void>(context->logger->Log(
+        level, "runtime", std::move(message), std::move(details)));
+}
+
+std::wstring Utf8ToWidePath(std::string_view value) {
+    if (value.empty()) return {};
+    const int size = MultiByteToWideChar(
+        CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (size <= 0) return {};
+    std::wstring wide(static_cast<std::size_t>(size), L'\0');
+    const int written = MultiByteToWideChar(
+        CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), size);
+    if (written <= 0) return {};
+    wide.resize(static_cast<std::size_t>(written));
+    return wide;
+}
+
+std::filesystem::path ResolveHostPath(
+    const std::filesystem::path& runtime_root, std::wstring_view raw) {
+    std::wstring expanded(32768, L'\0');
+    const DWORD length = ExpandEnvironmentStringsW(
+        std::wstring(raw).c_str(), expanded.data(), static_cast<DWORD>(expanded.size()));
+    if (length == 0 || length > expanded.size()) {
+        expanded.assign(raw);
+    } else {
+        expanded.resize(length - 1);
+    }
+    if (expanded.empty()) return {};
+    const std::filesystem::path candidate(expanded);
+    return candidate.is_absolute() ? candidate : runtime_root / candidate;
+}
+
+std::vector<std::filesystem::path> HostPayloadCandidates(
+    const std::shared_ptr<CoreContext>& context) {
+    std::vector<std::filesystem::path> candidates;
+    const auto config_path = context->runtime_root / L"config" / L"hosts.json";
+    std::error_code error;
+
+    if (!std::filesystem::is_regular_file(config_path, error)) {
+        const auto legacy = context->runtime_root / L"config" / L"hosts.txt";
+        if (std::filesystem::is_regular_file(legacy, error)) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "hosts.config.legacy_ignored",
+                "hosts=legacy-list-ignored path=" + legacy.string() +
+                    " expected=" + config_path.string());
+        }
+        return candidates;
+    }
+
+    std::ifstream input(config_path, std::ios::binary);
+    if (!input) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "hosts.config.unreadable",
+            "hosts=unreadable path=" + config_path.string());
+        return candidates;
+    }
+    std::string text(
+        (std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+
+    try {
+        const auto document = nlohmann::json::parse(text);
+        if (!document.is_object()) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "hosts.config.invalid",
+                "hosts=invalid path=" + config_path.string() + " reason=root-not-object");
+            return candidates;
+        }
+        const auto version = document.find("schemaVersion");
+        if (version != document.end() &&
+            (!version->is_number_integer() || version->get<int>() != 1)) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "hosts.config.invalid",
+                "hosts=invalid path=" + config_path.string() + " reason=unsupported-schema");
+            return candidates;
+        }
+        const auto entries = document.find("hosts");
+        if (entries == document.end() || !entries->is_array()) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "hosts.config.invalid",
+                "hosts=invalid path=" + config_path.string() + " reason=hosts-not-array");
+            return candidates;
+        }
+        for (const auto& entry : *entries) {
+            std::string value;
+            bool enabled = true;
+            if (entry.is_string()) {
+                value = entry.get<std::string>();
+            } else if (entry.is_object()) {
+                const auto path = entry.find("path");
+                if (path != entry.end() && path->is_string()) value = path->get<std::string>();
+                const auto flag = entry.find("enabled");
+                if (flag != entry.end() && flag->is_boolean()) enabled = flag->get<bool>();
+            }
+            if (value.empty() || !enabled) continue;
+            const auto resolved = ResolveHostPath(context->runtime_root, Utf8ToWidePath(value));
+            if (!resolved.empty()) candidates.push_back(resolved);
+        }
+    } catch (const std::exception& exception) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "hosts.config.invalid",
+            "hosts=invalid path=" + config_path.string() + " reason=" + exception.what());
+    }
+    return candidates;
+}
+
+// Loads upscaler/frame-generation hosts listed in config/hosts.json. Runs on the
+// bootstrap thread, before the game creates any device, so a host still wins the
+// hook race and nothing has to be written into the game directory.
+void LoadHostPayloads(const std::shared_ptr<CoreContext>& context) {
+    // Missing or empty configuration: one attribute query and return, no parse and
+    // no log traffic, so the proxy path costs nothing when nothing is configured.
+    const auto candidates = HostPayloadCandidates(context);
+    if (candidates.empty()) return;
+
+    // Hot injection happens after the game already created its device and
+    // swapchain; a graphics host cannot hook retroactively, so it is only loaded
+    // for the process-start bootstrap (the dwmapi proxy).
+    AnomalyBootstrapType bootstrap_type = ANOMALY_BOOTSTRAP_TYPE_UNKNOWN;
+    if (const auto session = context->session.lock()) {
+        bootstrap_type = session->StartContext().bootstrap_type;
+    }
+    if (bootstrap_type != ANOMALY_BOOTSTRAP_TYPE_DWMAPI_PROXY) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Info, "hosts.payload.skipped",
+            "hosts=skipped reason=bootstrap-type type=" +
+                std::to_string(static_cast<unsigned>(bootstrap_type)));
+        return;
+    }
+
+    std::vector<std::wstring> seen;
+    for (const auto& candidate : candidates) {
+        std::error_code error;
+        if (!std::filesystem::is_regular_file(candidate, error)) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "hosts.payload.missing",
+                "hosts=missing path=" + candidate.string());
+            continue;
+        }
+        const auto absolute = std::filesystem::absolute(candidate, error);
+        auto key = (error ? candidate : absolute).lexically_normal().wstring();
+        std::transform(key.begin(), key.end(), key.begin(), [](wchar_t value) {
+            return static_cast<wchar_t>(std::towlower(value));
+        });
+        if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+        seen.push_back(key);
+
+        const HMODULE module = LoadLibraryExW(
+            (error ? candidate : absolute).c_str(), nullptr,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        if (module == nullptr) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "hosts.payload.failed",
+                "hosts=failed path=" + candidate.string() +
+                    " error=" + std::to_string(GetLastError()));
+            continue;
+        }
+
+        // Pin the host for the process lifetime. A host installs hooks that other
+        // modules keep calling into; any FreeLibrary/LdrUnloadDll on it would leave
+        // those trampolines pointing at unmapped pages and the game dies with an
+        // access violation inside "<host>.dll_unloaded".
+        HMODULE pinned = module;
+        const BOOL pin_result = GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            reinterpret_cast<LPCWSTR>(module), &pinned);
+        if (pin_result == FALSE) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "hosts.payload.unpinned",
+                "hosts=unpinned path=" + candidate.string() +
+                    " error=" + std::to_string(GetLastError()));
+        }
+
+        g_host_payloads.push_back(module);
+        RuntimeLog(
+            context, anomaly::LogLevel::Info, "hosts.payload.loaded",
+            "hosts=loaded path=" + candidate.string() +
+                " base=" + std::to_string(reinterpret_cast<std::uintptr_t>(module)) +
+                " pinned=" + (pin_result != FALSE ? "true" : "false"));
+    }
+}
+
+std::shared_ptr<ue5mem::PluginManager> PluginHostSnapshot(
+    const std::shared_ptr<CoreContext>& context) {
+    std::scoped_lock lock(context->plugins_mutex);
+    return context->plugins;
+}
+
+void PublishPluginHost(
+    const std::shared_ptr<CoreContext>& context,
+    std::shared_ptr<ue5mem::PluginManager> plugins) {
+    std::scoped_lock lock(context->plugins_mutex);
+    context->plugins = std::move(plugins);
+}
+
+std::shared_ptr<ue5mem::PluginManager> TakePluginHost(
+    const std::shared_ptr<CoreContext>& context) {
+    std::scoped_lock lock(context->plugins_mutex);
+    return std::exchange(context->plugins, {});
+}
+
+std::shared_ptr<anomaly::PakModRuntime> PakModRuntimeSnapshot(
+    const std::shared_ptr<CoreContext>& context) {
+    std::scoped_lock lock(context->pak_mods_mutex);
+    return context->pak_mods;
+}
+
+void PublishPakModRuntime(
+    const std::shared_ptr<CoreContext>& context,
+    std::shared_ptr<anomaly::PakModRuntime> runtime) {
+    std::scoped_lock lock(context->pak_mods_mutex);
+    context->pak_mods = std::move(runtime);
+}
+
+std::shared_ptr<anomaly::PakModRuntime> TakePakModRuntime(
+    const std::shared_ptr<CoreContext>& context) {
+    std::scoped_lock lock(context->pak_mods_mutex);
+    return std::exchange(context->pak_mods, {});
+}
+
+bool WriteDiagnosticsSummary(
+    const std::shared_ptr<CoreContext>& context,
+    std::string_view runtime_state) noexcept {
+    try {
+        const std::filesystem::path state_directory = context->runtime_root / L"state";
+        const std::filesystem::path destination = state_directory / L"diagnostics-summary.json";
+        const std::filesystem::path temporary = state_directory /
+            (L"diagnostics-summary.json.tmp-" + std::to_wstring(GetCurrentProcessId()));
+
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) return false;
+        const std::string repository = context->repository == nullptr
+            ? context->repository_diagnostics
+            : anomaly::SerializeRepositoryCoordinatorSnapshotJson(
+                  context->repository->Snapshot());
+        const std::string pak_mods = [&context] {
+            const auto runtime = PakModRuntimeSnapshot(context);
+            return runtime == nullptr ? std::string{"null"} : runtime->StatusJson();
+        }();
+        output << "{\"schemaVersion\":1,\"runtimeVersion\":\""
+               << ANOMALY_SDK_VERSION_STRING << "\",\"runtimeState\":\""
+               << runtime_state << "\",\"profile\":"
+               << context->profile_diagnostics << ",\"pakMods\":" << pak_mods
+               << ",\"repository\":" << repository
+               << ",\"plugins\":"
+               << context->plugin_stop_diagnostics << "}\n";
+        output.flush();
+        if (!output) {
+            output.close();
+            static_cast<void>(DeleteFileW(temporary.c_str()));
+            return false;
+        }
+        output.close();
+        if (!output || MoveFileExW(
+                temporary.c_str(), destination.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == FALSE) {
+            static_cast<void>(DeleteFileW(temporary.c_str()));
+            return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+void LogDiagnosticsSummaryFailure(
+    const std::shared_ptr<CoreContext>& context,
+    anomaly::LogThreadDomain thread_domain = anomaly::LogThreadDomain::Lifecycle) {
+    RuntimeLog(
+        context, anomaly::LogLevel::Warning,
+        "diagnostics.summary.write_failed", "diagnostics_summary=unavailable",
+        thread_domain);
+}
+
+DWORD InitializeCore(const std::shared_ptr<CoreContext>& context, std::stop_token stop_token) {
+    if (stop_token.stop_requested()) return ERROR_CANCELLED;
+
+    std::error_code error;
+    std::filesystem::create_directories(context->runtime_root / L"plugins", error);
+    if (error) return ERROR_CANNOT_MAKE;
+    std::filesystem::create_directories(context->log_directory, error);
+    if (error) return ERROR_CANNOT_MAKE;
+    std::filesystem::create_directories(context->runtime_root / L"state", error);
+    if (error) return ERROR_CANNOT_MAKE;
+    std::filesystem::create_directories(context->runtime_root / L"config", error);
+    if (error) return ERROR_CANNOT_MAKE;
+
+    context->settings = std::make_shared<anomaly::PlatformSettingsStore>(context->runtime_root);
+    static_cast<void>(context->settings->Start());
+    const auto platform_settings = context->settings->Snapshot();
+
+    std::string logger_failure{"startup exception"};
+    try {
+        anomaly::StructuredLoggerOptions logger_options;
+        if (platform_settings.ready) {
+            logger_options.ring_capacity = platform_settings.values.diagnostics_ring_capacity;
+            logger_options.minimum_level = static_cast<anomaly::LogLevel>(
+                platform_settings.values.diagnostics_log_level);
+        }
+        // Rotation bounds the files this session writes; retention deletes what
+        // earlier sessions left behind, so the log directory cannot grow forever.
+        logger_options.max_file_size_bytes = 8U * 1024U * 1024U;
+        logger_options.retained_archive_count = 3;
+        logger_options.retention_directories = {
+            context->log_directory, context->runtime_root};
+        logger_options.retention.max_age = std::chrono::hours{24 * 3};
+        logger_options.retention.max_total_bytes = 48U * 1024U * 1024U;
+        auto logger = std::make_shared<anomaly::StructuredLogger>(std::move(logger_options));
+        if (logger->Start(context->log_directory / L"anomaly-runtime.jsonl")) {
+            context->logger = std::move(logger);
+        } else if (const auto failure = logger->LastError()) {
+            logger_failure = "operation=" +
+                std::to_string(static_cast<unsigned>(failure->operation)) +
+                " code=" + std::to_string(failure->code.value()) +
+                " message=" + failure->message;
+        }
+    } catch (const std::exception& exception) {
+        logger_failure = exception.what();
+    } catch (...) {
+    }
+    if (context->logger == nullptr) {
+        std::ofstream(context->log_directory / L"anomaly-runtime.log", std::ios::app)
+            << "pid=" << GetCurrentProcessId() << " structured_logger=disabled error="
+            << logger_failure << '\n';
+    }
+
+    // Hosts go first: an upscaler host must install its swapchain/device hooks
+    // before Unreal initializes graphics, and it must see an unpatched process.
+    LoadHostPayloads(context);
+
+    auto crash_reporter = std::make_unique<anomaly::CrashReporter>(
+        anomaly::CrashReporterOptions{
+            context->runtime_root / L"crashes", ANOMALY_SDK_VERSION_STRING});
+    std::string crash_error;
+    if (!crash_reporter->Install(&crash_error)) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "crash_reporter.disabled",
+            "crash_reporter=disabled error=" + crash_error);
+    } else {
+        context->crash_reporter = std::move(crash_reporter);
+    }
+
+    context->config = ue5mem::AnalyzerConfig::Load(context->runtime_root / L"anomaly.ini");
+    for (const auto& diagnostic : context->config.diagnostics) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "config.invalid_value",
+            "config_key=" + diagnostic.key + " reason=" + diagnostic.message);
+    }
+    const auto locale = anomaly::ResolveUserLocale(context->config.platform_language);
+    if (locale.system_query_failed) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "i18n.system_locale_unavailable",
+            "requested_locale=auto fallback_locale=en-US");
+    }
+    auto translator = anomaly::LoadHostCatalog(
+        locale.locale, context->runtime_root / L"locales" / L"host");
+    for (const auto& diagnostic : translator.diagnostics) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "i18n.host_catalog_invalid",
+            "catalog_path=" + diagnostic.path + " reason=" + diagnostic.message);
+    }
+    context->translator = std::move(translator.translator);
+    if (context->config.telemetry_enabled) {
+        try {
+            anomaly::TelemetryOptions options;
+            options.language = anomaly::LocaleName(context->translator->locale());
+            if (const auto session = context->session.lock()) {
+                const auto type = session->StartContext().bootstrap_type;
+                if (type == ANOMALY_BOOTSTRAP_TYPE_DWMAPI_PROXY) options.mode = "proxy";
+                else if (type == ANOMALY_BOOTSTRAP_TYPE_EXTERNAL) options.mode = "inject";
+            }
+            context->telemetry = std::make_shared<anomaly::TelemetryClient>(std::move(options));
+        } catch (...) {} // Optional telemetry must never fail runtime startup.
+    }
+    context->profile_diagnostics = "null";
+    if (!WriteDiagnosticsSummary(context, "starting")) {
+        LogDiagnosticsSummaryFailure(context);
+    }
+    const auto session = context->session.lock();
+    RuntimeLog(
+        context, anomaly::LogLevel::Info, "runtime.start",
+        "runtime=start version=" ANOMALY_SDK_VERSION_STRING +
+            std::string(" core_image=") +
+            std::to_string(reinterpret_cast<std::uintptr_t>(g_core_module)) +
+            " bootstrap_type=" + std::to_string(session
+                ? static_cast<unsigned>(session->StartContext().bootstrap_type)
+                : static_cast<unsigned>(ANOMALY_BOOTSTRAP_TYPE_UNKNOWN)));
+    return stop_token.stop_requested() ? ERROR_CANCELLED : ERROR_SUCCESS;
+}
+
+DWORD PrepareRepository(
+    const std::shared_ptr<CoreContext>& context, std::stop_token stop_token) {
+    if (stop_token.stop_requested()) return ERROR_CANCELLED;
+    anomaly::RepositoryCoordinatorOptions options;
+    options.runtime_root = context->runtime_root;
+    options.plugin_directory = context->config.plugin_directory;
+    options.game = context->config.game_id;
+    options.api_major = ANOMALY_PLUGIN_API_V1_MAJOR;
+    if (context->settings != nullptr) {
+        const auto settings = context->settings->Snapshot();
+        if (settings.ready) options.automatic_refresh = settings.values.updates_automatic_check;
+    }
+    auto repository = std::make_shared<anomaly::RepositoryCoordinator>(std::move(options));
+    const bool started = repository->Start();
+    const auto snapshot = repository->Snapshot();
+    context->repository = std::move(repository);
+    context->repository_diagnostics =
+        anomaly::SerializeRepositoryCoordinatorSnapshotJson(snapshot);
+    RuntimeLog(
+        context,
+        started ? anomaly::LogLevel::Info : anomaly::LogLevel::Warning,
+        "repository.coordinator",
+        "repository=" + std::string(anomaly::RepositoryCoordinatorStateName(snapshot.state)) +
+            " sources=" + std::to_string(snapshot.configured_sources) +
+            " plugins=" + std::to_string(snapshot.plugins.size()) +
+            " reason=" + snapshot.reason,
+        anomaly::LogThreadDomain::Worker);
+    if (!started) return ERROR_GEN_FAILURE;
+    return stop_token.stop_requested() ? ERROR_CANCELLED : ERROR_SUCCESS;
+}
+
+void StopRepository(const std::shared_ptr<CoreContext>& context) noexcept {
+    auto repository = std::exchange(context->repository, {});
+    if (repository != nullptr) {
+        context->repository_diagnostics =
+            anomaly::SerializeRepositoryCoordinatorSnapshotJson(repository->Snapshot());
+        repository->Stop();
+    }
+}
+
+DWORD PrepareWebSocketService(
+    const std::shared_ptr<CoreContext>& context, std::stop_token stop_token) {
+    if (stop_token.stop_requested()) return ERROR_CANCELLED;
+    auto server = std::make_shared<anomaly::WebSocketServer>();
+    if (!server->Start()) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "websocket.unavailable",
+            "websocket=unavailable reason=listen-failed");
+        return ERROR_SUCCESS;
+    }
+    const AnomalyWebSocketServiceV1* const service = server->Service();
+    if (service == nullptr || !anomaly::ProcessAdapterServices().Publish(
+            ANOMALY_WEBSOCKET_SERVICE_V1_ID,
+            ANOMALY_WEBSOCKET_SERVICE_V1_VERSION,
+            service,
+            {}, std::static_pointer_cast<const void>(server))) {
+        server->Stop();
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "websocket.unavailable",
+            "websocket=unavailable reason=service-publish-failed");
+        return ERROR_SUCCESS;
+    }
+    context->websocket = std::move(server);
+    RuntimeLog(
+        context, anomaly::LogLevel::Info, "websocket.ready",
+        "websocket=ready address=127.0.0.1:14514");
+    return stop_token.stop_requested() ? ERROR_CANCELLED : ERROR_SUCCESS;
+}
+
+void StopWebSocketService(const std::shared_ptr<CoreContext>& context) noexcept {
+    auto server = std::exchange(context->websocket, {});
+    if (server == nullptr) return;
+    static_cast<void>(anomaly::ProcessAdapterServices().Revoke(
+        ANOMALY_WEBSOCKET_SERVICE_V1_ID, server->Service()));
+    server->Stop();
+}
+
+DWORD PrepareDiagnosticPipe(
+    const std::shared_ptr<CoreContext>& context,
+    const std::weak_ptr<anomaly::ServiceGraph>& services,
+    std::stop_token stop_token) {
+    if (stop_token.stop_requested()) return ERROR_CANCELLED;
+    const auto pipe_name =
+        ue5mem::BuildPipeName(context->config.pipe_prefix, GetCurrentProcessId());
+    auto analyzer = std::make_shared<const ue5mem::Analyzer>(
+        context->runtime_root,
+        context->config,
+        [context, services] {
+            const auto graph = services.lock();
+            std::string runtime = graph == nullptr
+                ? std::string("null")
+                : anomaly::SerializeServiceGraphSnapshotJson(graph->Snapshot());
+            std::string plugin_diagnostics{"{\"schemaVersion\":1,\"plugins\":[]}"};
+            try {
+                if (const auto plugins = PluginHostSnapshot(context)) {
+                    plugin_diagnostics = plugins->DiagnosticsJson();
+                }
+            } catch (...) {
+                plugin_diagnostics = "{\"schemaVersion\":1,\"plugins\":[]}";
+            }
+            if (runtime.empty() || runtime.back() != '}') return runtime;
+            runtime.pop_back();
+            const std::string repository = context->repository == nullptr
+                ? context->repository_diagnostics
+                : anomaly::SerializeRepositoryCoordinatorSnapshotJson(
+                      context->repository->Snapshot());
+            runtime += ",\"repository\":" + repository +
+                ",\"plugin_diagnostics\":" + plugin_diagnostics + '}';
+            return runtime;
+        },
+        context->memory_services,
+        [context] {
+            return context->profile_runtime == nullptr
+                ? std::string("{\"ok\":true,\"state\":\"no-profile\",\"symbols\":[],\"features\":[]}")
+                : context->profile_runtime->DiagnosticsJson();
+        },
+        [weak = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)](
+            std::string_view arguments) {
+            const auto runtime = weak.lock();
+            return runtime == nullptr
+                ? std::string{"{\"ok\":false,\"error\":\"UE reflection queries are unavailable\"}"}
+                : runtime->ExecuteReflectionQuery(arguments);
+        },
+        [context](std::string_view arguments) {
+            const auto runtime = PakModRuntimeSnapshot(context);
+            return runtime == nullptr
+                ? std::string{"{\"ok\":false,\"error\":\"pak mod runtime is unavailable\"}"}
+                : runtime->Execute(arguments);
+        });
+    auto pipe = std::make_shared<anomaly::DiagnosticPipeService>(
+        anomaly::PipeServiceOptions{std::move(analyzer), pipe_name});
+    const DWORD result = pipe->Prepare();
+    if (result != ERROR_SUCCESS) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Error, "diagnostics.pipe_prepare_failed",
+            "pipe_prepare=failed code=" + std::to_string(result));
+        return ERROR_SUCCESS;
+    }
+    if (stop_token.stop_requested()) {
+        pipe->Stop();
+        return ERROR_CANCELLED;
+    }
+    std::string pipe_message{"pipe="};
+    for (const auto character : pipe_name) {
+        pipe_message.push_back(static_cast<char>(character));
+    }
+    RuntimeLog(
+        context, anomaly::LogLevel::Info, "diagnostics.pipe_ready",
+        std::move(pipe_message));
+    context->diagnostic_pipe = std::move(pipe);
+    return ERROR_SUCCESS;
+}
+
+DWORD RunDiagnosticPipe(
+    const std::shared_ptr<CoreContext>& context, std::stop_token stop_token) {
+    const auto pipe = context->diagnostic_pipe;
+    if (pipe == nullptr) return ERROR_SUCCESS;
+    const DWORD result = pipe->Run(stop_token);
+    if (result != ERROR_SUCCESS && !stop_token.stop_requested()) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Error, "diagnostics.pipe_run_failed",
+            "pipe_run=failed code=" + std::to_string(result),
+            anomaly::LogThreadDomain::Worker);
+        return ERROR_SUCCESS;
+    }
+    return result;
+}
+
+void StopDiagnosticPipe(const std::shared_ptr<CoreContext>& context) noexcept {
+    if (context->diagnostic_pipe != nullptr) context->diagnostic_pipe->Stop();
+}
+
+DWORD PrepareNteProfile(
+    const std::shared_ptr<CoreContext>& context,
+    std::stop_token stop_token) {
+    if (stop_token.stop_requested()) return ERROR_CANCELLED;
+    anomaly::NteProfileRuntimeOptions options;
+    options.runtime_root = context->runtime_root;
+    options.profile_directory = context->config.profile_directory;
+    options.local_profile_directory = context->config.local_profile_directory;
+    options.managed_profile_directory = context->config.managed_profile_directory;
+    options.game_id = context->config.game_id;
+    options.game_module = context->game_module;
+    options.memory_services = context->memory_services;
+    options.section_readiness_timeout = std::chrono::seconds(20);
+    options.snapshot_sampling.player_tick_interval = static_cast<std::uint32_t>((std::min)(
+        context->config.player_snapshot_tick_interval,
+        static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())));
+    options.snapshot_sampling.entity_tick_interval = static_cast<std::uint32_t>((std::min)(
+        context->config.entity_snapshot_tick_interval,
+        static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())));
+    options.snapshot_sampling.actor_tick_interval = static_cast<std::uint32_t>((std::min)(
+        context->config.actor_snapshot_tick_interval,
+        static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())));
+    auto runtime = std::make_shared<anomaly::NteProfileRuntime>(std::move(options));
+    if (!runtime->Start(stop_token)) {
+        return stop_token.stop_requested() ? ERROR_CANCELLED : ERROR_GEN_FAILURE;
+    }
+    if (stop_token.stop_requested()) {
+        runtime->Stop();
+        return ERROR_CANCELLED;
+    }
+    context->profile_diagnostics = runtime->DiagnosticsJson();
+    if (!WriteDiagnosticsSummary(context, "running")) {
+        LogDiagnosticsSummaryFailure(context);
+    }
+    RuntimeLog(
+        context, anomaly::LogLevel::Info, "profile.ready",
+        "profile=" + context->profile_diagnostics);
+    context->profile_runtime = std::move(runtime);
+    return ERROR_SUCCESS;
+}
+
+void StopNteProfile(const std::shared_ptr<CoreContext>& context) noexcept {
+    bool stopped{};
+    if (context->profile_runtime != nullptr) {
+        const auto runtime = context->profile_runtime;
+        stopped = runtime->Stop(std::chrono::seconds(5));
+        context->profile_diagnostics = runtime->DiagnosticsJson();
+        if (!stopped) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "profile.stop_deferred",
+                "profile=game_tick_generation_quarantined");
+        }
+    }
+    context->profile_runtime.reset();
+}
+
+std::string NarrowUtf8(const std::wstring& text) {
+    if (text.empty()) return {};
+    const int length = WideCharToMultiByte(
+        CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (length <= 0) return {};
+    std::string utf8(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), utf8.data(), length,
+        nullptr, nullptr);
+    return utf8;
+}
+
+// The pak platform file owns the game's Paks directory; the launcher and this runtime have to
+// agree on it, so it is derived from the game module instead of the working directory.
+std::filesystem::path ResolvePaksDirectory(HMODULE game_module) {
+    const std::filesystem::path module = ModulePath(game_module);
+    if (module.empty()) return {};
+    const std::filesystem::path content = module.parent_path().parent_path().parent_path();
+    std::error_code error;
+    const std::array<std::filesystem::path, 2> candidates{
+        content / L"Content" / L"Paks",
+        module.parent_path().parent_path() / L"Content" / L"Paks"};
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::is_directory(candidate, error)) return candidate;
+    }
+    return candidates[0];
+}
+
+DWORD PreparePakMods(
+    const std::shared_ptr<CoreContext>& context,
+    std::stop_token stop_token) {
+    if (stop_token.stop_requested()) return ERROR_CANCELLED;
+    try {
+        if (!context->pak_settings_valid) throw std::runtime_error("invalid pak startup settings");
+        anomaly::PakModRuntimeOptions options;
+        options.runtime_root = context->runtime_root;
+        std::array<wchar_t, 32768> executable{};
+        if (GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()))) {
+            const auto installed = std::filesystem::path(executable.data()).parent_path() / L"Anomaly" / L"config" / L"pak-mods.json";
+            options.settings_paths.push_back(installed);
+        }
+        options.compatibility_mode = context->pak_compatibility_mode;
+        options.startup_enabled = context->pak_startup_enabled;
+        options.mod_directory = ResolvePaksDirectory(context->game_module) / L"~mods";
+        options.engine_base_directory = ModuleDirectory(context->game_module);
+        options.log = [context](
+            const anomaly::LogLevel level, const std::string_view message) {
+            RuntimeLog(
+                context, level, "pak.mods", std::string(message),
+                anomaly::LogThreadDomain::Worker);
+        };
+        // Retry while Profile startup is incomplete, then pin the validated ABI for this session.
+        // An owned FPakFile must be released using the same binding even during Profile shutdown.
+        const std::weak_ptr<anomaly::NteProfileRuntime> weak_profile = context->profile_runtime;
+        const auto memory_services = context->memory_services;
+        const auto pinned_binding = context->pak_binding;
+        const auto bind = [weak_profile, memory_services, pinned_binding](anomaly::Ue5PakBinding& binding) {
+            // PakModRuntime serializes all binding consumers through its operation mutex.
+            if (pinned_binding->Complete()) {
+                binding = *pinned_binding;
+                return true;
+            }
+            const auto runtime = weak_profile.lock();
+            if (runtime == nullptr) return false;
+            const auto resolution = runtime->Resolution();
+            if (!resolution || !resolution->FeatureAvailable(anomaly::kUe5PakFeature)) return false;
+            const auto evidence = runtime->Evidence();
+            if (!evidence.profile) return false;
+            std::string error;
+            // The memory view lets the binding reject a look-alike prologue before anything is
+            // called: a wrong address here is a crash inside the engine, not a failed mount.
+            const anomaly::LiveSymbolMemory memory(memory_services);
+            if (!anomaly::BindUe5Pak(*evidence.profile, *resolution, binding, error, &memory)) return false;
+            *pinned_binding = binding;
+            return true;
+        };
+        options.resolve_pak_platform_file = [bind, memory_services]() -> std::uintptr_t {
+            anomaly::Ue5PakBinding binding{};
+            if (!bind(binding)) return 0;
+            const anomaly::LiveSymbolMemory memory(memory_services);
+            return anomaly::FindUe5PakPlatformFile(binding, memory);
+        };
+        const auto compatibility = std::make_shared<anomaly::Ue5ModCompatibility>();
+        const auto compatibility_directory = context->runtime_root / L"cache" / L"mod-compatibility";
+        const auto path_key = [](const std::filesystem::path& path) {
+            auto key = std::filesystem::absolute(path).lexically_normal().generic_wstring();
+            std::transform(key.begin(), key.end(), key.begin(),
+                [](wchar_t value) { return static_cast<wchar_t>(std::towlower(value)); });
+            return key;
+        };
+        auto compatibility_mod_root = path_key(options.mod_directory);
+        if (!compatibility_mod_root.ends_with(L'/')) compatibility_mod_root += L'/';
+        auto compatibility_cache_root = path_key(compatibility_directory);
+        if (!compatibility_cache_root.ends_with(L'/')) compatibility_cache_root += L'/';
+        const auto compatibility_base = options.engine_base_directory;
+        options.prepare_compatibility = [bind, memory_services, compatibility, compatibility_directory,
+            compatibility_mod_root, compatibility_cache_root, compatibility_base, path_key](const std::filesystem::path& candidate) {
+            anomaly::Ue5PakBinding binding{};
+            if (!bind(binding)) throw std::runtime_error("pak compatibility binding unavailable");
+            const anomaly::LiveSymbolMemory memory(memory_services);
+            const auto engine = anomaly::FindUe5PakPlatformFile(binding, memory);
+            const auto mounted = anomaly::MountedUe5PakFiles(binding, engine, memory);
+            if (!mounted) throw std::runtime_error("mounted game package baseline unavailable");
+            const auto candidate_key = path_key(candidate);
+            std::vector<std::filesystem::path> official;
+            for (const auto& item : *mounted) {
+                auto path = std::filesystem::path(item.filename);
+                if (path.is_relative()) path = compatibility_base / path;
+                path = std::filesystem::absolute(path).lexically_normal();
+                // Windows spelling differences must not let a mounted mod become its own baseline.
+                const auto key = path_key(path);
+                if (key.starts_with(compatibility_mod_root) || key.starts_with(compatibility_cache_root) ||
+                    key == candidate_key) continue;
+                official.push_back(std::move(path));
+            }
+            return compatibility->Prepare(candidate, official, compatibility_directory,
+                anomaly::Ue5PakContainerCodecs(binding));
+        };
+        options.mount_pak = [bind](
+            const std::uintptr_t engine,
+            const anomaly::Ue5PakMountRequest& request) -> anomaly::PakModMountOutcome {
+            anomaly::PakModMountOutcome outcome{};
+            anomaly::Ue5PakBinding binding{};
+            if (!bind(binding)) {
+                outcome.detail = "profile symbols are unavailable";
+                return outcome;
+            }
+            auto result = anomaly::MountUe5Pak(binding, engine, request);
+            outcome.mounted = result.mounted;
+            outcome.native_fault = result.native_fault;
+            if (result.mounted) {
+                outcome.container = result.container;
+                return outcome;
+            }
+            // The engine's own words are the only useful explanation of a refusal.
+            if (!result.error_message.empty()) {
+                outcome.detail = NarrowUtf8(result.error_message);
+            } else if (result.error_code >= 0) {
+                outcome.detail = "io error " + std::to_string(result.error_code);
+            }
+            return outcome;
+        };
+        const auto runtime_session = context->session;
+        options.unmount_pak = [bind, runtime_session](
+            const std::uintptr_t engine, const std::wstring& pak_file) {
+            anomaly::Ue5PakBinding binding{};
+            if (!bind(binding)) return false;
+            const auto session = runtime_session.lock();
+            if (session == nullptr) return false;
+            auto& dispatchers = session->Dispatchers();
+            if (dispatchers.BoundThread(anomaly::ExecutionDomain::Game) == std::thread::id{})
+                return false;
+
+            bool unmounted{};
+            // FlushAsyncLoading is a Game-thread barrier. Wait without a timeout so an invocation
+            // that has started cannot unmount after the watcher has recorded a failed release.
+            const DWORD invoke_result = dispatchers.Invoke(
+                anomaly::ExecutionDomain::Game,
+                [binding, engine, path = pak_file, &unmounted] {
+                    if (!anomaly::FlushUe5AsyncLoading(binding)) return;
+                    unmounted = anomaly::UnmountUe5Pak(binding, engine, path);
+                },
+                std::chrono::milliseconds::max());
+            return invoke_result == ERROR_SUCCESS && unmounted;
+        };
+        options.mounted_files = [bind, memory_services](const std::uintptr_t engine)
+            -> std::optional<std::vector<anomaly::Ue5MountedPakFile>> {
+            anomaly::Ue5PakBinding binding{};
+            if (!bind(binding)) return std::nullopt;
+            return anomaly::MountedUe5PakFiles(binding, engine, anomaly::LiveSymbolMemory(memory_services));
+        };
+        options.release_container = [bind](const std::uintptr_t container) {
+            anomaly::Ue5PakBinding binding{};
+            if (bind(binding)) anomaly::ReleaseUe5PakContainer(binding, container);
+        };
+        options.remove_cache_verify = [] { anomaly::DetachUe5PakBlockCacheVerifySink(); };
+        // `pak prime <id>` probes one mounted container on explicit diagnostic request.
+        options.prime_pak = [bind](
+            const std::uintptr_t engine,
+            const std::uintptr_t container) -> anomaly::PakModPrimeOutcome {
+            anomaly::PakModPrimeOutcome outcome{};
+            anomaly::Ue5PakBinding binding{};
+            if (!bind(binding)) {
+                outcome.stage = "no-binding";
+                outcome.detail = "profile symbols are unavailable";
+                return outcome;
+            }
+            const anomaly::Ue5PakPrimeReport report =
+                anomaly::PrimeUe5PakContainer(binding, engine, container);
+            outcome.primed = report.primed;
+            outcome.stage = report.stage;
+            outcome.detail = report.detail;
+            return outcome;
+        };
+        // Unsigned mod containers are what this service exists for; the engine only accepts them
+        // once the instance's signature requirement is cleared. Doing it here means the per-build
+        // pattern in config/pak-signature-bypass.json is not on the critical path any more.
+        options.clear_signature_requirement = [bind, memory_services, context](
+                                                 const std::uintptr_t engine) {
+            anomaly::Ue5PakBinding binding{};
+            if (!bind(binding)) return false;
+            anomaly::LiveSymbolMemory memory(memory_services);
+            const bool flag = anomaly::ClearUe5PakSignatureRequirement(binding, engine, memory);
+            // The flag only covers FPakPlatformFile; the game's own container gate still answers
+            // `Missing signature` for an unsigned .utoc, so both have to be released together.
+            std::uint8_t gate_byte{};
+            const anomaly::Ue5PakGateStatus gate =
+                anomaly::DisableUe5PakSignatureGate(binding, &gate_byte);
+            const bool gate_ok = gate == anomaly::Ue5PakGateStatus::Patched ||
+                gate == anomaly::Ue5PakGateStatus::AlreadyPatched;
+            // Containers that declare a signature section still parse it and invoke the verifier.
+            // Only that verifier's status is replaced; unsigned containers skip the section entirely.
+            const bool verify =
+                anomaly::InstallUe5PakSignatureVerificationBypass(binding.signature_verify);
+            RuntimeLog(context, flag ? anomaly::LogLevel::Info : anomaly::LogLevel::Warning,
+                "pak.mods.signature_flag", flag ? "pak_mods.signature_flag=cleared"
+                                                : "pak_mods.signature_flag=unavailable");
+            RuntimeLog(context, gate_ok ? anomaly::LogLevel::Info : anomaly::LogLevel::Warning,
+                "pak.mods.signature_gate",
+                std::string("pak_mods.signature_gate=") +
+                    (gate_ok ? "patched" : "unavailable") + " state=" +
+                    std::to_string(static_cast<int>(gate)) + " address=0x" +
+                    [&binding] {
+                        char text[24]{};
+                        std::snprintf(text, sizeof(text), "%llX",
+                            static_cast<unsigned long long>(binding.signature_gate));
+                        return std::string(text);
+                    }() +
+                    " byte=0x" + [&gate_byte] {
+                        char text[8]{};
+                        std::snprintf(text, sizeof(text), "%02X", gate_byte);
+                        return std::string(text);
+                    }());
+            RuntimeLog(context, verify ? anomaly::LogLevel::Info : anomaly::LogLevel::Warning,
+                "pak.mods.signature_verify", verify ? "pak_mods.signature_verify=bypassed"
+                                                    : "pak_mods.signature_verify=unavailable");
+            return flag && gate_ok && verify;
+        };
+        // The block-cache verifier dereferences a per-container table with no null check. A container
+        // without a .sig can therefore fault on its first verified read. The detour reports the request
+        // and only lets the original run when that element has a table.
+        options.apply_cache_verify = [bind](const anomaly::Ue5PakCacheVerifySink sink, void* context,
+                                         std::uintptr_t& target) {
+            anomaly::Ue5PakBinding binding{};
+            if (!bind(binding)) return anomaly::Ue5PakCacheVerifyStatus::Unavailable;
+            return anomaly::InstallUe5PakBlockCacheVerifyDetour(
+                binding.cache_verify_layout, binding.cache_verify, binding.cache_verify_complete,
+                sink, context, &target);
+        };
+        auto runtime = std::make_shared<anomaly::PakModRuntime>(std::move(options));
+        if (!runtime->Start()) {
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "pak.mods.start_failed",
+                "pak_mods=watcher_failed");
+            return ERROR_SUCCESS;
+        }
+        if (!anomaly::ProcessAdapterServices().Publish(ANOMALY_MODS_SERVICE_V1_ID, 1,
+                runtime->Service(), {}, std::static_pointer_cast<const void>(runtime))) {
+            runtime->Stop();
+            return ERROR_GEN_FAILURE;
+        }
+        PublishPakModRuntime(context, std::move(runtime));
+        RuntimeLog(
+            context, anomaly::LogLevel::Info, "pak.mods.ready", "pak_mods=ready");
+        return ERROR_SUCCESS;
+    } catch (...) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "pak.mods.start_failed",
+            "pak_mods=start_failed");
+        return ERROR_SUCCESS;
+    }
+}
+
+void StopPakMods(const std::shared_ptr<CoreContext>& context) noexcept {
+    auto runtime = TakePakModRuntime(context);
+    if (runtime) static_cast<void>(anomaly::ProcessAdapterServices().Revoke(ANOMALY_MODS_SERVICE_V1_ID, runtime->Service()));
+    if (runtime == nullptr) return;
+    runtime->Stop();
+    // The Core remains resident. Engine reads queued before Unmount may still need the cache
+    // routing hook; Stop drains and detaches its session-owned reporting sink instead.
+    anomaly::RemoveUe5PakSignatureVerificationBypass();
+}
+
+std::string EscapeJson(std::string_view value) {
+    std::string result;
+    result.reserve(value.size() + 8);
+    for (const unsigned char character : value) {
+        switch (character) {
+        case '\\': result += "\\\\"; break;
+        case '"': result += "\\\""; break;
+        case '\n': result += "\\n"; break;
+        case '\r': result += "\\r"; break;
+        case '\t': result += "\\t"; break;
+        default:
+            if (character < 0x20) result += '?';
+            else result.push_back(static_cast<char>(character));
+            break;
+        }
+    }
+    return result;
+}
+
+DWORD PreparePluginHost(
+    const std::shared_ptr<CoreContext>& context, std::stop_token stop_token) {
+    if (stop_token.stop_requested()) return ERROR_CANCELLED;
+    try {
+        auto plugins = std::make_shared<ue5mem::PluginManager>(
+            context->runtime_root, context->config.plugin_directory,
+            context->memory_services,
+            ue5mem::PluginCallbackBudgets{
+                context->config.update_slow_milliseconds,
+                context->config.draw_slow_milliseconds},
+            context->logger,
+            [session = context->session](
+                std::string owner, std::uint64_t generation,
+                std::function<void()> callback) -> bool {
+                const auto runtime = session.lock();
+                if (runtime == nullptr || !callback) return false;
+                return static_cast<bool>(runtime->Dispatchers().Post(
+                    anomaly::ExecutionDomain::Lifecycle,
+                    std::move(owner), generation, std::move(callback)));
+            },
+            [session = context->session](
+                std::string owner, std::uint64_t generation,
+                std::function<void()> callback) -> bool {
+                const auto runtime = session.lock();
+                if (runtime == nullptr || !callback) return false;
+                return static_cast<bool>(runtime->Dispatchers().Post(
+                    anomaly::ExecutionDomain::Worker,
+                    std::move(owner), generation, std::move(callback)));
+            },
+            [session = context->session](
+                const std::uint32_t affinity,
+                std::string owner, std::uint64_t generation,
+                std::function<void()> callback) -> bool {
+                const auto runtime = session.lock();
+                if (runtime == nullptr || !callback) return false;
+                anomaly::ExecutionDomain domain{};
+                switch (affinity) {
+                case ANOMALY_IPC_AFFINITY_V1_LIFECYCLE:
+                    domain = anomaly::ExecutionDomain::Lifecycle;
+                    break;
+                case ANOMALY_IPC_AFFINITY_V1_GAME:
+                    domain = anomaly::ExecutionDomain::Game;
+                    break;
+                case ANOMALY_IPC_AFFINITY_V1_RENDER:
+                    domain = anomaly::ExecutionDomain::Render;
+                    break;
+                default:
+                    domain = anomaly::ExecutionDomain::Worker;
+                    break;
+                }
+                return static_cast<bool>(runtime->Dispatchers().Post(
+                    domain, std::move(owner), generation, std::move(callback)));
+            });
+        plugins->SetTranslator(context->translator);
+        if (context->telemetry) {
+            plugins->SetUsageObserver([session = context->session, telemetry = context->telemetry](
+                std::vector<ue5mem::PluginUsageObservation> observations) {
+                if (const auto runtime = session.lock()) {
+                    static_cast<void>(runtime->Dispatchers().Post(
+                        anomaly::ExecutionDomain::Worker, "anomaly.telemetry", 1,
+                        [telemetry, observations = std::move(observations)] {
+                            for (const auto& observation : observations)
+                                telemetry->ObservePlugins({observation.id}, observation.observed_at);
+                        }));
+                }
+            });
+        }
+        const auto session = context->session;
+        plugins->SetQueuedCallbackCanceller(
+            [session](std::string_view owner, std::uint64_t generation) {
+                if (const auto runtime = session.lock()) {
+                    static_cast<void>(runtime->Dispatchers().CancelOwnerGeneration(
+                        owner, generation));
+                }
+            });
+        const auto esc_menu_logo = LoadNteEscMenuLogoBytes();
+        if (!plugins->InstallDefaultNteEscMenuButton(esc_menu_logo)) {
+            // The logo is a resource inside this image, and a core that was mapped without a loader -- the
+            // live-attach path -- can have its image headers hidden from module scanners, which is also
+            // what makes those resources unreadable. A missing decoration must not cost the whole runtime.
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "plugin.host.esc_menu_button_skipped",
+                "plugin_host=esc_menu_button_skipped reason=logo-unavailable");
+        }
+        plugins->LoadAll();
+        PublishPluginHost(context, std::move(plugins));
+        const auto published = PluginHostSnapshot(context);
+        RuntimeLog(
+            context, anomaly::LogLevel::Info, "plugin.host.ready",
+            "plugin_host=ready count=" +
+                std::to_string(published == nullptr ? 0 : published->Plugins().size()));
+        return ERROR_SUCCESS;
+    } catch (...) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Error, "plugin.host.start_failed",
+            "plugin_host=start_failed");
+        return CurrentExceptionError();
+    }
+}
+
+DWORD StopPluginHost(
+    const std::shared_ptr<CoreContext>& context,
+    std::chrono::milliseconds timeout) noexcept {
+    // A bounded UI teardown may leave a lifecycle callback owner in
+    // quarantine. Do not start unloading the corresponding PluginManager
+    // until that owner has either drained or been retired; the owner keeps
+    // the module mapping alive for late callbacks.
+    const auto current = PluginHostSnapshot(context);
+    if (current != nullptr && ue5mem::PlatformHostQuarantined(current.get())) {
+        RuntimeLog(
+            context, anomaly::LogLevel::Warning, "plugin.host.stop_deferred",
+            "plugin_host=stop_deferred reason=platform_ui_quarantine");
+        return ERROR_TIMEOUT;
+    }
+    const auto plugins = TakePluginHost(context);
+    if (plugins == nullptr) {
+        // RuntimeSession invokes this callback before ServiceGraph::StopAll;
+        // the plugin-host service callback can therefore arrive a second time.
+        // Keep the diagnostics captured by the first stop instead of erasing
+        // them when the ownership slot is already empty.
+        return ERROR_SUCCESS;
+    }
+    bool stopped{};
+    try {
+        stopped = plugins->StopForRuntime(timeout);
+        const auto diagnostics = plugins->StopDiagnostics();
+        std::ostringstream json;
+        json << '[';
+        for (std::size_t index = 0; index < diagnostics.size(); ++index) {
+            if (index != 0) json << ',';
+            const auto& diagnostic = diagnostics[index];
+            json << "{\"id\":\"" << EscapeJson(diagnostic.id)
+                 << "\",\"generation\":" << diagnostic.generation
+                 << ",\"drained\":" << (diagnostic.drained ? "true" : "false")
+                 << ",\"timedOut\":" << (diagnostic.timed_out ? "true" : "false")
+                 << ",\"inFlight\":" << diagnostic.in_flight_callbacks
+                 << ",\"resources\":" << diagnostic.resources
+                 << ",\"reason\":\"" << EscapeJson(diagnostic.reason) << "\"}";
+        }
+        json << ']';
+        context->plugin_stop_diagnostics = json.str();
+        RuntimeLog(
+            context, stopped ? anomaly::LogLevel::Info : anomaly::LogLevel::Warning,
+            "plugin.host.stopped",
+            "plugin_host=stopped drained=" + std::to_string(stopped ? 1 : 0) +
+                " generations=" + std::to_string(diagnostics.size()));
+    } catch (...) {
+        context->plugin_stop_diagnostics = "[]";
+        RuntimeLog(
+            context, anomaly::LogLevel::Error, "plugin.host.stop_failed",
+            "plugin_host=stop_exception");
+        return CurrentExceptionError();
+    }
+    return stopped ? ERROR_SUCCESS : ERROR_TIMEOUT;
+}
+
+DWORD RunPlatform(const std::shared_ptr<CoreContext>& context, std::stop_token stop_token) {
+    if (stop_token.stop_requested() || !context->config.platform_enabled) return ERROR_SUCCESS;
+    ue5mem::PlatformDiagnostics diagnostics;
+    diagnostics.translator = context->translator;
+    diagnostics.runtime_root = context->runtime_root;
+    diagnostics.log_file = context->runtime_root / L"anomaly-platform.log";
+    diagnostics.service_graph = [weak = context->services] {
+        const auto graph = weak.lock();
+        return graph ? graph->Snapshot() : anomaly::ServiceGraphSnapshot{};
+    };
+    diagnostics.profile_json = [weak = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)] {
+        const auto runtime = weak.lock();
+        return runtime ? runtime->DiagnosticsJson() : std::string{"{\"state\":\"unavailable\"}"};
+    };
+    diagnostics.nte_compatibility =
+        [profile = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)] {
+            const auto runtime = profile.lock();
+            if (runtime == nullptr) return anomaly::BuildNteCompatibilitySnapshot(
+                {}, {}, {});
+            const auto current = runtime->Evidence();
+            return anomaly::BuildNteCompatibilitySnapshot(
+                current.fingerprint, current.profile, current.resolution);
+        };
+    diagnostics.hooks = [weak = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)] {
+        const auto runtime = weak.lock();
+        return runtime ? runtime->Hooks() : std::vector<anomaly::HookRecordView>{};
+    };
+    diagnostics.retry_profile_hooks =
+        [weak = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)] {
+            const auto runtime = weak.lock();
+            // A settled retry (or a runtime that is already gone) stops the worker polling.
+            return runtime == nullptr || runtime->RetryPendingHooks();
+        };
+    diagnostics.repository_snapshot =
+        [weak = std::weak_ptr<anomaly::RepositoryCoordinator>(context->repository)] {
+            const auto repository = weak.lock();
+            return repository == nullptr
+                ? anomaly::RepositoryCoordinatorSnapshot{}
+                : repository->Snapshot();
+        };
+    diagnostics.repository_refresh =
+        [weak = std::weak_ptr<anomaly::RepositoryCoordinator>(context->repository)] {
+            const auto repository = weak.lock();
+            return repository == nullptr
+                ? anomaly::RepositoryOperationSubmission{
+                      false, 0, "repository coordinator is unavailable"}
+                : repository->Refresh();
+        };
+    diagnostics.repository_install =
+        [weak = std::weak_ptr<anomaly::RepositoryCoordinator>(context->repository)](
+            std::string_view plugin_id, std::string_view version) {
+            const auto repository = weak.lock();
+            return repository == nullptr
+                ? anomaly::RepositoryOperationSubmission{
+                      false, 0, "repository coordinator is unavailable"}
+                : repository->InstallPlugin(plugin_id, version);
+        };
+    diagnostics.repository_uninstall =
+        [weak = std::weak_ptr<anomaly::RepositoryCoordinator>(context->repository)](
+            std::string_view plugin_id) {
+            const auto repository = weak.lock();
+            return repository == nullptr
+                ? anomaly::RepositoryOperationSubmission{
+                      false, 0, "repository coordinator is unavailable"}
+                : repository->UninstallPlugin(plugin_id);
+        };
+    diagnostics.repository_config =
+        [weak = std::weak_ptr<anomaly::RepositoryCoordinator>(context->repository)] {
+            const auto repository = weak.lock();
+            return repository == nullptr ? anomaly::PluginRepositoryConfig{}
+                                         : repository->Configuration();
+        };
+    diagnostics.repository_configure =
+        [weak = std::weak_ptr<anomaly::RepositoryCoordinator>(context->repository)](
+            const anomaly::PluginRepositoryConfig& config) {
+            const auto repository = weak.lock();
+            return repository == nullptr
+                ? anomaly::RepositoryOperationSubmission{
+                      false, 0, "repository coordinator is unavailable"}
+                : repository->Configure(config);
+        };
+    diagnostics.settings_snapshot =
+        [weak = std::weak_ptr<anomaly::PlatformSettingsStore>(context->settings)] {
+            const auto settings = weak.lock();
+            return settings == nullptr
+                ? anomaly::PlatformSettingsSnapshot{}
+                : settings->Snapshot();
+        };
+    diagnostics.settings_apply =
+        [weak = std::weak_ptr<anomaly::PlatformSettingsStore>(context->settings),
+         logger = std::weak_ptr<anomaly::StructuredLogger>(context->logger),
+         repository = std::weak_ptr<anomaly::RepositoryCoordinator>(context->repository)](
+            const anomaly::PlatformSettingsApplyRequest& request) {
+            const auto settings = weak.lock();
+            if (settings == nullptr) return anomaly::PlatformSettingsApplyResult{};
+            auto result = settings->Apply(request);
+            if (!result.Applied()) return result;
+            if (const auto active_logger = logger.lock()) {
+                static_cast<void>(active_logger->Reconfigure(
+                    static_cast<anomaly::LogLevel>(
+                        result.snapshot.values.diagnostics_log_level),
+                    result.snapshot.values.diagnostics_ring_capacity));
+            }
+            if (const auto active_repository = repository.lock()) {
+                static_cast<void>(active_repository->Refresh());
+            }
+            return result;
+        };
+    diagnostics.settings_record_route =
+        [weak = std::weak_ptr<anomaly::PlatformSettingsStore>(context->settings)](
+            const std::string_view route) {
+            const auto settings = weak.lock();
+            return settings != nullptr && settings->RecordLastRoute(route);
+        };
+    diagnostics.settings_record_notice =
+        [weak = std::weak_ptr<anomaly::PlatformSettingsStore>(context->settings)](
+            const std::uint32_t version) {
+            const auto settings = weak.lock();
+            return settings != nullptr && settings->RecordNoticeAcceptance(version);
+        };
+    diagnostics.game_pump = [weak = context->session]() -> std::size_t {
+        const auto session = weak.lock();
+        return session == nullptr ? 0 : session->Dispatchers().PumpGame();
+    };
+    diagnostics.lifecycle_invoke = [context](std::function<void()> operation) -> std::uint32_t {
+        const auto session = context->session.lock();
+        if (session == nullptr) return ERROR_NOT_READY;
+        const auto state = session->Snapshot().state;
+        if (state == ANOMALY_RUNTIME_STATE_STOP_REQUESTED ||
+            state == ANOMALY_RUNTIME_STATE_STOPPING_PLUGINS ||
+            state == ANOMALY_RUNTIME_STATE_STOPPING_SERVICES ||
+            state == ANOMALY_RUNTIME_STATE_FAILED ||
+            state == ANOMALY_RUNTIME_STATE_STOPPED) {
+            return ERROR_CANCELLED;
+        }
+        // UI submission is bounded; the lifecycle callback itself owns the
+        // plugin serialization lock and reports a typed failure on timeout.
+        return session->Dispatchers().Invoke(
+            anomaly::ExecutionDomain::Lifecycle, std::move(operation), std::chrono::seconds(5));
+    };
+    diagnostics.lifecycle_post = [context](std::function<void()> operation) -> std::uint32_t {
+        const auto session = context->session.lock();
+        if (session == nullptr) return ERROR_NOT_READY;
+        const auto state = session->Snapshot().state;
+        if (state == ANOMALY_RUNTIME_STATE_STOP_REQUESTED ||
+            state == ANOMALY_RUNTIME_STATE_STOPPING_PLUGINS ||
+            state == ANOMALY_RUNTIME_STATE_STOPPING_SERVICES ||
+            state == ANOMALY_RUNTIME_STATE_FAILED ||
+            state == ANOMALY_RUNTIME_STATE_STOPPED) {
+            return ERROR_CANCELLED;
+        }
+        const auto task = session->Dispatchers().Post(
+            anomaly::ExecutionDomain::Lifecycle,
+            "anomaly.platform.ui", 1, std::move(operation));
+        return task ? ERROR_SUCCESS : ERROR_NOT_READY;
+    };
+    diagnostics.lifecycle_drain = [context](std::chrono::milliseconds timeout) -> bool {
+        const auto session = context->session.lock();
+        if (session == nullptr) return true;
+        const auto bounded = (std::max)(timeout, std::chrono::milliseconds::zero());
+        const auto deadline = bounded == std::chrono::milliseconds::max()
+            ? std::chrono::steady_clock::time_point::max()
+            : std::chrono::steady_clock::now() + bounded;
+        const auto remaining = [&] {
+            if (deadline == std::chrono::steady_clock::time_point::max()) {
+                return std::chrono::milliseconds::max();
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) return std::chrono::milliseconds::zero();
+            return std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+        };
+        // The lifecycle pump may already be leaving RUNNING when the render
+        // worker begins its teardown. Cancel queued UI posts before draining;
+        // otherwise a stopped pump would strand their owner captures until
+        // dispatcher destruction.
+        static_cast<void>(session->Dispatchers().CancelOwnerGeneration(
+            "anomaly.platform.ui", 1));
+        if (!session->Dispatchers().Drain("anomaly.platform.ui", 1, remaining())) {
+            return false;
+        }
+        return session->Dispatchers().DrainInvocations(remaining());
+    };
+    diagnostics.logger = context->logger;
+    if (context->config.platform_embedded) {
+        ue5mem::RunEmbeddedPlatform(
+            context->runtime_root, context->config, stop_token, context->memory_services,
+            context->profile_runtime == nullptr ? nullptr : context->profile_runtime->Adapter(),
+            std::move(diagnostics), PluginHostSnapshot(context));
+    } else {
+        ue5mem::RunPlatform(
+            context->runtime_root, context->config, stop_token, context->memory_services,
+            context->profile_runtime == nullptr ? nullptr : context->profile_runtime->Adapter(),
+            std::move(diagnostics), PluginHostSnapshot(context));
+    }
+    const auto plugins = PluginHostSnapshot(context);
+    const bool stopped = !ue5mem::PlatformHostQuarantined(plugins.get());
+    return stopped ? ERROR_SUCCESS : ERROR_TIMEOUT;
+}
+
+DWORD ConfirmRuntimeHealth(
+    const std::shared_ptr<CoreContext>& context,
+    std::stop_token stop_token) {
+    constexpr auto stability_window = std::chrono::seconds(5);
+    const auto deadline = std::chrono::steady_clock::now() + stability_window;
+    while (!stop_token.stop_requested() && std::chrono::steady_clock::now() < deadline) {
+        Sleep(50);
+    }
+    if (stop_token.stop_requested()) return ERROR_SUCCESS;
+    const auto session = context->session.lock();
+    if (session == nullptr ||
+        session->Snapshot().state != ANOMALY_RUNTIME_STATE_RUNNING) {
+        return ERROR_SUCCESS;
+    }
+
+    RuntimeLog(
+        context, anomaly::LogLevel::Info,
+        "runtime.health_confirmed",
+        "runtime_health=confirmed version=" ANOMALY_SDK_VERSION_STRING,
+        anomaly::LogThreadDomain::Worker);
+    return ERROR_SUCCESS;
+}
+
+void ShutdownCore(const std::shared_ptr<CoreContext>& context) noexcept {
+    try {
+        if (context->crash_reporter != nullptr) context->crash_reporter->Uninstall();
+        context->crash_reporter.reset();
+    } catch (...) {
+    }
+    try {
+        if (!WriteDiagnosticsSummary(context, "stopped")) {
+            LogDiagnosticsSummaryFailure(context);
+        }
+        RuntimeLog(
+            context, anomaly::LogLevel::Info, "runtime.stop", "runtime=stopped");
+    } catch (...) {
+    }
+    if (context->logger != nullptr) {
+        try {
+            const bool stopped = context->logger->Stop();
+            const auto stats = context->logger->Stats();
+            if (!stopped || stats.error_count != 0 || stats.dropped != 0) {
+                std::ofstream output(
+                    context->log_directory / L"anomaly-runtime.log", std::ios::app);
+                output << "pid=" << GetCurrentProcessId()
+                       << " structured_logger=degraded stopped=" << (stopped ? 1 : 0)
+                       << " errors=" << stats.error_count
+                       << " dropped=" << stats.dropped;
+                if (const auto failure = context->logger->LastError()) {
+                    output << " operation=" << static_cast<unsigned>(failure->operation)
+                           << " code=" << failure->code.value();
+                }
+                output << '\n';
+            }
+        } catch (...) {
+            std::ofstream(context->log_directory / L"anomaly-runtime.log", std::ios::app)
+                << "pid=" << GetCurrentProcessId()
+                << " structured_logger=stop_exception\n";
+        }
+        context->logger.reset();
+    }
+}
+
+DWORD ValidateStartInfo(const AnomalyStartInfo* start_info) noexcept {
+    if (start_info == nullptr) return ERROR_INVALID_PARAMETER;
+    if (start_info->struct_size < ANOMALY_START_INFO_V1_SIZE) {
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+    if (start_info->bootstrap_abi_version != ANOMALY_BOOTSTRAP_ABI_VERSION) {
+        return ERROR_REVISION_MISMATCH;
+    }
+    if (start_info->flags != 0) return ERROR_INVALID_FLAGS;
+    if (start_info->bootstrap_type > ANOMALY_BOOTSTRAP_TYPE_EXTERNAL) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    return ERROR_SUCCESS;
+}
+
+anomaly::RuntimeStartContext BuildStartContext(const AnomalyStartInfo& start_info) {
+    anomaly::RuntimeStartContext result;
+    result.bootstrap_abi_version = start_info.bootstrap_abi_version;
+    result.bootstrap_type = start_info.bootstrap_type;
+    result.bootstrap_module = start_info.bootstrap_module;
+    result.game_module = start_info.game_module != nullptr
+        ? start_info.game_module
+        : GetModuleHandleW(nullptr);
+
+    if (start_info.runtime_root != nullptr && start_info.runtime_root[0] != L'\0') {
+        result.runtime_root = start_info.runtime_root;
+    } else if (start_info.bootstrap_module != nullptr) {
+        result.runtime_root = ModuleDirectory(start_info.bootstrap_module) / L"Anomaly";
+    } else {
+        result.runtime_root = ModuleDirectory(g_core_module);
+    }
+    if (result.runtime_root.empty()) {
+        throw std::filesystem::filesystem_error(
+            "runtime root is unavailable", std::error_code{});
+    }
+    result.runtime_root = std::filesystem::absolute(result.runtime_root);
+
+    if (start_info.log_directory != nullptr && start_info.log_directory[0] != L'\0') {
+        result.log_directory = std::filesystem::absolute(start_info.log_directory);
+    } else {
+        result.log_directory = result.runtime_root / L"logs";
+    }
+    result.external_stop_event = start_info.external_stop_event;
+    return result;
+}
+
+anomaly::RuntimeSessionOptions BuildSessionOptions(
+    const std::shared_ptr<CoreContext>& context) {
+    anomaly::RuntimeSessionOptions options;
+    auto services = std::make_shared<anomaly::ServiceGraph>();
+    context->services = services;
+    context->memory_services = anomaly::CreateCoreMemoryServices();
+
+    anomaly::ServiceDescriptor runtime_info;
+    runtime_info.id = "anomaly.runtime.info";
+    runtime_info.lifetime = anomaly::ServiceLifetime::Provided;
+    DWORD result = services->Register(std::move(runtime_info));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(), "register runtime info service");
+    }
+
+    anomaly::ServiceDescriptor config;
+    config.id = "anomaly.config";
+    config.startup = anomaly::ServiceStartup::Blocking;
+    config.affinity = anomaly::ServiceAffinity::Lifecycle;
+    config.required_dependencies.push_back({"anomaly.runtime.info", 1});
+    config.start = [context](std::stop_token stop_token) {
+        return InitializeCore(context, stop_token);
+    };
+    config.stop = [] {};
+    result = services->Register(std::move(config));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(), "register config service");
+    }
+
+    anomaly::ServiceDescriptor module_memory;
+    module_memory.id = "anomaly.internal.module-memory";
+    module_memory.lifetime = anomaly::ServiceLifetime::Provided;
+    module_memory.affinity = anomaly::ServiceAffinity::Any;
+    result = services->Register(std::move(module_memory));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(),
+            "register module memory service");
+    }
+
+    anomaly::ServiceDescriptor websocket;
+    websocket.id = ANOMALY_WEBSOCKET_SERVICE_V1_ID;
+    websocket.startup = anomaly::ServiceStartup::Blocking;
+    websocket.affinity = anomaly::ServiceAffinity::Lifecycle;
+    websocket.start = [context](std::stop_token stop_token) {
+        return PrepareWebSocketService(context, stop_token);
+    };
+    websocket.stop = [context] { StopWebSocketService(context); };
+    result = services->Register(std::move(websocket));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(), "register websocket service");
+    }
+
+    anomaly::ServiceDescriptor pattern;
+    pattern.id = "anomaly.internal.pattern";
+    pattern.lifetime = anomaly::ServiceLifetime::Provided;
+    pattern.affinity = anomaly::ServiceAffinity::Any;
+    pattern.required_dependencies.push_back({"anomaly.internal.module-memory", 1});
+    result = services->Register(std::move(pattern));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(),
+            "register pattern service");
+    }
+
+    anomaly::ServiceDescriptor pipe;
+    pipe.id = "anomaly.internal.pipe";
+    pipe.startup = anomaly::ServiceStartup::Blocking;
+    pipe.affinity = anomaly::ServiceAffinity::Worker;
+    pipe.required_dependencies.push_back({"anomaly.config", 1});
+    pipe.required_dependencies.push_back({"anomaly.internal.module-memory", 1});
+    pipe.required_dependencies.push_back({"anomaly.internal.pattern", 1});
+    pipe.required_dependencies.push_back({"anomaly.internal.nte-profile", 1});
+    const std::weak_ptr<anomaly::ServiceGraph> weak_services = services;
+    pipe.start = [context, weak_services](std::stop_token stop_token) {
+        return PrepareDiagnosticPipe(context, weak_services, stop_token);
+    };
+    pipe.stop = [context] { StopDiagnosticPipe(context); };
+    result = services->Register(std::move(pipe));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(),
+            "register diagnostic pipe service");
+    }
+
+    anomaly::ServiceDescriptor profile;
+    profile.id = "anomaly.internal.nte-profile";
+    profile.startup = anomaly::ServiceStartup::Blocking;
+    profile.affinity = anomaly::ServiceAffinity::Worker;
+    profile.required_dependencies.push_back({"anomaly.config", 1});
+    profile.required_dependencies.push_back({"anomaly.internal.module-memory", 1});
+    profile.required_dependencies.push_back({"anomaly.internal.pattern", 1});
+    profile.required_dependencies.push_back({"anomaly.repository.coordinator", 1});
+    profile.start = [context](std::stop_token stop_token) {
+        return PrepareNteProfile(context, stop_token);
+    };
+    profile.stop = [context] { StopNteProfile(context); };
+    result = services->Register(std::move(profile));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(),
+            "register NTE profile service");
+    }
+
+    anomaly::ServiceDescriptor pak_mods;
+    pak_mods.id = std::string(anomaly::kPakModRuntimeServiceId);
+    pak_mods.startup = anomaly::ServiceStartup::Blocking;
+    // Directory scanning and the engine's pak calls never run on Game or Render; the service keeps
+    // its own worker so a slow container never stalls a frame.
+    pak_mods.affinity = anomaly::ServiceAffinity::Worker;
+    pak_mods.required_dependencies.push_back({"anomaly.config", 1});
+    pak_mods.required_dependencies.push_back({"anomaly.internal.nte-profile", 1});
+    pak_mods.start = [context](std::stop_token stop_token) {
+        return PreparePakMods(context, stop_token);
+    };
+    pak_mods.stop = [context] { StopPakMods(context); };
+    result = services->Register(std::move(pak_mods));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(),
+            "register pak mod service");
+    }
+
+    anomaly::ServiceDescriptor repository;
+    repository.id = "anomaly.repository.coordinator";
+    repository.startup = anomaly::ServiceStartup::Blocking;
+    repository.affinity = anomaly::ServiceAffinity::Worker;
+    repository.required_dependencies.push_back({"anomaly.config", 1});
+    repository.start = [context](std::stop_token stop_token) {
+        return PrepareRepository(context, stop_token);
+    };
+    repository.stop = [context] { StopRepository(context); };
+    result = services->Register(std::move(repository));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(),
+            "register repository coordinator service");
+    }
+
+    anomaly::ServiceDescriptor plugin_host;
+    plugin_host.id = "anomaly.plugin.host";
+    plugin_host.startup = anomaly::ServiceStartup::Blocking;
+    plugin_host.affinity = anomaly::ServiceAffinity::Lifecycle;
+    plugin_host.required_dependencies.push_back({"anomaly.config", 1});
+    plugin_host.required_dependencies.push_back({ANOMALY_WEBSOCKET_SERVICE_V1_ID, 1});
+    plugin_host.required_dependencies.push_back({"anomaly.internal.nte-profile", 1});
+    plugin_host.required_dependencies.push_back({std::string(anomaly::kPakModRuntimeServiceId), 1});
+    plugin_host.required_dependencies.push_back({"anomaly.repository.coordinator", 1});
+    plugin_host.start = [context](std::stop_token stop_token) {
+        return PreparePluginHost(context, stop_token);
+    };
+    plugin_host.stop = [context] {
+        static_cast<void>(StopPluginHost(context, std::chrono::seconds(1)));
+    };
+    result = services->Register(std::move(plugin_host));
+    if (result != ERROR_SUCCESS) {
+        throw std::system_error(
+            static_cast<int>(result), std::system_category(),
+            "register plugin host service");
+    }
+
+    // These provided nodes make the production ownership boundaries explicit
+    // in diagnostics; their concrete pumps are owned by RuntimeSession and
+    // the platform worker below.
+    const auto register_provided = [&](std::string id, anomaly::ServiceAffinity affinity,
+                                       std::vector<anomaly::ServiceDependency> dependencies = {}) {
+        anomaly::ServiceDescriptor descriptor;
+        descriptor.id = std::move(id);
+        descriptor.lifetime = anomaly::ServiceLifetime::Provided;
+        descriptor.affinity = affinity;
+        descriptor.required_dependencies = std::move(dependencies);
+        const DWORD registration = services->Register(std::move(descriptor));
+        if (registration != ERROR_SUCCESS) {
+            throw std::system_error(
+                static_cast<int>(registration), std::system_category(),
+                "register production boundary service");
+        }
+    };
+    register_provided("anomaly.dispatchers.lifecycle", anomaly::ServiceAffinity::Lifecycle);
+    register_provided("anomaly.dispatchers.worker", anomaly::ServiceAffinity::Worker);
+    register_provided("anomaly.dispatchers.game", anomaly::ServiceAffinity::Game);
+    register_provided("anomaly.dispatchers.render", anomaly::ServiceAffinity::Render);
+    register_provided(
+        "anomaly.platform.host", anomaly::ServiceAffinity::Render,
+        {{"anomaly.plugin.host", 1}});
+    register_provided(
+        "anomaly.platform.input", anomaly::ServiceAffinity::Render,
+        {{"anomaly.platform.host", 1}});
+    register_provided(
+        "anomaly.platform.ui", anomaly::ServiceAffinity::Render,
+        {{"anomaly.platform.host", 1}});
+    options.services = std::move(services);
+    options.stop_plugins = [context](std::chrono::milliseconds timeout) {
+        return StopPluginHost(context, timeout);
+    };
+    options.shutdown = [context] { ShutdownCore(context); };
+    options.workers.push_back({"pipe", [context](std::stop_token stop_token) {
+        return RunDiagnosticPipe(context, stop_token);
+    }});
+    options.workers.push_back({"platform", [context](std::stop_token stop_token) {
+        return RunPlatform(context, stop_token);
+    }});
+    options.workers.push_back({"runtime-health", [context](std::stop_token stop_token) {
+        return ConfirmRuntimeHealth(context, stop_token);
+    }});
+    options.workers.push_back({"telemetry", [context](std::stop_token stop_token) {
+        if (context->telemetry) context->telemetry->Run(stop_token);
+        return ERROR_SUCCESS;
+    }});
+    return options;
+}
+
+anomaly::RuntimeSessionSnapshot CurrentSnapshotLocked(const RuntimeControl& control) {
+    return control.session != nullptr ? control.session->Snapshot() : control.last_snapshot;
+}
+
+void ArchiveStoppedSessionLocked(RuntimeControl& control) {
+    if (control.session == nullptr ||
+        control.session->Snapshot().state != ANOMALY_RUNTIME_STATE_STOPPED) {
+        return;
+    }
+    control.session->Join();
+    control.last_snapshot = control.session->Snapshot();
+    control.session.reset();
+}
+
+}  // namespace
+
+// Lives for the whole process: the hook it installs must stay in place while the game runs.
+std::unique_ptr<anomaly::NtePakSignatureBypass> pak_signature_bypass;
+
+extern "C" __declspec(dllexport) DWORD WINAPI AnomalyStart(
+    const AnomalyStartInfo* start_info) {
+    const DWORD validation = ValidateStartInfo(start_info);
+    if (validation != ERROR_SUCCESS) return validation;
+    if (g_runtime_control == nullptr) return ERROR_INVALID_STATE;
+    try {
+        auto& control = *g_runtime_control;
+        std::scoped_lock lock(control.mutex);
+        ArchiveStoppedSessionLocked(control);
+        if (control.session != nullptr) return ERROR_ALREADY_INITIALIZED;
+        const DWORD ownership = control.process_claim.Acquire();
+        if (ownership != ERROR_SUCCESS) return ownership;
+        const auto start_context = BuildStartContext(*start_info);
+        auto core_context = std::make_shared<CoreContext>();
+        core_context->runtime_root = start_context.runtime_root;
+        core_context->log_directory = start_context.log_directory;
+        core_context->game_module = start_context.game_module;
+        core_context->pak_binding = control.pak_binding;
+        try {
+            std::array<wchar_t, 32768> executable{};
+            if (!GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())))
+                throw std::runtime_error("cannot resolve game settings directory");
+            const auto settings = anomaly::ReadGamePakModSettings(start_info->runtime_root,
+                std::filesystem::path(executable.data()).parent_path());
+            core_context->pak_compatibility_mode = anomaly::PakModCompatibilityMode(settings);
+            core_context->pak_startup_enabled = settings.value("enabled", true);
+            if (control.pak_compatibility_mode &&
+                *control.pak_compatibility_mode != core_context->pak_compatibility_mode)
+                throw std::runtime_error("pak loading mode requires a new game process");
+            control.pak_compatibility_mode = core_context->pak_compatibility_mode;
+            // Native startup mounting does not pass through PakModRuntime's desired set.
+            // Disable restricted containers before enabling the legacy signature bypass.
+            if (core_context->pak_compatibility_mode && core_context->pak_startup_enabled)
+                anomaly::DisableRestrictedPakMods(ResolvePaksDirectory(core_context->game_module) / L"~mods");
+            core_context->pak_settings_valid = true;
+            // Start before service/profile initialization: the engine scans startup paks early.
+            if (core_context->pak_compatibility_mode && core_context->pak_startup_enabled &&
+                !pak_signature_bypass) {
+                pak_signature_bypass = std::make_unique<anomaly::NtePakSignatureBypass>();
+                pak_signature_bypass->Start(
+                    start_info->runtime_root, start_info->game_module, start_info->log_directory);
+            }
+        } catch (...) {
+            // Keep diagnostics available while the optional pak service degrades.
+        }
+        auto session = std::make_shared<anomaly::RuntimeSession>(
+            start_context, BuildSessionOptions(core_context));
+        core_context->session = session;
+        const DWORD result = session->Start();
+        control.session = session;
+        if (result != ERROR_SUCCESS) ArchiveStoppedSessionLocked(control);
+        return result;
+    } catch (...) {
+        return CurrentExceptionError();
+    }
+}
+
+extern "C" __declspec(dllexport) DWORD WINAPI AnomalyRequestStop() {
+    if (g_runtime_control == nullptr) return ERROR_INVALID_STATE;
+    std::shared_ptr<anomaly::RuntimeSession> session;
+    {
+
+        auto& control = *g_runtime_control;
+        std::scoped_lock lock(control.mutex);
+        session = control.session;
+        if (session == nullptr &&
+            control.last_snapshot.state == ANOMALY_RUNTIME_STATE_STOPPED) {
+            return ERROR_SUCCESS;
+        }
+    }
+    if (session == nullptr) return ERROR_NOT_READY;
+    session->RequestStop();
+    return ERROR_SUCCESS;
+}
+
+extern "C" __declspec(dllexport) DWORD WINAPI AnomalyGetState(
+    AnomalyRuntimeStateInfo* state_info) {
+    if (state_info == nullptr) return ERROR_INVALID_PARAMETER;
+    if (state_info->struct_size < ANOMALY_RUNTIME_STATE_INFO_V1_SIZE) {
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+    if (state_info->state_info_version != ANOMALY_RUNTIME_STATE_INFO_VERSION) {
+        return ERROR_REVISION_MISMATCH;
+    }
+    if (g_runtime_control == nullptr) return ERROR_INVALID_STATE;
+
+    anomaly::RuntimeSessionSnapshot snapshot;
+    {
+
+        auto& control = *g_runtime_control;
+        std::scoped_lock lock(control.mutex);
+        snapshot = CurrentSnapshotLocked(control);
+    }
+    state_info->state = snapshot.state;
+    state_info->last_error = snapshot.last_error;
+    state_info->session_generation = snapshot.generation;
+    return ERROR_SUCCESS;
+}
+
+extern "C" __declspec(dllexport) DWORD WINAPI AnomalyWaitForStop(DWORD timeout_ms) {
+    if (g_runtime_control == nullptr) return ERROR_INVALID_STATE;
+    std::shared_ptr<anomaly::RuntimeSession> session;
+    {
+
+        auto& control = *g_runtime_control;
+        std::scoped_lock lock(control.mutex);
+        session = control.session;
+        if (session == nullptr) {
+            return control.last_snapshot.state == ANOMALY_RUNTIME_STATE_STOPPED
+                ? ERROR_SUCCESS
+                : ERROR_NOT_READY;
+        }
+    }
+
+    const auto timeout = timeout_ms == INFINITE
+        ? std::chrono::milliseconds::max()
+        : std::chrono::milliseconds(timeout_ms);
+    if (!session->WaitForStop(timeout)) return ERROR_TIMEOUT;
+    session->Join();
+
+    auto& control = *g_runtime_control;
+    std::scoped_lock lock(control.mutex);
+    if (control.session == session) {
+        control.last_snapshot = session->Snapshot();
+        control.session.reset();
+    }
+    return ERROR_SUCCESS;
+}
+
+BOOL WINAPI DllMain(HMODULE module, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        g_core_module = module;
+        DisableThreadLibraryCalls(module);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        g_core_module = nullptr;
+        static_cast<void>(g_runtime_control.release());
+    }
+    return TRUE;
+}
