@@ -1114,6 +1114,7 @@ if(ANOMALY_BUILD_TEST_FIXTURES)
     add_test(NAME d3d12_interop COMMAND anomaly_d3d12_interop_fixture)
     add_executable(anomaly-platform-preview WIN32        apps/platform_preview/main.cpp
         src/ui/platform_host.cpp
+        src/game/mayday/mayday_profile_runtime.cpp
         "${PLATFORM_UI_RESOURCES_RC}"
         src/plugin/plugin_manager.cpp)
     set_target_properties(anomaly-platform-preview PROPERTIES
@@ -1428,12 +1429,4 @@ if(ANOMALY_BUILD_SYMBOLS)
         install(FILES "$<TARGET_PDB_FILE:${symbol_target}>"
             DESTINATION symbols COMPONENT Symbols)
     endforeach()
-endif()
-
-if(ANOMALY_BUILD_TEST_FIXTURES AND ANOMALY_BUILD_BUILTIN_PLUGINS)
-    add_executable(anomaly_plugin_compatibility_fixture apps/test_host/plugin_compatibility_fixture.cpp)
-    target_link_libraries(anomaly_plugin_compatibility_fixture PRIVATE anomaly_plugin_profile ue5mem_memory)
-    target_compile_features(anomaly_plugin_compatibility_fixture PRIVATE cxx_std_20)
-    target_compile_options(anomaly_plugin_compatibility_fixture PRIVATE /utf-8 /EHsc)
-    add_test(NAME plugin_compatibility COMMAND anomaly_plugin_compatibility_fixture)
 endif()

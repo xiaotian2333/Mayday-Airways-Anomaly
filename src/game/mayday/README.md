@@ -1,7 +1,7 @@
 # Mayday 适配层（Unity IL2CPP）
 
 Mayday Airways (Steam Demo) 是 Unity IL2CPP + Mirror 网络游戏，
-与上游 Anomaly 的 UE5/NTE 适配层技术路径完全不同：
+与上游 Anomaly 的引擎适配层技术路径完全不同：
 
 - 引擎符号：不走特征码 Profile，而是使用 il2cpp 导出函数
   （il2cpp_domain_get / il2cpp_class_from_name / il2cpp_runtime_invoke ...）
