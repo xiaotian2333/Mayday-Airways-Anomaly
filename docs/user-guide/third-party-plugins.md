@@ -13,7 +13,7 @@ Anomaly 可以直接从插件源下载、更新和卸载社区插件。平时不
 
 - 作者和源码仓库是否可信，最近是否仍在维护。
 - 插件说明是否说清用途，Manifest 申请的 capability 是否与用途相符。
-- 插件是否支持当前 Anomaly Plugin API 和 `nte`。
+- 插件是否支持当前 Anomaly Plugin API 和 `mayday`。
 
 ## 下载并启用插件
 

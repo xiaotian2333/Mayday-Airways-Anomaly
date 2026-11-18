@@ -64,7 +64,7 @@ example.my-plugin\
 
 - `id` 是稳定的点分小写 ID，后续版本不要更换。
 - `version` 是有效的 SemVer，并且与准备发布的版本一致。
-- `games` 包含 `nte`，`api.major` 与目标 Runtime 一致。
+- `games` 包含 `mayday`，`api.major` 与目标 Runtime 一致。
 - `entry` 指向 ZIP 内实际存在的 DLL。
 - `license`、依赖、服务和 capability 都已写全。
 
@@ -81,7 +81,7 @@ example.my-plugin\
     "Author": "Example Author",
     "Punchline": "在游戏内显示一项实用信息。",
     "Description": "说明插件解决什么问题、怎么使用，以及已知限制。",
-    "Games": ["nte"],
+    "Games": ["mayday"],
     "ApiMajor": 1,
     "Tags": ["ui", "utility"],
     "RepoUrl": "https://github.com/example/my-plugin",
@@ -113,7 +113,7 @@ JSON 字段名区分大小写，不支持注释或尾随逗号。索引中有多
 | `Author` | 作者或维护者。 |
 | `Punchline` | 列表中的一句话简介，尽量直接说用途。 |
 | `Description` | 更完整的功能、使用方法和限制。 |
-| `Games` | 目前应为 `["nte"]`，用于在下载前判断兼容性。 |
+| `Games` | 目前应为 `["mayday"]`，用于在下载前判断兼容性。 |
 | `ApiMajor` | 目前为 `1`，用于在下载前判断兼容性。 |
 | `Tags` | 描述插件类别的短标签元数据。 |
 | `RepoUrl` | 源码、问题反馈或项目主页。 |
@@ -132,7 +132,7 @@ JSON 字段名区分大小写，不支持注释或尾随逗号。索引中有多
 | --- | --- | --- |
 | `InternalName` | `id` | 必须完全相同。 |
 | `Version` | `version` | 必须完全相同，并使用 SemVer。 |
-| `Games` | `games` | 两处都应包含目标游戏；当前为 `nte`。 |
+| `Games` | `games` | 两处都应包含目标游戏；当前为 `mayday`。 |
 | `ApiMajor` | `api.major` | 应完全相同，并与目标 Runtime 的 Plugin API 主版本一致。 |
 | `DownloadLinkInstall` | 发布的 ZIP | 必须是可直接下载该版本 ZIP 的 HTTPS URL。 |
 

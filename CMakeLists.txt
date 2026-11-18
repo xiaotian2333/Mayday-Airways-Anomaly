@@ -526,9 +526,9 @@ target_compile_options(anomaly_internal_memory_services PRIVATE /W4 /permissive-
 target_link_libraries(anomaly_internal_memory_services PUBLIC ue5mem_memory)
 
 
-# AdapterServiceRegistry：插件可见的服务表注册中心（通用设施，原在 ue5 目录，Mayday 改造迁出）
-# pak_mod_catalog/mod_group_names：mod 目录枚举（原在 nte 目录；Mayday 改造时将替换为
-# Unity 语义的 mod 模型，先原样迁出保构建）
+# AdapterServiceRegistry：插件可见的服务表注册中心（通用设施）
+# pak_mod_catalog/mod_group_names：mod 目录枚举；Mayday 的 Unity 语义 mod 模型
+# 适配完成前先原样保留保构建
 add_library(anomaly_adapter_services STATIC
     src/services/adapter_service_registry.cpp
     src/services/pak_mod_catalog.cpp

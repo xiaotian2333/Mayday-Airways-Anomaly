@@ -196,7 +196,7 @@ if (!config) { /* 该服务不可用，降级处理 */ }
   "version": "1.0.0",
   "entry": "plugin.dll",
   "api": {"major": 1, "minMinor": 0, "maxMinor": 0},
-  "games": ["nte"],
+  "games": ["mayday"],
   "builds": ["mayday-*"],
   "loadPhase": "game-ready",
   "services": [

@@ -80,7 +80,7 @@ struct RepositoryCoordinatorOptions {
     std::filesystem::path runtime_root;
     std::filesystem::path configuration_file{L"plugin-repositories.json"};
     std::filesystem::path plugin_directory{L"plugins"};
-    std::string game;             // host game id (e.g. "nte") for compatibility filtering
+    std::string game;             // host game id (e.g. "mayday") for compatibility filtering
     std::uint32_t api_major{};    // host plugin ABI major, for compatibility filtering
     bool automatic_refresh{true};
 };

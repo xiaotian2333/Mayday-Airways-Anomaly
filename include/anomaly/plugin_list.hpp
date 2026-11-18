@@ -18,7 +18,7 @@ struct PluginListEntry {
     std::string author;                // ("Author")
     std::string punchline;             // one-line summary ("Punchline")
     std::string description;           // ("Description")
-    std::vector<std::string> games;    // Anomaly game ids ("Games"), e.g. ["nte"]
+    std::vector<std::string> games;    // Anomaly game ids ("Games"), e.g. ["mayday"]
     std::uint32_t api_major{};         // required Anomaly ABI major ("ApiMajor")
     std::vector<std::string> tags;     // ("Tags")
     std::string repo_url;              // ("RepoUrl")

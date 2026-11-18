@@ -3829,6 +3829,25 @@ private:
         EndShellBodyChild();
     }
 
+    // 仓库处于有意停用状态（配置禁用或未配置源）时显示中性引导，
+    // 与真正的故障（Unavailable）区分开。
+    void DrawShellRepositoryIdle() {
+        BeginShellBodyChild("PlatformRepositoryIdle");
+        ImGui::SetCursorPosY(std::max(24.0f, ImGui::GetContentRegionAvail().y * 0.18f));
+        ImGui::TextDisabled("%s",
+            Text(anomaly::MessageId::PluginsRepositoryIdle));
+        ImGui::PushTextWrapPos(std::min(620.0f, ImGui::GetContentRegionAvail().x));
+        ImGui::TextDisabled("%s",
+            Text(anomaly::MessageId::PluginsRepositoryIdleHint));
+        ImGui::PopTextWrapPos();
+        const std::string configure = StableLabel(
+            anomaly::MessageId::PluginsRepositoryConfigure, "repository-idle-configure");
+        if (ImGui::Button(configure.c_str())) {
+            model_.State().plugin_tab = Tab::ThirdParty;
+        }
+        EndShellBodyChild();
+    }
+
     [[nodiscard]] const anomaly::RepositoryPluginView* RepositoryPlugin(
         std::string_view plugin_id) const noexcept {
         const auto& plugins = model_.Snapshot().repository.plugins;
@@ -4131,6 +4150,10 @@ private:
                 BeginShellBodyChild("PlatformRepositoryCatalog", {}, true);
                 DrawRepositoryWorkspace(state.plugin_tab == Tab::Updates);
                 EndShellBodyChild();
+            } else if (repository.state ==
+                anomaly::RepositoryCoordinatorState::Disabled) {
+                // 有意停用（配置禁用/未配源），中性引导而非故障警告。
+                DrawShellRepositoryIdle();
             } else {
                 DrawShellProviderUnavailable(
                     Text(state.plugin_tab == Tab::Available
@@ -6581,7 +6604,7 @@ private:
         case SettingsSection::Advanced:
             row("advanced.developer_mode", Text(anomaly::MessageId::SettingsDeveloperMode),
                 Text(anomaly::MessageId::SettingsDeveloperModeHint),
-                "services hooks memory nte", [&] {
+                "services hooks memory mayday", [&] {
                     anomaly::glass::Switch("##value", &values.advanced_developer_mode);
                 });
             row("advanced.detailed_performance_diagnostics",

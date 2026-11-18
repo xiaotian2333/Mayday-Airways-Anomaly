@@ -204,9 +204,7 @@ foreach ($name in @(
 }
 Add-AllowlistedFile (Join-Path $runtime 'state\diagnostics-summary.json') (1MB)
 Add-AllowlistedDirectoryFiles (Join-Path $runtime 'logs') @('.log', '.jsonl') (16MB)
-Add-AllowlistedDirectoryFiles (Join-Path $runtime 'profiles\nte') @('.json') (1MB)
-Add-AllowlistedDirectoryFiles (Join-Path $runtime 'profiles-local\nte') @('.json') (1MB)
-Add-AllowlistedDirectoryFiles (Join-Path $runtime 'state\profiles\managed\nte') @('.json') (1MB)
+Add-AllowlistedDirectoryFiles (Join-Path $runtime 'profiles\mayday') @('.json') (1MB)
 
 $pluginRoot = Join-Path $runtime 'plugins'
 if (Test-Path -LiteralPath $pluginRoot -PathType Container) {

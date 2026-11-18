@@ -40,7 +40,7 @@ int wmain(int argc, wchar_t** argv) {
     if (command == L"fingerprint") {
         std::string error;
         const auto fingerprint = anomaly::FingerprintPeFile(
-            argv[2], argc > 3 ? Utf8(argv[3]) : "nte", &error);
+            argv[2], argc > 3 ? Utf8(argv[3]) : "mayday", &error);
         if (!fingerprint) {
             std::cerr << error << '\n';
             return 1;
@@ -65,7 +65,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (command == L"catalog") {
-        const std::string game = argc > 3 ? Utf8(argv[3]) : "nte";
+        const std::string game = argc > 3 ? Utf8(argv[3]) : "mayday";
         anomaly::BuildProfileCatalog catalog;
         const auto snapshot = catalog.Scan(argv[2]);
         PrintDiagnostics(snapshot.diagnostics);
