@@ -319,7 +319,7 @@ add_library(anomaly_imgui STATIC
 target_include_directories(anomaly_imgui PUBLIC "${imgui_SOURCE_DIR}"
     PRIVATE include "${GENERATED_DIR}")
 target_compile_definitions(anomaly_imgui PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_imgui PRIVATE /W3 /EHsc)
+target_compile_options(anomaly_imgui PRIVATE /W3 /EHsc /utf-8)  # 消费含中文注释的 SDK 头
 target_link_libraries(anomaly_imgui PUBLIC d3d11 d3d12 dxgi dxguid)
 # The .hlsl files are listed for the IDE only; fxc builds them above.
 set_source_files_properties(
@@ -510,7 +510,7 @@ target_link_libraries(anomaly_config PUBLIC anomaly_i18n)
 add_library(anomaly_telemetry STATIC src/services/telemetry.cpp)
 target_include_directories(anomaly_telemetry PUBLIC include)
 target_compile_definitions(anomaly_telemetry PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_telemetry PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_telemetry PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_telemetry PRIVATE winhttp bcrypt shell32 ole32 nlohmann_json::nlohmann_json)
 
 add_library(anomaly_bootstrap_client STATIC src/bootstrap/bootstrap_client.cpp)
@@ -560,7 +560,7 @@ target_include_directories(anomaly_signature_updater PUBLIC include
     PRIVATE "${minhook_SOURCE_DIR}/src/hde")
 target_compile_definitions(anomaly_signature_updater PUBLIC
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_signature_updater PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_signature_updater PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_signature_updater PUBLIC anomaly_memory
     PRIVATE anomaly_reliable_storage minhook nlohmann_json::nlohmann_json)
 
@@ -629,7 +629,7 @@ add_library(anomaly_reliable_storage STATIC src/services/reliable_storage.cpp)
 target_include_directories(anomaly_reliable_storage PUBLIC include)
 target_compile_definitions(
     anomaly_reliable_storage PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_reliable_storage PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_reliable_storage PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 
 add_library(anomaly_artifact_crypto STATIC src/repository/artifact_crypto.cpp)
 target_include_directories(anomaly_artifact_crypto PUBLIC include)
@@ -642,14 +642,14 @@ add_library(anomaly_launcher_proxy STATIC src/launcher/proxy_installation.cpp)
 target_include_directories(anomaly_launcher_proxy PUBLIC include)
 target_compile_definitions(
     anomaly_launcher_proxy PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_launcher_proxy PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_launcher_proxy PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_launcher_proxy PUBLIC anomaly_artifact_crypto)
 
 add_library(anomaly_launcher_configuration STATIC src/launcher/configuration.cpp)
 target_include_directories(anomaly_launcher_configuration PUBLIC include)
 target_compile_definitions(
     anomaly_launcher_configuration PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_launcher_configuration PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_launcher_configuration PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_launcher_configuration
     PRIVATE nlohmann_json::nlohmann_json Advapi32)
 
@@ -718,7 +718,7 @@ add_library(anomaly_plugin_package STATIC src/plugin/plugin_package.cpp)
 target_include_directories(anomaly_plugin_package PUBLIC include)
 target_compile_definitions(
     anomaly_plugin_package PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_plugin_package PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_plugin_package PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 
 add_library(anomaly_artifact_bundle STATIC src/repository/artifact_bundle.cpp)
 target_include_directories(anomaly_artifact_bundle PUBLIC include)
@@ -804,7 +804,7 @@ add_library(anomaly_plugin_catalog STATIC src/plugin/plugin_catalog.cpp)
 target_include_directories(anomaly_plugin_catalog PUBLIC include)
 target_compile_definitions(
     anomaly_plugin_catalog PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_plugin_catalog PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_plugin_catalog PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(
     anomaly_plugin_catalog PUBLIC anomaly_plugin_compatibility anomaly_plugin_package)
 
@@ -872,13 +872,13 @@ add_library(anomaly_ui_service STATIC src/ui/ui_service_registry.cpp)
 target_include_directories(anomaly_ui_service PUBLIC include)
 target_compile_definitions(
     anomaly_ui_service PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_ui_service PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_ui_service PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 
 add_library(anomaly_platform_ui_model STATIC src/ui/platform_ui_model.cpp)
 target_include_directories(anomaly_platform_ui_model PUBLIC include)
 target_compile_definitions(
     anomaly_platform_ui_model PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_platform_ui_model PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_platform_ui_model PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(
     anomaly_platform_ui_model PUBLIC anomaly_plugin_dependency_resolver
     anomaly_plugin_enablement anomaly_repository_coordinator)
@@ -1106,7 +1106,7 @@ target_link_libraries(anomaly-plugin PRIVATE
 add_executable(anomaly_abi_snapshot apps/abi_snapshot/main.cpp)
 set_target_properties(anomaly_abi_snapshot PROPERTIES OUTPUT_NAME "anomaly-abi-snapshot")
 target_link_libraries(anomaly_abi_snapshot PRIVATE Anomaly::sdk)
-target_compile_options(anomaly_abi_snapshot PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_abi_snapshot PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 
 # Attaches the runtime core to a game that is already running. It shares the mapper the launcher uses,
 # so the attach it performs is the same one the launcher's live-attach mode performs.
@@ -1244,16 +1244,19 @@ if(ANOMALY_BUILD_SDK_EXAMPLES)
         MANIFEST examples/hello_ui/manifest.json
         PACKAGE_NAME HelloUi
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sdk-examples/HelloUi")
+    target_compile_options(anomaly_example_hello_ui PRIVATE /utf-8)  # 示例源码含中文注释
     anomaly_add_plugin(anomaly_example_tick_counter NO_RELEASE
         SOURCES examples/tick_counter/plugin.cpp
         MANIFEST examples/tick_counter/manifest.json
         PACKAGE_NAME TickCounter
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sdk-examples/TickCounter")
+    target_compile_options(anomaly_example_tick_counter PRIVATE /utf-8)  # 示例源码含中文注释
     anomaly_add_plugin(anomaly_example_reliable_config NO_RELEASE
         SOURCES examples/reliable_config/plugin.cpp
         MANIFEST examples/reliable_config/manifest.json
         PACKAGE_NAME ReliableConfig
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sdk-examples/ReliableConfig")
+    target_compile_options(anomaly_example_reliable_config PRIVATE /utf-8)  # 示例源码含中文注释
 endif()
 
 if(ANOMALY_BUILD_BUILTIN_PLUGINS)
