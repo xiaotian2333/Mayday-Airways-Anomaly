@@ -663,6 +663,10 @@ DWORD PrepareMaydayProfile(
     std::stop_token stop_token) {
     if (stop_token.stop_requested()) return ERROR_CANCELLED;
     auto runtime = std::make_shared<anomaly::MaydayProfileRuntime>();
+    // 适配层解析事件（气象/时间符号解析失败等）汇入运行时日志流。
+    runtime->SetLogSink([context](const char* event_id, const std::string& message) {
+        RuntimeLog(context, anomaly::LogLevel::Warning, event_id, message);
+    });
     if (!runtime->Start(stop_token)) {
         return stop_token.stop_requested() ? ERROR_CANCELLED : ERROR_GEN_FAILURE;
     }

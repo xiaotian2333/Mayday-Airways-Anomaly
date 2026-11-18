@@ -11,8 +11,8 @@
 namespace anomaly {
 
 // Mayday Airways (Unity IL2CPP) 游戏适配器。
-// 上游 Ue5NteAdapter 的 Mayday 对应物：tick 回调生命周期与渲染桥的消费面对齐；
-// 引擎符号层走 il2cpp 导出函数（GameAssembly.dll），不做 UE5 特征码 Profile。
+// tick 回调生命周期与渲染桥的消费面对齐；
+// 引擎符号层走 il2cpp 导出函数（GameAssembly.dll），不做特征码 Profile。
 // tick 的帧源是渲染桥的 Present 回调（OnFrame），不再 hook 引擎游戏线程。
 class MaydayAdapter final {
 public:
@@ -42,6 +42,10 @@ public:
     // 即使游戏模块暂未加载也返回 true（降级运行，后续探测成功再发布）。
     [[nodiscard]] bool Start(std::stop_token stop_token);
     bool Stop(std::chrono::milliseconds timeout = std::chrono::seconds(5)) noexcept;
+
+    // 诊断日志汇（Start 前注入）：适配层把解析失败/成功事件转给宿主日志流。
+    using LogSink = std::function<void(const char* event_id, const std::string& message)>;
+    void SetLogSink(LogSink sink);
 
     void SetTickCallback(TickCallback callback);
     // 立即摘除回调并等待已进入的回调返回；超时返回 false 但回调必然已摘除。

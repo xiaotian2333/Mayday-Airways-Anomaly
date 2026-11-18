@@ -4,12 +4,14 @@
 // dev 覆盖机制（游戏自带持续锁定语义）。
 #include "anomaly/sdk/cpp.hpp"
 #include "anomaly/sdk/localization.hpp"
+#include "anomaly/sdk/services/core.h"
 #include "anomaly/sdk/services/json.h"
 #include "anomaly/sdk/services/mayday.h"
 #include "anomaly/sdk/services/platform.h"
 #include "anomaly/sdk/services/ui.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -31,6 +33,7 @@ constexpr int kMaxSeverityMilli = 1000;
 constexpr float kHoursPerDay = 24.0f;
 
 const AnomalyHostApiV1* g_host{};
+const AnomalyCoreServiceV1* g_core{};
 const AnomalyConfigServiceV1* g_config{};
 const AnomalyJsonServiceV1* g_json{};
 const AnomalySchedulerServiceV1* g_scheduler{};
@@ -45,6 +48,14 @@ std::atomic<bool> g_save_scheduled{false};
 std::atomic<int> g_kind_values[kWeatherKindCount]{{-1}, {-1}, {-1}, {-1}, {-1}, {-1}};
 bool g_kind_values_fetched{};                // 仅 UI 线程访问
 std::string g_status;
+bool g_service_logged{};                     // 服务附加日志只打一次
+std::chrono::steady_clock::time_point g_last_state_fail_log{};
+
+void PluginLog(const AnomalyCoreLogLevelV1 level, const std::string& message) {
+    if (g_core == nullptr || g_core->log == nullptr) return;
+    g_core->log(g_core->user, static_cast<std::uint32_t>(level),
+                anomaly::sdk::StringView(message));
+}
 
 AnomalyByteSpanV1 Bytes(const std::string_view value) noexcept {
     return {reinterpret_cast<const std::uint8_t*>(value.data()), value.size()};
@@ -233,6 +244,11 @@ bool ServiceHasField(std::size_t struct_size, std::size_t offset) noexcept {
 void QueryServices() {
     if (g_host == nullptr) return;
     const anomaly::sdk::Host host(g_host);
+    if (g_core == nullptr) {
+        const auto service = host.Query<AnomalyCoreServiceV1>(
+            ANOMALY_CORE_SERVICE_V1_ID, ANOMALY_CORE_SERVICE_V1_VERSION);
+        g_core = service.get();
+    }
     if (g_config == nullptr) {
         const auto service = host.Query<AnomalyConfigServiceV1>(
             ANOMALY_CONFIG_SERVICE_V1_ID, ANOMALY_CONFIG_SERVICE_V1_VERSION);
@@ -243,6 +259,11 @@ void QueryServices() {
             ANOMALY_MAYDAY_WEATHER_SERVICE_V1_ID,
             ANOMALY_MAYDAY_WEATHER_SERVICE_V1_VERSION);
         g_weather = service.get();
+        if (g_weather != nullptr && !g_service_logged) {
+            g_service_logged = true;
+            PluginLog(ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+                      "weather: mayday.weather service attached");
+        }
     }
 }
 
@@ -277,6 +298,7 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
     LoadSettings();
     LocalizedStatus("status.unavailable",
                     "The game is not ready yet. Enter a flight first.");
+    PluginLog(ANOMALY_CORE_LOG_LEVEL_V1_INFO, "weather: plugin loaded (1.0.0)");
     *context = &g_kind_index;
     return anomaly::sdk::Ok();
 }
@@ -292,12 +314,15 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
 
 void ANOMALY_CALL Unload(void*) {
     g_host = nullptr;
+    g_core = nullptr;
     g_config = nullptr;
     g_json = nullptr;
     g_scheduler = nullptr;
     g_weather = nullptr;
     g_config_schema = {};
     g_status.clear();
+    g_service_logged = false;
+    g_kind_values_fetched = false;
 }
 
 void ANOMALY_CALL Update(void*, double) {
@@ -328,6 +353,13 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     if (!state_ok) {
         SetStatusFromService(state_status);
         ui->text(ui->user, anomaly::sdk::StringView(g_status));
+        // 失败原因限流写日志（5 秒一条），便于在宿主日志流里诊断。
+        const auto now = std::chrono::steady_clock::now();
+        if (now - g_last_state_fail_log > std::chrono::seconds(5)) {
+            g_last_state_fail_log = now;
+            PluginLog(ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+                      "weather: get_state failed: " + g_status);
+        }
     }
 
     // ---- 状态区 ----

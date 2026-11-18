@@ -90,7 +90,7 @@ using FnMethodGetParamCount = int (*)(void* method);
 using FnClassGetField = void* (*)(void* klass, const char* name);
 using FnClassGetParent = void* (*)(void* klass);
 using FnFieldGetOffset = std::size_t (*)(void* field);
-using FnFieldGetValue = void* (*)(void* field, void* instance);
+using FnFieldStaticGetValue = void (*)(void* field, void* value);
 using FnRuntimeInvoke = void* (*)(void* method, void* obj, void** params, void** exc);
 using FnThreadAttach = void* (*)(void* domain);
 using FnStringNew = void* (*)(const char* text);
@@ -130,7 +130,7 @@ struct MaydayAdapter::Impl {
     FnMethodGetParamCount method_get_param_count{};
     FnClassGetField class_get_field{};
     FnFieldGetOffset field_get_offset{};
-    FnFieldGetValue field_get_value{};
+    FnFieldStaticGetValue field_static_get_value{};
     FnRuntimeInvoke runtime_invoke{};
     FnThreadAttach thread_attach{};
     FnStringNew string_new{};
@@ -208,31 +208,31 @@ struct MaydayAdapter::Impl {
     static std::atomic<Impl*> freecam_owner;
 
     // ---- 气象/时间：WorldEnvironment / WorldManager / WeatherSystem 解析缓存 ----
-    // 时间 = WorldEnvironment.Hours（anchor 时钟模型 hours = anchorHours + rate * Δt）；
-    // 锁定时间 = 锚点 rate 置 0；天气覆盖 = WorldManager 自带的 dev 覆盖机制。
+    // 时间 = WorldEnvironment.Hours；锚定走官方 Anchor(hours, now, networked,
+    // rate) 方法（rate=0 即冻结），速率用静态 WantedRate()。dev 系列属性
+    // getter 被 IL2CPP 裁剪，覆盖状态不可读，设置走 DevOverrideWeather /
+    // DevClearOverride（存在）。
+    LogSink log_sink;
+    int weather_logged_step{0};        // 同一失败步骤的日志只打一次
     std::atomic<void*> weather_published{nullptr};
     bool weather_resolved{false};
-    float weather_cached_rate{0.0f};   // 锁定前的时钟流速，解锁时恢复
+    bool weather_time_locked{false};   // 宿主记录的锁定意图（换局后可能失效）
+    // 解析失败时的步骤号（诊断 JSON weatherResolveStep）：1 前置 2 环境 3 时钟
+    // 4 世界管理 5 天气系统 6 枚举 7 句柄清点；成功后置 8。
+    std::atomic<int> weather_resolve_step{0};
     void* world_environment_class{};
-    void* world_clock_class{};
     void* world_manager_class{};
     void* weather_system_class{};
     void* weather_kind_class{};
     void* env_get_instance{};
     void* env_get_hours{};
     void* env_set_hours{};
-    void* env_anchor_field{};
-    std::size_t env_anchor_offset{};
-    void* clock_rate_field{};
-    std::size_t clock_rate_offset{};
-    void* clock_anchor_hours_field{};
-    std::size_t clock_anchor_hours_offset{};
+    void* env_get_abs_now{};
+    void* env_anchor_method{};
+    void* env_wanted_rate{};
     void* wm_get_instance{};
     void* wm_dev_override{};
     void* wm_dev_clear{};
-    void* wm_get_dev_weather{};
-    void* wm_get_dev_kind{};
-    void* wm_get_dev_sev{};
     void* ws_get_instance{};
     void* ws_get_kind{};
     void* ws_get_severity{};
@@ -371,8 +371,12 @@ struct MaydayAdapter::Impl {
     void* GameInstance();
     // 拿静态单例实例（WorldEnvironment / WorldManager / WeatherSystem）。
     void* StaticInstance(void* get_instance_method);
+    // 官方锚定入口 Anchor(hours, now, networked, rate)：重锚定到目标时刻，
+    // 锁定期 rate=0 冻结时钟，否则用 WantedRate() 的游戏期望速率。
+    bool AnchorEnvironment(void* env, float hours);
     bool InvokeInt(void* method, void* object, std::int32_t* out_value);
     bool InvokeFloat(void* method, void* object, float* out_value);
+    bool InvokeDouble(void* method, void* object, double* out_value);
     bool InvokeVoid(void* method, void* object, void** params);
     bool InvokeVec3(void* method, void* object, Vec3* out_value);
     bool InvokeQuat(void* method, void* object, Quat* out_value);
@@ -461,7 +465,7 @@ bool MaydayAdapter::Impl::ResolveExports(const HMODULE game_assembly) {
         {reinterpret_cast<void**>(&method_get_param_count), "il2cpp_method_get_param_count"},
         {reinterpret_cast<void**>(&class_get_field), "il2cpp_class_get_field_from_name"},
         {reinterpret_cast<void**>(&field_get_offset), "il2cpp_field_get_offset"},
-        {reinterpret_cast<void**>(&field_get_value), "il2cpp_field_get_value"},
+        {reinterpret_cast<void**>(&field_static_get_value), "il2cpp_field_static_get_value"},
         {reinterpret_cast<void**>(&runtime_invoke), "il2cpp_runtime_invoke"},
         {reinterpret_cast<void**>(&thread_attach), "il2cpp_thread_attach"},
         {reinterpret_cast<void**>(&string_new), "il2cpp_string_new"},
@@ -625,14 +629,17 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherGetState(
     if (!impl->InvokeFloat(impl->env_get_hours, env, &state.hours)) {
         return MoneyStatus("status.failed");
     }
-    // 锚点时钟：rate = 0 即时间锁定；读不到锚点对象时保持 0 并视为未锁定。
-    void* anchor = *reinterpret_cast<void**>(
-        reinterpret_cast<std::uint8_t*>(env) + impl->env_anchor_offset);
-    if (anchor != nullptr) {
-        state.rate = *reinterpret_cast<const float*>(
-            reinterpret_cast<const std::uint8_t*>(anchor) + impl->clock_rate_offset);
-    }
-    state.time_locked = state.rate == 0.0f ? 1 : 0;
+    // dev 系列属性 getter 被 IL2CPP 裁剪，覆盖状态不可读：由宿主锁定意图
+    // 记录（weather_time_locked / override 语义）驱动显示，仅作参考。
+    state.time_locked = impl->weather_time_locked ? 1 : 0;
+    state.rate = impl->weather_time_locked
+        ? 0.0f
+        : [&] {
+              float wanted = 0.0f;
+              return impl->InvokeFloat(impl->env_wanted_rate, nullptr, &wanted)
+                  ? wanted
+                  : -1.0f;
+          }();
     std::int32_t kind{};
     if (impl->InvokeInt(impl->ws_get_kind, ws, &kind)) {
         state.kind_value = kind;
@@ -640,18 +647,6 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherGetState(
     float severity{};
     if (impl->InvokeFloat(impl->ws_get_severity, ws, &severity)) {
         state.severity = severity;
-    }
-    bool dev_active{};
-    if (impl->InvokeBool(impl->wm_get_dev_weather, wm, &dev_active)) {
-        state.override_active = dev_active ? 1 : 0;
-        std::int32_t dev_kind{};
-        float dev_severity{};
-        if (impl->InvokeInt(impl->wm_get_dev_kind, wm, &dev_kind)) {
-            state.override_kind_value = dev_kind;
-        }
-        if (impl->InvokeFloat(impl->wm_get_dev_sev, wm, &dev_severity)) {
-            state.override_severity = dev_severity;
-        }
     }
     *out_state = state;
     return {ANOMALY_STATUS_V1_OK, 0, {}};
@@ -669,24 +664,9 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherSetTime(
     if (impl->AttachedThread() == nullptr) return MoneyStatus("status.attach_failed");
     void* const env = impl->StaticInstance(impl->env_get_instance);
     if (env == nullptr) return MoneyStatus("status.not_in_flight");
-    float current{};
-    if (!impl->InvokeFloat(impl->env_get_hours, env, &current)) {
-        return MoneyStatus("status.failed");
-    }
-    // anchor 时钟模型：只调 set_Hours 会被下一帧时钟推进覆盖，必须把锚点
-    // anchorHours 平移 delta，使 HoursAt(now) 立即等于目标时刻。
-    void* anchor = *reinterpret_cast<void**>(
-        reinterpret_cast<std::uint8_t*>(env) + impl->env_anchor_offset);
-    if (anchor == nullptr) return MoneyStatus("status.failed");
-    const float delta = hours - current;
-    double* const anchor_hours = reinterpret_cast<double*>(
-        reinterpret_cast<std::uint8_t*>(anchor) + impl->clock_anchor_hours_offset);
-    *anchor_hours += static_cast<double>(delta);
-    void* params[] = {&hours};
-    if (!impl->InvokeVoid(impl->env_set_hours, env, params)) {
-        return MoneyStatus("status.failed");
-    }
-    return {ANOMALY_STATUS_V1_OK, 0, {}};
+    return impl->AnchorEnvironment(env, hours)
+        ? AnomalyStatusV1{ANOMALY_STATUS_V1_OK, 0, {}}
+        : MoneyStatus("status.failed");
 }
 
 AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherSetTimeLocked(
@@ -698,22 +678,15 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherSetTimeLocked(
     if (impl->AttachedThread() == nullptr) return MoneyStatus("status.attach_failed");
     void* const env = impl->StaticInstance(impl->env_get_instance);
     if (env == nullptr) return MoneyStatus("status.not_in_flight");
-    void* anchor = *reinterpret_cast<void**>(
-        reinterpret_cast<std::uint8_t*>(env) + impl->env_anchor_offset);
-    if (anchor == nullptr) return MoneyStatus("status.failed");
-    float* const rate = reinterpret_cast<float*>(
-        reinterpret_cast<std::uint8_t*>(anchor) + impl->clock_rate_offset);
-    if (locked != 0) {
-        if (*rate != 0.0f) impl->weather_cached_rate = *rate;
-        *rate = 0.0f;
-        return {ANOMALY_STATUS_V1_OK, 0, {}};
+    impl->weather_time_locked = locked != 0;
+    float current_hours{};
+    if (!impl->InvokeFloat(impl->env_get_hours, env, &current_hours)) {
+        return MoneyStatus("status.failed");
     }
-    // 未锁定时保持现状，避免换局后用陈旧缓存覆盖新时钟。
-    if (*rate == 0.0f) {
-        *rate = impl->weather_cached_rate > 0.0f ? impl->weather_cached_rate : 1.0f;
-        impl->weather_cached_rate = 0.0f;
-    }
-    return {ANOMALY_STATUS_V1_OK, 0, {}};
+    // Anchor 一次即持久生效（rate=0 冻结时钟）；解锁恢复 WantedRate。
+    return impl->AnchorEnvironment(env, current_hours)
+        ? AnomalyStatusV1{ANOMALY_STATUS_V1_OK, 0, {}}
+        : MoneyStatus("status.failed");
 }
 
 AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherSetWeatherOverride(
@@ -794,6 +767,10 @@ void MaydayAdapter::Impl::PublishWeatherService() {
     }
 }
 
+void MaydayAdapter::SetLogSink(LogSink sink) {
+    impl_->log_sink = std::move(sink);
+}
+
 bool MaydayAdapter::Impl::EnsureGameImage() {
     if (image != nullptr) return true;
     if (domain_get == nullptr || domain_get_assemblies == nullptr ||
@@ -842,79 +819,115 @@ bool MaydayAdapter::Impl::ResolveGame() {
 }
 
 bool MaydayAdapter::Impl::ResolveWeather() {
+    // 步骤号进诊断 JSON（weatherResolveStep）；失败同时经日志汇写入运行时日志。
+    const auto fail = [this](int step) {
+        weather_resolve_step.store(step, std::memory_order_release);
+        if (log_sink != nullptr && weather_logged_step != step) {
+            weather_logged_step = step;
+            log_sink("weather.resolve_failed",
+                     "resolve failed at step " + std::to_string(step) +
+                     " (2 env, 3 clock, 4 world manager, 5 system, 6 enum)");
+        }
+        return false;
+    };
     if (weather_resolved) return true;
     if (class_from_name == nullptr || class_get_method == nullptr ||
         class_get_field == nullptr || field_get_offset == nullptr ||
-        field_get_value == nullptr || runtime_invoke == nullptr ||
+        field_static_get_value == nullptr || runtime_invoke == nullptr ||
         object_unbox == nullptr) {
-        return false;
+        return fail(1);
     }
-    if (!EnsureGameImage()) return false;
+    if (!EnsureGameImage()) return fail(1);
 
-    // 时间：WorldEnvironment 静态单例 + Hours 属性 + anchor 时钟字段。
+    // 时间：WorldEnvironment 静态单例 + Hours 属性 + 官方锚定方法。
+    // get_anchor 与 WorldClock 字段访问被 IL2CPP 裁剪，改走 Anchor 方法。
+    weather_resolve_step.store(2, std::memory_order_release);
     world_environment_class = class_from_name(image, "Mayday.World", "WorldEnvironment");
-    if (world_environment_class == nullptr) return false;
+    if (world_environment_class == nullptr) return fail(2);
     env_get_instance = class_get_method(world_environment_class, "get_Instance", 0);
     env_get_hours = class_get_method(world_environment_class, "get_Hours", 0);
     env_set_hours = class_get_method(world_environment_class, "set_Hours", 1);
-    env_anchor_field = class_get_field(world_environment_class, "anchor");
-    if (env_anchor_field != nullptr) {
-        env_anchor_offset = field_get_offset(env_anchor_field);
-    }
-    world_clock_class = class_from_name(image, "Mayday.World", "WorldClock");
-    if (world_clock_class != nullptr) {
-        clock_rate_field = class_get_field(world_clock_class, "rate");
-        if (clock_rate_field != nullptr) {
-            clock_rate_offset = field_get_offset(clock_rate_field);
-        }
-        clock_anchor_hours_field = class_get_field(world_clock_class, "anchorHours");
-        if (clock_anchor_hours_field != nullptr) {
-            clock_anchor_hours_offset = field_get_offset(clock_anchor_hours_field);
-        }
-    }
+    env_get_abs_now = class_get_method(world_environment_class, "get_AbsNow", 0);
+    env_anchor_method = class_get_method(world_environment_class, "Anchor", 4);
+    env_wanted_rate = class_get_method(world_environment_class, "WantedRate", 0);
     // 天气：WorldManager 自带的 dev 覆盖机制 + WeatherSystem 当前状态。
+    weather_resolve_step.store(4, std::memory_order_release);
     world_manager_class = class_from_name(image, "Mayday.World", "WorldManager");
-    if (world_manager_class == nullptr) return false;
+    if (world_manager_class == nullptr) return fail(4);
     wm_get_instance = class_get_method(world_manager_class, "get_Instance", 0);
     wm_dev_override = class_get_method(world_manager_class, "DevOverrideWeather", 3);
     wm_dev_clear = class_get_method(world_manager_class, "DevClearOverride", 0);
-    wm_get_dev_weather = class_get_method(world_manager_class, "get_devWeather", 0);
-    wm_get_dev_kind = class_get_method(world_manager_class, "get_devWeatherKind", 0);
-    wm_get_dev_sev = class_get_method(world_manager_class, "get_devWeatherSev", 0);
+    weather_resolve_step.store(5, std::memory_order_release);
     weather_system_class = class_from_name(image, "Mayday.World", "WeatherSystem");
-    if (weather_system_class == nullptr) return false;
+    if (weather_system_class == nullptr) return fail(5);
     ws_get_instance = class_get_method(weather_system_class, "get_Instance", 0);
     ws_get_kind = class_get_method(weather_system_class, "get_Kind", 0);
     ws_get_severity = class_get_method(weather_system_class, "get_Severity", 0);
-    if (env_get_instance == nullptr || env_get_hours == nullptr ||
-        env_set_hours == nullptr || env_anchor_field == nullptr ||
-        world_clock_class == nullptr || clock_rate_field == nullptr ||
-        clock_anchor_hours_field == nullptr || wm_get_instance == nullptr ||
-        wm_dev_override == nullptr || wm_dev_clear == nullptr ||
-        wm_get_dev_weather == nullptr || wm_get_dev_kind == nullptr ||
-        wm_get_dev_sev == nullptr || ws_get_instance == nullptr ||
-        ws_get_kind == nullptr || ws_get_severity == nullptr) {
+
+    // 全部必需句柄清点：日志精确列出缺失项（IL2CPP 裁剪可能单独裁掉属性
+    // getter 等未被游戏引用的方法，逐项点名才能定位）。
+    struct NamedHandle { const char* name; void* handle; };
+    const NamedHandle required[] = {
+        {"env.get_Instance", env_get_instance},
+        {"env.get_Hours", env_get_hours},
+        {"env.set_Hours", env_set_hours},
+        {"env.get_AbsNow", env_get_abs_now},
+        {"env.Anchor", env_anchor_method},
+        {"env.WantedRate", env_wanted_rate},
+        {"wm.get_Instance", wm_get_instance},
+        {"wm.DevOverrideWeather", wm_dev_override},
+        {"wm.DevClearOverride", wm_dev_clear},
+        {"ws.get_Instance", ws_get_instance},
+        {"ws.get_Kind", ws_get_kind},
+        {"ws.get_Severity", ws_get_severity},
+    };
+    std::string missing;
+    for (const auto& entry : required) {
+        if (entry.handle == nullptr) {
+            if (!missing.empty()) missing += ' ';
+            missing += entry.name;
+        }
+    }
+    if (!missing.empty()) {
+        weather_resolve_step.store(7, std::memory_order_release);
+        if (log_sink != nullptr && weather_logged_step != 7) {
+            weather_logged_step = 7;
+            log_sink("weather.resolve_failed", "missing handles: " + missing);
+        }
         return false;
     }
 
     // WeatherKind 枚举值按字段名运行时解析；数值互不相同才算可信。
+    // 枚举字面字段是 static literal，走 il2cpp_field_static_get_value 直读。
+    weather_resolve_step.store(6, std::memory_order_release);
     weather_kind_class = class_from_name(image, "Mayday", "WeatherKind");
-    if (weather_kind_class == nullptr) return false;
+    if (weather_kind_class == nullptr) return fail(6);
     std::array<std::int32_t, std::size(kWeatherKindNames)> parsed{};
     for (std::size_t i = 0; i < std::size(kWeatherKindNames); ++i) {
         void* const field = class_get_field(weather_kind_class, kWeatherKindNames[i]);
-        if (field == nullptr) return false;
-        void* const boxed = field_get_value(field, nullptr);
-        if (boxed == nullptr) return false;
-        parsed[i] = *static_cast<std::int32_t*>(object_unbox(boxed));
+        if (field == nullptr) return fail(6);
+        std::int32_t value = 0;
+        field_static_get_value(field, &value);
+        parsed[i] = value;
     }
     for (std::size_t a = 0; a < std::size(parsed); ++a) {
         for (std::size_t b = a + 1; b < std::size(parsed); ++b) {
-            if (parsed[a] == parsed[b]) return false;
+            if (parsed[a] == parsed[b]) return fail(6);
         }
     }
     kind_values = parsed;
     weather_resolved = true;
+    weather_resolve_step.store(8, std::memory_order_release);
+    if (log_sink != nullptr && weather_logged_step != 8) {
+        weather_logged_step = 8;
+        log_sink("weather.resolved",
+                 "kind values: Calm=" + std::to_string(kind_values[0]) +
+                 " Cloudy=" + std::to_string(kind_values[1]) +
+                 " Rain=" + std::to_string(kind_values[2]) +
+                 " Storm=" + std::to_string(kind_values[3]) +
+                 " Fog=" + std::to_string(kind_values[4]) +
+                 " Snow=" + std::to_string(kind_values[5]));
+    }
     return true;
 }
 
@@ -1075,6 +1088,21 @@ void* MaydayAdapter::Impl::StaticInstance(void* get_instance_method) {
     return runtime_invoke(get_instance_method, nullptr, nullptr, &exception);
 }
 
+bool MaydayAdapter::Impl::AnchorEnvironment(void* env, float hours) {
+    // AbsNow 与锚点时钟同基准；networked 传 false（本地覆盖）。
+    double now = 0.0;
+    if (!InvokeDouble(env_get_abs_now, env, &now)) return false;
+    double anchored_hours = static_cast<double>(hours);
+    float rate = 0.0f;
+    if (!weather_time_locked) {
+        if (!InvokeFloat(env_wanted_rate, nullptr, &rate)) return false;
+        if (!(rate > 0.0f)) rate = 1.0f;
+    }
+    std::uint8_t networked = 0;
+    void* params[] = {&anchored_hours, &now, &networked, &rate};
+    return InvokeVoid(env_anchor_method, env, params);
+}
+
 bool MaydayAdapter::Impl::InvokeInt(
     void* method, void* object, std::int32_t* out_value) {
     if (method == nullptr || out_value == nullptr) return false;
@@ -1092,6 +1120,16 @@ bool MaydayAdapter::Impl::InvokeFloat(
     void* const boxed = runtime_invoke(method, object, nullptr, &exception);
     if (exception != nullptr || boxed == nullptr || object_unbox == nullptr) return false;
     *out_value = *static_cast<float*>(object_unbox(boxed));
+    return true;
+}
+
+bool MaydayAdapter::Impl::InvokeDouble(
+    void* method, void* object, double* out_value) {
+    if (method == nullptr || out_value == nullptr) return false;
+    void* exception{};
+    void* const boxed = runtime_invoke(method, object, nullptr, &exception);
+    if (exception != nullptr || boxed == nullptr || object_unbox == nullptr) return false;
+    *out_value = *static_cast<double*>(object_unbox(boxed));
     return true;
 }
 
@@ -2430,6 +2468,11 @@ std::string MaydayAdapter::DiagnosticsJson() const {
          << (impl_->money_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
          << ",\"freecamServicePublished\":"
          << (impl_->freecam_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
+         << ",\"weatherServicePublished\":"
+         << (impl_->weather_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
+         << ",\"weatherResolved\":"
+         << (impl_->weather_resolved ? "true" : "false")
+         << ",\"weatherResolveStep\":" << impl_->weather_resolve_step.load(std::memory_order_acquire)
          << ",\"inputBlockHooks\":"
          << (impl_->input_hook_installed.load(std::memory_order_acquire) ? "true" : "false")
          << ",\"eventSystemHook\":"
@@ -2462,6 +2505,10 @@ struct MaydayProfileRuntime::Impl {
 
 MaydayProfileRuntime::MaydayProfileRuntime() : impl_(std::make_unique<Impl>()) {
     impl_->adapter = std::make_shared<MaydayAdapter>();
+}
+
+void MaydayProfileRuntime::SetLogSink(LogSink sink) {
+    if (impl_->adapter != nullptr) impl_->adapter->SetLogSink(std::move(sink));
 }
 
 MaydayProfileRuntime::~MaydayProfileRuntime() = default;
