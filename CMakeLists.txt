@@ -382,7 +382,6 @@ configure_file(
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/locales/host/en-US.json"
     "${CMAKE_SOURCE_DIR}/schemas/plugin-manifest.schema.json"
-    "${CMAKE_SOURCE_DIR}/schemas/build-profile.schema.json"
     "${CMAKE_SOURCE_DIR}/schemas/repository-cache.schema.json"
     "${CMAKE_SOURCE_DIR}/schemas/repository-config.schema.json"
     "${CMAKE_SOURCE_DIR}/schemas/repository-index.schema.json"
@@ -416,13 +415,6 @@ configure_file(
     @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/schemas/plugin-profile.schema.json")
-file(READ
-    "${CMAKE_SOURCE_DIR}/schemas/build-profile.schema.json"
-    ANOMALY_BUILD_PROFILE_SCHEMA_JSON)
-configure_file(
-    "${CMAKE_SOURCE_DIR}/cmake/build_profile_schema.hpp.in"
-    "${GENERATED_DIR}/build_profile_schema.hpp"
-    @ONLY)
 file(READ
     "${CMAKE_SOURCE_DIR}/schemas/repository-index.schema.json"
     ANOMALY_REPOSITORY_INDEX_SCHEMA_JSON)
@@ -579,17 +571,6 @@ target_compile_definitions(
 target_compile_options(anomaly_websocket_server PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(anomaly_websocket_server PUBLIC Ws2_32 bcrypt)
 
-
-# Runtime pak mod loading: discovers containers under the game's Paks directory, mounts them through
-# the resolved FPakPlatformFile, and reconciles the mounted set with the directory (hot swap).
-add_library(anomaly_pak_mod_runtime STATIC src/runtime/pak_mod_runtime.cpp)
-target_include_directories(anomaly_pak_mod_runtime PUBLIC include)
-target_compile_definitions(
-    anomaly_pak_mod_runtime PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_pak_mod_runtime PRIVATE /W4 /permissive- /EHsc /utf-8)
-target_link_libraries(
-    anomaly_pak_mod_runtime PUBLIC anomaly_adapter_services
-    PRIVATE nlohmann_json::nlohmann_json anomaly_adapter_services)
 
 add_library(ue5mem_core STATIC
     src/diagnostics/analyzer.cpp
@@ -786,7 +767,7 @@ target_compile_definitions(
     anomaly_update_transaction PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anomaly_update_transaction PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(anomaly_update_transaction PUBLIC
-    anomaly_repository_index anomaly_artifact_bundle anomaly_build_profile anomaly_plugin_manifest
+    anomaly_repository_index anomaly_artifact_bundle anomaly_plugin_manifest
     PRIVATE nlohmann_json::nlohmann_json)
 
 add_library(anomaly_repository_network STATIC src/repository/repository_network.cpp)
@@ -987,7 +968,6 @@ target_link_libraries(
     anomaly_plugin_shadow
     anomaly_plugin_dependency_resolver
     anomaly_plugin_enablement
-    anomaly_pak_mod_runtime
     anomaly_websocket_server
     anomaly_repository_coordinator
     anomaly_crash_reporter
@@ -1038,7 +1018,6 @@ set(ANOMALY_MANUAL_MAP_TLS_FREE_TARGETS
     anomaly_signature_updater
     anomaly_plugin_shadow
     anomaly_plugin_native_dependency
-    anomaly_pak_mod_runtime
     anomaly_adapter_services
     anomaly_websocket_server
     anomaly_crash_reporter
@@ -1366,7 +1345,7 @@ endif()
 set(ANOMALY_RELEASE_PE_TARGETS
     dwmapi anomaly_core anomaly_launcher
     anomaly-plugin anomaly_abi_snapshot anomaly_test_host
-    anomaly-profile anomaly_cli anomaly_inspect anomaly_injector)
+    anomaly_cli anomaly_inspect anomaly_injector)
 get_property(ANOMALY_RELEASE_PLUGIN_TARGETS GLOBAL PROPERTY ANOMALY_RELEASE_PLUGIN_TARGETS)
 list(REMOVE_DUPLICATES ANOMALY_RELEASE_PLUGIN_TARGETS)
 foreach(runtime_plugin_target IN LISTS ANOMALY_RELEASE_PLUGIN_TARGETS)
@@ -1430,7 +1409,7 @@ install(DIRECTORY include/anomaly/sdk/
     PATTERN "version.h" EXCLUDE)
 install(FILES "${ANOMALY_GENERATED_INSTALL_INCLUDE_DIR}/anomaly/sdk/version.h"
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/anomaly/sdk COMPONENT SDK)
-install(FILES schemas/plugin-manifest.schema.json schemas/plugin-profile.schema.json schemas/build-profile.schema.json
+install(FILES schemas/plugin-manifest.schema.json schemas/plugin-profile.schema.json
     schemas/repository-config.schema.json
     schemas/repository-index.schema.json schemas/plugin-enablement.schema.json
     DESTINATION ${CMAKE_INSTALL_DATADIR}/anomaly/schemas COMPONENT SDK)
