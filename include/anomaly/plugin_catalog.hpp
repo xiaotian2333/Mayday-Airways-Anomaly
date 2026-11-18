@@ -20,6 +20,22 @@ enum class PluginCatalogStatus : std::uint8_t {
     Incompatible,
 };
 
+// 透明哈希与等价比较：允许以 string_view 直接查找键为 std::string 的索引，
+// 避免 noexcept 查找路径构造临时 std::string（分配失败即 terminate）。
+struct TransparentStringHash {
+    using is_transparent = void;
+    [[nodiscard]] std::size_t operator()(std::string_view value) const noexcept {
+        return std::hash<std::string_view>{}(value);
+    }
+};
+
+struct TransparentStringEqual {
+    using is_transparent = void;
+    [[nodiscard]] bool operator()(std::string_view left, std::string_view right) const noexcept {
+        return left == right;
+    }
+};
+
 struct PluginCatalogIssue {
     std::string code;
     std::string path;
@@ -55,7 +71,8 @@ public:
 
 private:
     std::vector<PluginCatalogEntry> entries_;
-    std::unordered_map<std::string, std::size_t> index_;
+    std::unordered_map<std::string, std::size_t, TransparentStringHash, TransparentStringEqual>
+        index_;
 };
 
 [[nodiscard]] PluginCatalogSnapshot DiscoverPluginCatalog(

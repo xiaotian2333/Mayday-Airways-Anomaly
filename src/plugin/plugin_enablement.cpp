@@ -105,10 +105,15 @@ bool PluginEnablementStore::Save(std::string* error) const {
         output.flush();
         output.close();
         if (!output) throw std::runtime_error("plugin enablement write failed");
-        std::filesystem::remove(file_, file_error);
-        file_error.clear();
-        std::filesystem::rename(temporary, file_, file_error);
-        if (file_error) throw std::runtime_error("plugin enablement publish failed");
+        // 原子发布：MoveFileExW 单步替换目标文件，避免 remove+rename 之间的
+        // 空窗（崩溃或并发读时会丢文件），并与仓库内其他持久化写入范式一致。
+        if (!MoveFileExW(
+                temporary.c_str(), file_.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            std::error_code remove_error;
+            std::filesystem::remove(temporary, remove_error);
+            throw std::runtime_error("plugin enablement publish failed");
+        }
         return true;
     } catch (const std::exception& exception) {
         if (error) *error = exception.what();
@@ -151,13 +156,9 @@ PluginEnablementStore::Resolve(const PluginCatalogSnapshot& catalog) const {
                 if (dependency.optional) continue;
                 const auto dependency_decision = decisions.find(dependency.id);
                 if (dependency_decision == decisions.end()) continue;
-                const auto configured = state_.plugins.find(dependency.id);
-                if (configured != state_.plugins.end() && !configured->second) {
-                    decision.enabled = false;
-                    decision.reason = "disabled because dependency " + dependency.id + " is disabled";
-                    changed = true;
-                    break;
-                }
+                // 与 UI 启用入口（SetDependencies）语义一致：启用插件必然提升其
+                // 必需依赖启用，即使该依赖在配置中被显式禁用；禁用入口由
+                // DisableDependents 负责同步禁用依赖者。
                 if (!dependency_decision->second.enabled) {
                     dependency_decision->second.enabled = true;
                     dependency_decision->second.reason =

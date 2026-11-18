@@ -26,8 +26,10 @@ public:
 private:
     std::vector<AvailablePluginVersion> plugins_;
     std::vector<AvailableServiceVersion> services_;
-    std::unordered_map<std::string, std::size_t> plugin_index_;
-    std::unordered_map<std::string, std::size_t> service_index_;
+    std::unordered_map<std::string, std::size_t, TransparentStringHash, TransparentStringEqual>
+        plugin_index_;
+    std::unordered_map<std::string, std::size_t, TransparentStringHash, TransparentStringEqual>
+        service_index_;
     std::vector<std::string> duplicate_ids_;
 };
 

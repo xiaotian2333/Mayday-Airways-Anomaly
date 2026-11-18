@@ -234,6 +234,7 @@ public:
             std::scoped_lock lock(mutex_);
             const auto found = endpoints_.find(endpoint->id);
             if (found != endpoints_.end() && found->second == endpoint) endpoints_.erase(found);
+            endpoints_by_token_.erase(endpoint->token);
             for (const auto& [token, subscription] : subscriptions_) {
                 if (subscription && subscription->endpoint == endpoint && subscription->owner.scope) {
                     dependants.emplace_back(subscription->owner.scope, token);
@@ -378,6 +379,9 @@ public:
             result = Status(ANOMALY_STATUS_V1_FAILED, ANOMALY_IPC_ERROR_V1_NONE,
                 "IPC provider callback failed");
         }
+        // provider 越过信任边界写出的产出长度不可信：超过调用者缓冲即视为无效
+        // 输出并清零，保证调用者永远拿不到超过自己缓冲的 response_size。
+        if (*response_size > response.size) *response_size = 0;
         const double milliseconds = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
         {
@@ -423,6 +427,8 @@ public:
 
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<Endpoint>> endpoints_;
+    // token 全局唯一（所有 PluginScope 共享同一 ledger），按 token 的 O(1) 索引。
+    std::unordered_map<std::uint64_t, std::shared_ptr<Endpoint>> endpoints_by_token_;
     std::unordered_map<std::uint64_t, std::shared_ptr<Pending>> pending_;
     std::unordered_map<std::uint64_t, std::shared_ptr<Subscription>> subscriptions_;
     std::atomic_uint64_t next_request_id_{1};
@@ -466,20 +472,30 @@ private:
                     std::scoped_lock metrics_lock(mutex_);
                     ++pending->endpoint->timeouts;
                 }
-                auto lease = pending->owner.scope->AcquireCallback(
-                    pending->owner.scope->Generation());
-                if (lease && pending->active.load(std::memory_order_acquire)) {
-                    try {
-                        pending->completion(
-                            pending->completion_user,
-                            {pending->token, pending->owner.scope->Generation()},
-                            Status(ANOMALY_STATUS_V1_TIMEOUT, ANOMALY_IPC_ERROR_V1_TIMEOUT,
-                                "IPC request timed out"),
-                            {});
-                    } catch (...) {
+                // 超时完成回调与正常完成路径一致，经 Post 投递到端点亲和域执行；
+                // 仅当投递不可用时才在 timeout 线程原地兜底调用（兜底语义见
+                // include/anomaly/sdk/services/ipc.h 的 completion 契约注释）。
+                const AnomalyStatusV1 timeout_status = Status(
+                    ANOMALY_STATUS_V1_TIMEOUT, ANOMALY_IPC_ERROR_V1_TIMEOUT,
+                    "IPC request timed out");
+                const auto deliver = [pending, timeout_status] {
+                    auto lease = pending->owner.scope->AcquireCallback(
+                        pending->owner.scope->Generation());
+                    if (lease && pending->active.load(std::memory_order_acquire)) {
+                        try {
+                            pending->completion(
+                                pending->completion_user,
+                                {pending->token, pending->owner.scope->Generation()},
+                                timeout_status, {});
+                        } catch (...) {
+                        }
                     }
+                    static_cast<void>(pending->owner.scope->Release(pending->token));
+                };
+                if (!Post(pending->endpoint->affinity, pending->owner.scope->Owner(),
+                        pending->owner.scope->Generation(), deliver)) {
+                    deliver();
                 }
-                static_cast<void>(pending->owner.scope->Release(pending->token));
             }
             lock.lock();
         }
@@ -553,14 +569,6 @@ AnomalyStatusV1 IpcRegistry::RegisterEndpoint(
         state->maximum_queue_depth = descriptor->maximum_queue_depth;
         state->handler = request_handler;
         state->callback_user = callback_user;
-        {
-            std::scoped_lock lock(impl_->mutex_);
-            if (impl_->endpoints_.contains(state->id)) {
-                return Status(ANOMALY_STATUS_V1_CONFLICT,
-                    ANOMALY_IPC_ERROR_V1_VERSION_MISMATCH,
-                    "IPC endpoint ID is already registered");
-            }
-        }
         const std::weak_ptr<Impl> weak_impl = impl_;
         state->token = owner.scope->Register(
             PluginResourceKind::Ipc, "ipc.endpoint:" + state->id,
@@ -579,6 +587,7 @@ AnomalyStatusV1 IpcRegistry::RegisterEndpoint(
                     ANOMALY_IPC_ERROR_V1_VERSION_MISMATCH,
                     "IPC endpoint ID is already registered");
             }
+            impl_->endpoints_by_token_.emplace(state->token, state);
         }
         *endpoint = {state->token, owner.scope->Generation()};
         return Status(ANOMALY_STATUS_V1_OK);
@@ -592,9 +601,8 @@ AnomalyStatusV1 IpcRegistry::UnregisterEndpoint(
     std::shared_ptr<Impl::Endpoint> state;
     {
         std::scoped_lock lock(impl_->mutex_);
-        for (const auto& [id, candidate] : impl_->endpoints_) {
-            if (candidate && candidate->token == endpoint.id) { state = candidate; break; }
-        }
+        const auto found = impl_->endpoints_by_token_.find(endpoint.id);
+        if (found != impl_->endpoints_by_token_.end()) state = found->second;
     }
     if (!state || !Owns(owner, state->owner.scope, endpoint, state->token)) {
         return Status(ANOMALY_STATUS_V1_NOT_FOUND,
@@ -677,8 +685,9 @@ AnomalyStatusV1 IpcRegistry::Invoke(
             ANOMALY_IPC_ERROR_V1_TIMEOUT, "IPC request timed out");
     }
     const AnomalyStatusV1 result = future.get();
+    // RunRequest 已把产出长度钳制到调用者缓冲内，这里只需跳过空产出。
     *response_size = *produced_size;
-    if (*produced_size <= response.size && *produced_size != 0) {
+    if (*produced_size != 0) {
         std::memcpy(response.data, response_bytes->data(), *produced_size);
     }
     return result;
@@ -741,7 +750,6 @@ AnomalyStatusV1 IpcRegistry::InvokeAsync(
                         pending->owner, pending->endpoint, pending->request_id,
                         {bytes.data(), bytes.size()}, {response.data(), response.size()},
                         &response_size);
-                    if (response_size > response.size()) response_size = 0;
                 } catch (...) {
                     status = Status(
                         ANOMALY_STATUS_V1_FAILED, ANOMALY_IPC_ERROR_V1_NONE,
@@ -857,11 +865,9 @@ AnomalyStatusV1 IpcRegistry::Publish(
     std::vector<std::shared_ptr<Impl::Subscription>> subscribers;
     {
         std::scoped_lock lock(impl_->mutex_);
-        for (const auto& [id, candidate] : impl_->endpoints_) {
-            if (candidate && candidate->token == endpoint_handle.id) {
-                endpoint = candidate;
-                break;
-            }
+        const auto found = impl_->endpoints_by_token_.find(endpoint_handle.id);
+        if (found != impl_->endpoints_by_token_.end() && found->second) {
+            endpoint = found->second;
         }
         if (endpoint) {
             for (const auto& [token, candidate] : impl_->subscriptions_) {
@@ -881,16 +887,25 @@ AnomalyStatusV1 IpcRegistry::Publish(
         return Status(ANOMALY_STATUS_V1_INVALID_ARGUMENT);
     }
     const std::vector<std::uint8_t> bytes = CopySpan(event);
+    // 先为全部订阅者预留队列位，全部成功后才逐一投递；任一预留失败则整体
+    // 不投递并返回原错误，避免事件只送达部分订阅者。
+    std::vector<std::shared_ptr<Impl::QueueReservation>> reservations;
+    reservations.reserve(subscribers.size());
     for (const auto& subscriber : subscribers) {
-        const auto reservation = impl_->ReserveQueue(endpoint);
+        auto reservation = impl_->ReserveQueue(endpoint);
         if (!reservation) {
             return Status(ANOMALY_STATUS_V1_UNAVAILABLE,
                 ANOMALY_IPC_ERROR_V1_QUEUE_FULL, "IPC endpoint queue is full");
         }
+        reservations.push_back(std::move(reservation));
+    }
+    for (std::size_t index = 0; index < subscribers.size(); ++index) {
+        const auto& subscriber = subscribers[index];
         const bool posted = impl_->Post(
             endpoint->affinity, subscriber->owner.scope->Owner(),
             subscriber->owner.scope->Generation(),
-            [impl = impl_, endpoint, subscriber, bytes, reservation] {
+            [impl = impl_, endpoint, subscriber, bytes,
+             reservation = std::move(reservations[index])] {
                 auto lease = subscriber->owner.scope->AcquireCallback(
                     subscriber->owner.scope->Generation());
                 if (!lease || !endpoint->active.load(std::memory_order_acquire) ||

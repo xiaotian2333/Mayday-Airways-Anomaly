@@ -42,7 +42,7 @@ PluginCatalogSnapshot::PluginCatalogSnapshot(std::vector<PluginCatalogEntry> ent
 }
 
 const PluginCatalogEntry* PluginCatalogSnapshot::Find(std::string_view id) const noexcept {
-    const auto found = index_.find(std::string(id));
+    const auto found = index_.find(id);
     return found == index_.end() ? nullptr : &entries_[found->second];
 }
 

@@ -45,9 +45,12 @@ std::filesystem::path Resolve(
 
 bool SimpleId(std::string_view value) {
     if (value.empty() || value.size() > 255) return false;
+    // Win32 会剥除路径末尾的点：以点结尾的 id 会造成目录名与 artifact.id
+    // 不一致、回滚时无法按 id 定位；连续点同样禁止。
+    if (value.back() == '.') return false;
     return std::all_of(value.begin(), value.end(), [](unsigned char character) {
         return std::isalnum(character) || character == '.' || character == '-';
-    });
+    }) && value.find("..") == std::string_view::npos;
 }
 
 std::filesystem::path Utf8Path(std::string_view value) {

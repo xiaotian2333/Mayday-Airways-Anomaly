@@ -49,6 +49,7 @@ bool PluginConfigFileWatcher::Start(Callback callback) {
             FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION);
     if (change == INVALID_HANDLE_VALUE) return false;
     try {
+        healthy_.store(true, std::memory_order_release);
         pending_ = false;
         last_signature_ = Signature();
         callback_ = std::move(callback);
@@ -78,7 +79,7 @@ void PluginConfigFileWatcher::Stop() noexcept {
 
 bool PluginConfigFileWatcher::Running() const noexcept {
     std::scoped_lock lock(mutex_);
-    return worker_.joinable();
+    return worker_.joinable() && healthy_.load(std::memory_order_acquire);
 }
 
 void PluginConfigFileWatcher::ResetBaseline() noexcept {
@@ -91,6 +92,9 @@ void PluginConfigFileWatcher::Run(std::stop_token stop_token, void* change_handl
     const HANDLE change = static_cast<HANDLE>(change_handle);
     const HANDLE stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (stop_event == nullptr) {
+        // 罕见的句柄耗尽路径：worker 已无法运行，healthy 同步置 false，
+        // 让 Running() 如实反映监听失效。
+        healthy_.store(false, std::memory_order_release);
         static_cast<void>(FindCloseChangeNotification(change));
         return;
     }
@@ -155,6 +159,9 @@ void PluginConfigFileWatcher::Run(std::stop_token stop_token, void* change_handl
     }
     static_cast<void>(FindCloseChangeNotification(change));
     CloseHandle(stop_event);
+    // 非停机原因退出（通知句柄失效、等待失败）说明 watcher 已静默失效，
+    // 让 Running() 返回 false 而不是仍报告在运行。
+    if (!stop_token.stop_requested()) healthy_.store(false, std::memory_order_release);
 }
 
 }  // namespace anomaly

@@ -88,6 +88,11 @@ typedef AnomalyStatusV1 (ANOMALY_CALL *AnomalyIpcRequestHandlerV1)(
     AnomalyMutableByteSpanV1 response,
     size_t* response_size);
 
+/* completion 执行域契约：宿主在端点声明的亲和域（或宿主内部队列线程）上调用
+ * completion，同一 pending call 的 completion 恰好调用一次。请求超时的完成同样
+ * 经该投递路径发出；仅当亲和投递不可用时，宿主可能在内部超时线程原地兜底调用。
+ * 插件必须保证 completion 在上述任一线程上均可安全执行，且不得在回调内阻塞或
+ * 重入宿主 IPC。 */
 typedef void (ANOMALY_CALL *AnomalyIpcCompletionCallbackV1)(
     void* user,
     AnomalyGenerationHandleV1 pending_call,

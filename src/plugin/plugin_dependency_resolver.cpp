@@ -28,12 +28,12 @@ CompatibilityIndex::CompatibilityIndex(
 }
 
 const AvailablePluginVersion* CompatibilityIndex::Plugin(std::string_view id) const noexcept {
-    const auto found = plugin_index_.find(std::string(id));
+    const auto found = plugin_index_.find(id);
     return found == plugin_index_.end() ? nullptr : &plugins_[found->second];
 }
 
 const AvailableServiceVersion* CompatibilityIndex::Service(std::string_view id) const noexcept {
-    const auto found = service_index_.find(std::string(id));
+    const auto found = service_index_.find(id);
     return found == service_index_.end() ? nullptr : &services_[found->second];
 }
 

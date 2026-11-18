@@ -67,6 +67,30 @@ bool HasDllExtension(const std::filesystem::path& path) {
     return extension == L".dll";
 }
 
+// Windows 保留设备名段：CON、PRN、AUX、NUL、COM1-9、LPT1-9，大小写不敏感，
+// 含带扩展名变体（如 CON.txt）。检查对齐 reliable_storage 的同名规则；
+// 非 ASCII 字节（UTF-8 首字节 >= 0x80）不可能构成保留名。
+bool IsReservedDeviceNameSegment(std::string_view segment) noexcept {
+    const auto dot = segment.find('.');
+    const std::string_view stem = segment.substr(
+        0, dot == std::string_view::npos ? segment.size() : dot);
+    if (stem.empty() || stem.size() > 7) return false;
+    char upper[8]{};
+    for (std::size_t index = 0; index < stem.size(); ++index) {
+        const auto ch = static_cast<unsigned char>(stem[index]);
+        if (ch >= 0x80) return false;
+        upper[index] = static_cast<char>(ch >= 'a' && ch <= 'z' ? ch - ('a' - 'A') : ch);
+    }
+    const std::string_view name(upper, stem.size());
+    if (name == "CON" || name == "PRN" || name == "AUX" || name == "NUL" ||
+        name == "CLOCK$" || name == "CONIN$" || name == "CONOUT$") {
+        return true;
+    }
+    const bool reserved_suffix = name.size() == 4 &&
+        name[3] >= '1' && name[3] <= '9';
+    return reserved_suffix && (name.substr(0, 3) == "COM" || name.substr(0, 3) == "LPT");
+}
+
 }  // namespace
 
 PluginPackagePathResult ValidatePluginPackageRelativePath(
@@ -111,6 +135,10 @@ PluginPackagePathResult ValidatePluginPackageRelativePath(
                 return Failure(
                     PluginPackageError::InvalidSegment, "path contains a reserved character");
             }
+        }
+        if (IsReservedDeviceNameSegment(segment)) {
+            return Failure(
+                PluginPackageError::InvalidSegment, "path uses a reserved device name");
         }
         if (!normalized.empty()) normalized.push_back('\\');
         normalized.append(segment);

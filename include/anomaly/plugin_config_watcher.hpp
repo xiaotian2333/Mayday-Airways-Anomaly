@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -50,6 +51,9 @@ private:
     std::uint64_t last_signature_{};
     Callback callback_;
     std::jthread worker_;
+    // 目录变更通知句柄失效（FindNextChangeNotification 失败等）时置 false，
+    // 让 Running() 如实反映 watcher 是否仍在工作。
+    std::atomic_bool healthy_{true};
 };
 
 }  // namespace anomaly

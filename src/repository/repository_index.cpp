@@ -145,6 +145,11 @@ RepositoryIndexParseResult ParseRepositoryIndex(std::string_view json) {
             }
             artifact.version = std::move(*version);
             const std::string channel = item.at("channel").get<std::string>();
+            if (channel != "stable" && channel != "preview" && channel != "nightly") {
+                result.diagnostics.push_back(
+                    {"/artifacts/channel", "unsupported repository channel"});
+                return result;
+            }
             artifact.channel = channel == "stable" ? RepositoryChannel::Stable
                 : channel == "preview" ? RepositoryChannel::Preview
                 : RepositoryChannel::Nightly;

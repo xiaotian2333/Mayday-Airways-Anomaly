@@ -57,7 +57,9 @@ private:
         bool pending{};
     };
 
-    [[nodiscard]] std::unordered_map<std::string, std::string> Scan() const;
+    // failed 出参：根目录短暂不可访问导致整轮扫描失败时置 true，
+    // 调用方据此跳过该轮 diff，避免把所有包误判为移除。
+    [[nodiscard]] std::unordered_map<std::string, std::string> Scan(bool* failed = nullptr) const;
     [[nodiscard]] std::vector<std::string> PollLocked(Clock::time_point now);
     void Run(std::stop_token stop_token, void* change_handle);
 
@@ -68,6 +70,9 @@ private:
     bool initialized_{};
     Callback callback_;
     std::jthread worker_;
+    // 目录变更通知句柄失效（FindNextChangeNotification 失败等）时置 false，
+    // 让 Running() 如实反映 watcher 是否仍在工作。
+    std::atomic_bool healthy_{true};
     std::atomic_bool diagnostics_enabled_{};
     mutable std::atomic_uint64_t notifications_{};
     mutable std::atomic_uint64_t scans_{};

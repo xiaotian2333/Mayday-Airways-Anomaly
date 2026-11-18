@@ -63,6 +63,7 @@ bool PluginFileWatcher::Start(Callback callback) {
             FILE_NOTIFY_CHANGE_CREATION);
     if (change == INVALID_HANDLE_VALUE) return false;
     try {
+        healthy_.store(true, std::memory_order_release);
         observations_.clear();
         initialized_ = false;
         static_cast<void>(PollLocked(Clock::now()));
@@ -93,7 +94,7 @@ void PluginFileWatcher::Stop() noexcept {
 
 bool PluginFileWatcher::Running() const noexcept {
     std::scoped_lock lock(mutex_);
-    return worker_.joinable();
+    return worker_.joinable() && healthy_.load(std::memory_order_acquire);
 }
 
 void PluginFileWatcher::SetDiagnosticsEnabled(const bool enabled) noexcept {
@@ -123,7 +124,8 @@ void PluginFileWatcher::ResetBaseline() noexcept {
     initialized_ = false;
 }
 
-std::unordered_map<std::string, std::string> PluginFileWatcher::Scan() const {
+std::unordered_map<std::string, std::string> PluginFileWatcher::Scan(bool* failed) const {
+    if (failed != nullptr) *failed = false;
     const bool measure = diagnostics_enabled_.load(std::memory_order_relaxed);
     const auto started = measure ? Clock::now() : Clock::time_point{};
     std::unordered_map<std::string, std::string> result;
@@ -137,6 +139,9 @@ std::unordered_map<std::string, std::string> PluginFileWatcher::Scan() const {
         }
         result.emplace(Utf8(iterator->path().filename()), PackageSignature(iterator->path()));
     }
+    // 根目录短暂不可访问时整轮扫描失败：标记后由调用方跳过该轮 diff，
+    // 避免把全部包误判为移除并触发全量重载。
+    if (error && failed != nullptr) *failed = true;
     if (measure) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
             Clock::now() - started).count();
@@ -152,7 +157,10 @@ std::unordered_map<std::string, std::string> PluginFileWatcher::Scan() const {
 }
 
 std::vector<std::string> PluginFileWatcher::PollLocked(Clock::time_point now) {
-    const auto current = Scan();
+    bool scan_failed = false;
+    const auto current = Scan(&scan_failed);
+    // 扫描失败时跳过本轮 diff：观察基线保持不变，等待下次变更通知重扫。
+    if (scan_failed) return {};
     if (!initialized_) {
         initialized_ = true;
         for (const auto& [id, signature] : current) {
@@ -205,6 +213,9 @@ void PluginFileWatcher::Run(std::stop_token stop_token, void* change_handle) {
     const HANDLE change = static_cast<HANDLE>(change_handle);
     const HANDLE stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (stop_event == nullptr) {
+        // 罕见的句柄耗尽路径：worker 已无法运行，healthy 同步置 false，
+        // 让 Running() 如实反映监听失效。
+        healthy_.store(false, std::memory_order_release);
         static_cast<void>(FindCloseChangeNotification(change));
         return;
     }
@@ -270,6 +281,9 @@ void PluginFileWatcher::Run(std::stop_token stop_token, void* change_handle) {
     }
     static_cast<void>(FindCloseChangeNotification(change));
     CloseHandle(stop_event);
+    // 非停机原因退出（通知句柄失效、等待失败）说明 watcher 已静默失效，
+    // 让 Running() 返回 false 而不是仍报告在运行。
+    if (!stop_token.stop_requested()) healthy_.store(false, std::memory_order_release);
 }
 
 }  // namespace anomaly
