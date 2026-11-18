@@ -8,7 +8,7 @@
 #include <mutex>
 #include <utility>
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 // ImGui runs on Render; IMM context association belongs to the HWND thread.
 // Borrow its native IMM/TSF text context while an overlay field has focus, then
@@ -198,4 +198,4 @@ private:
     Microsoft::WRL::ComPtr<ITfDocumentMgr> input_document_;
 };
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

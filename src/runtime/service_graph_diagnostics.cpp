@@ -74,21 +74,21 @@ std::string SerializeServiceGraphSnapshotJson(const ServiceGraphSnapshot& snapsh
     for (std::size_t index = 0; index < snapshot.failures.size(); ++index) {
         const ServiceFailureSnapshot& failure = snapshot.failures[index];
         if (index != 0) output.push_back(',');
-        output += "{\"service_id\":" + ue5mem::json::Quote(failure.service_id) +
+        output += "{\"service_id\":" + anomaly::json::Quote(failure.service_id) +
             ",\"error\":" + std::to_string(failure.error) +
-            ",\"caused_by\":" + ue5mem::json::Quote(failure.caused_by) + '}';
+            ",\"caused_by\":" + anomaly::json::Quote(failure.caused_by) + '}';
     }
     output += "],\"services\":[";
     for (std::size_t service_index = 0;
          service_index < snapshot.services.size(); ++service_index) {
         const ServiceSnapshot& service = snapshot.services[service_index];
         if (service_index != 0) output.push_back(',');
-        output += "{\"id\":" + ue5mem::json::Quote(service.id) +
+        output += "{\"id\":" + anomaly::json::Quote(service.id) +
             ",\"version\":" + std::to_string(service.version) +
-            ",\"lifetime\":" + ue5mem::json::Quote(LifetimeName(service.lifetime)) +
-            ",\"startup\":" + ue5mem::json::Quote(StartupName(service.startup)) +
-            ",\"affinity\":" + ue5mem::json::Quote(AffinityName(service.affinity)) +
-            ",\"state\":" + ue5mem::json::Quote(StateName(service.state)) +
+            ",\"lifetime\":" + anomaly::json::Quote(LifetimeName(service.lifetime)) +
+            ",\"startup\":" + anomaly::json::Quote(StartupName(service.startup)) +
+            ",\"affinity\":" + anomaly::json::Quote(AffinityName(service.affinity)) +
+            ",\"state\":" + anomaly::json::Quote(StateName(service.state)) +
             ",\"error\":" + std::to_string(service.error) +
             ",\"startup_us\":" + std::to_string(service.startup_duration.count()) +
             ",\"start_thread_id\":" + std::to_string(service.start_thread_id) +
@@ -102,7 +102,7 @@ std::string SerializeServiceGraphSnapshotJson(const ServiceGraphSnapshot& snapsh
             const ServiceDependencySnapshot& dependency =
                 service.dependencies[dependency_index];
             if (dependency_index != 0) output.push_back(',');
-            output += "{\"id\":" + ue5mem::json::Quote(dependency.id) +
+            output += "{\"id\":" + anomaly::json::Quote(dependency.id) +
                 ",\"minimum_version\":" + std::to_string(dependency.minimum_version) +
                 ",\"optional\":";
             output += Boolean(dependency.optional);
@@ -110,13 +110,13 @@ std::string SerializeServiceGraphSnapshotJson(const ServiceGraphSnapshot& snapsh
             output += Boolean(dependency.resolved);
             output += ",\"resolved_version\":" +
                 std::to_string(dependency.resolved_version) +
-                ",\"state\":" + ue5mem::json::Quote(StateName(dependency.state)) + '}';
+                ",\"state\":" + anomaly::json::Quote(StateName(dependency.state)) + '}';
         }
         output += "],\"failure_chain\":[";
         for (std::size_t chain_index = 0;
              chain_index < service.failure_chain.size(); ++chain_index) {
             if (chain_index != 0) output.push_back(',');
-            output += ue5mem::json::Quote(service.failure_chain[chain_index]);
+            output += anomaly::json::Quote(service.failure_chain[chain_index]);
         }
         output += "]}";
     }

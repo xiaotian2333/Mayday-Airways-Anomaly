@@ -2,10 +2,10 @@
 
 #include "anomaly/host_ui_service.hpp"
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 const AnomalyUiServiceV1* EmbeddedUiServiceTable() noexcept {
     return anomaly::HostUiServiceTable();
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 inline constexpr std::uint32_t kEmbeddedWmSetCursor = 0x0020u;
 inline constexpr std::uint16_t kEmbeddedHtClient = 1u;
@@ -15,4 +15,4 @@ inline constexpr std::uint16_t kEmbeddedHtClient = 1u;
         hit_test == kEmbeddedHtClient;
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

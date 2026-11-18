@@ -14,19 +14,19 @@ class PatternService final {
 public:
     explicit PatternService(std::shared_ptr<const ModuleMemoryService> memory);
 
-    [[nodiscard]] ue5mem::Pattern Parse(std::string_view text) const;
+    [[nodiscard]] anomaly::Pattern Parse(std::string_view text) const;
     [[nodiscard]] std::vector<std::uintptr_t> ScanSection(
-        const ue5mem::ModuleInfo& module,
+        const anomaly::ModuleInfo& module,
         std::string_view section_name,
-        const ue5mem::Pattern& pattern,
+        const anomaly::Pattern& pattern,
         std::size_t limit) const;
     [[nodiscard]] std::vector<std::uintptr_t> ScanSection(
-        const ue5mem::SectionInfo& section,
-        const ue5mem::Pattern& pattern,
+        const anomaly::SectionInfo& section,
+        const anomaly::Pattern& pattern,
         std::size_t limit) const;
     [[nodiscard]] std::vector<std::vector<std::uintptr_t>> ScanSectionBatch(
-        const ue5mem::SectionInfo& section,
-        std::span<const ue5mem::Pattern> patterns,
+        const anomaly::SectionInfo& section,
+        std::span<const anomaly::Pattern> patterns,
         std::size_t limit) const;
     [[nodiscard]] std::shared_ptr<const ModuleMemoryService> Memory() const noexcept;
 

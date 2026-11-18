@@ -74,10 +74,10 @@ using PluginSort = PlatformUiPluginSort;
 using PluginTab = PlatformUiPluginTab;
 using PluginUiState = PlatformUiPluginState;
 
-struct InstalledPluginView final : ue5mem::PluginView {
+struct InstalledPluginView final : anomaly::PluginView {
     InstalledPluginView() = default;
-    explicit InstalledPluginView(ue5mem::PluginView runtime)
-        : ue5mem::PluginView(std::move(runtime)), has_runtime_view(true) {}
+    explicit InstalledPluginView(anomaly::PluginView runtime)
+        : anomaly::PluginView(std::move(runtime)), has_runtime_view(true) {}
 
     // Catalog and dependency information remains available even when no DLL loaded.
     bool has_catalog_entry{};
@@ -368,10 +368,10 @@ void ReconcileUiStateSelection(
     bool include_developer = true);
 
 [[nodiscard]] PlatformUiSnapshot BuildPlatformUiSnapshot(
-    std::uint64_t revision, std::vector<ue5mem::PluginView> runtime_plugins);
+    std::uint64_t revision, std::vector<anomaly::PluginView> runtime_plugins);
 [[nodiscard]] PlatformUiSnapshot BuildPlatformUiSnapshot(
     std::uint64_t revision,
-    std::vector<ue5mem::PluginView> runtime_plugins,
+    std::vector<anomaly::PluginView> runtime_plugins,
     const PluginCatalogSnapshot& catalog,
     const PluginDependencyPlan& dependencies,
     const std::map<std::string, PluginEnablementDecision, std::less<>>& enablement,

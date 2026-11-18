@@ -2,7 +2,7 @@
 
 #include "anomaly/thread_local_value.hpp"
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 // One scope covers both Present entry points and the call to the next hook.
 // A proxy may forward Present -> Present1 -> native Present; none of those
@@ -25,4 +25,4 @@ private:
     bool outermost_{};
 };
 
-} // namespace ue5mem::embedded
+} // namespace anomaly::embedded

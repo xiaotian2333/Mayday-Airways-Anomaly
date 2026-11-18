@@ -54,7 +54,7 @@ namespace {
 struct CoreContext {
     std::filesystem::path runtime_root;
     std::filesystem::path log_directory;
-    ue5mem::AnalyzerConfig config;
+    anomaly::AnalyzerConfig config;
     std::shared_ptr<const anomaly::Translator> translator;
     anomaly::CoreMemoryServices memory_services;
     std::unique_ptr<anomaly::CrashReporter> crash_reporter;
@@ -69,7 +69,7 @@ struct CoreContext {
     std::string repository_diagnostics{
         "{\"schemaVersion\":1,\"state\":\"unavailable\",\"reason\":\"not-started\"}"};
     mutable std::mutex plugins_mutex;
-    std::shared_ptr<ue5mem::PluginManager> plugins;
+    std::shared_ptr<anomaly::PluginManager> plugins;
     std::weak_ptr<anomaly::RuntimeSession> session;
     std::string plugin_stop_diagnostics{"[]"};
     std::string profile_diagnostics{"null"};
@@ -312,7 +312,7 @@ void LoadHostPayloads(const std::shared_ptr<CoreContext>& context) {
     }
 }
 
-std::shared_ptr<ue5mem::PluginManager> PluginHostSnapshot(
+std::shared_ptr<anomaly::PluginManager> PluginHostSnapshot(
     const std::shared_ptr<CoreContext>& context) {
     std::scoped_lock lock(context->plugins_mutex);
     return context->plugins;
@@ -320,12 +320,12 @@ std::shared_ptr<ue5mem::PluginManager> PluginHostSnapshot(
 
 void PublishPluginHost(
     const std::shared_ptr<CoreContext>& context,
-    std::shared_ptr<ue5mem::PluginManager> plugins) {
+    std::shared_ptr<anomaly::PluginManager> plugins) {
     std::scoped_lock lock(context->plugins_mutex);
     context->plugins = std::move(plugins);
 }
 
-std::shared_ptr<ue5mem::PluginManager> TakePluginHost(
+std::shared_ptr<anomaly::PluginManager> TakePluginHost(
     const std::shared_ptr<CoreContext>& context) {
     std::scoped_lock lock(context->plugins_mutex);
     return std::exchange(context->plugins, {});
@@ -450,7 +450,7 @@ DWORD InitializeCore(const std::shared_ptr<CoreContext>& context, std::stop_toke
         context->crash_reporter = std::move(crash_reporter);
     }
 
-    context->config = ue5mem::AnalyzerConfig::Load(context->runtime_root / L"anomaly.ini");
+    context->config = anomaly::AnalyzerConfig::Load(context->runtime_root / L"anomaly.ini");
     for (const auto& diagnostic : context->config.diagnostics) {
         RuntimeLog(
             context, anomaly::LogLevel::Warning, "config.invalid_value",
@@ -581,8 +581,8 @@ DWORD PrepareDiagnosticPipe(
     std::stop_token stop_token) {
     if (stop_token.stop_requested()) return ERROR_CANCELLED;
     const auto pipe_name =
-        ue5mem::BuildPipeName(context->config.pipe_prefix, GetCurrentProcessId());
-    auto analyzer = std::make_shared<const ue5mem::Analyzer>(
+        anomaly::BuildPipeName(context->config.pipe_prefix, GetCurrentProcessId());
+    auto analyzer = std::make_shared<const anomaly::Analyzer>(
         context->runtime_root,
         context->config,
         [context, services] {
@@ -729,10 +729,10 @@ DWORD PreparePluginHost(
     const std::shared_ptr<CoreContext>& context, std::stop_token stop_token) {
     if (stop_token.stop_requested()) return ERROR_CANCELLED;
     try {
-        auto plugins = std::make_shared<ue5mem::PluginManager>(
+        auto plugins = std::make_shared<anomaly::PluginManager>(
             context->runtime_root, context->config.plugin_directory,
             context->memory_services,
-            ue5mem::PluginCallbackBudgets{
+            anomaly::PluginCallbackBudgets{
                 context->config.update_slow_milliseconds,
                 context->config.draw_slow_milliseconds},
             context->logger,
@@ -781,7 +781,7 @@ DWORD PreparePluginHost(
         plugins->SetTranslator(context->translator);
         if (context->telemetry) {
             plugins->SetUsageObserver([session = context->session, telemetry = context->telemetry](
-                std::vector<ue5mem::PluginUsageObservation> observations) {
+                std::vector<anomaly::PluginUsageObservation> observations) {
                 if (const auto runtime = session.lock()) {
                     static_cast<void>(runtime->Dispatchers().Post(
                         anomaly::ExecutionDomain::Worker, "anomaly.telemetry", 1,
@@ -824,7 +824,7 @@ DWORD StopPluginHost(
     // until that owner has either drained or been retired; the owner keeps
     // the module mapping alive for late callbacks.
     const auto current = PluginHostSnapshot(context);
-    if (current != nullptr && ue5mem::PlatformHostQuarantined(current.get())) {
+    if (current != nullptr && anomaly::PlatformHostQuarantined(current.get())) {
         RuntimeLog(
             context, anomaly::LogLevel::Warning, "plugin.host.stop_deferred",
             "plugin_host=stop_deferred reason=platform_ui_quarantine");
@@ -874,7 +874,7 @@ DWORD StopPluginHost(
 
 DWORD RunPlatform(const std::shared_ptr<CoreContext>& context, std::stop_token stop_token) {
     if (stop_token.stop_requested() || !context->config.platform_enabled) return ERROR_SUCCESS;
-    ue5mem::PlatformDiagnostics diagnostics;
+    anomaly::PlatformDiagnostics diagnostics;
     diagnostics.translator = context->translator;
     diagnostics.runtime_root = context->runtime_root;
     diagnostics.log_file = context->runtime_root / L"anomaly-platform.log";
@@ -1043,18 +1043,18 @@ DWORD RunPlatform(const std::shared_ptr<CoreContext>& context, std::stop_token s
     };
     diagnostics.logger = context->logger;
     if (context->config.platform_embedded) {
-        ue5mem::RunEmbeddedPlatform(
+        anomaly::RunEmbeddedPlatform(
             context->runtime_root, context->config, stop_token, context->memory_services,
             context->profile_runtime == nullptr ? nullptr : context->profile_runtime->Adapter(),
             std::move(diagnostics), PluginHostSnapshot(context));
     } else {
-        ue5mem::RunPlatform(
+        anomaly::RunPlatform(
             context->runtime_root, context->config, stop_token, context->memory_services,
             context->profile_runtime == nullptr ? nullptr : context->profile_runtime->Adapter(),
             std::move(diagnostics), PluginHostSnapshot(context));
     }
     const auto plugins = PluginHostSnapshot(context);
-    const bool stopped = !ue5mem::PlatformHostQuarantined(plugins.get());
+    const bool stopped = !anomaly::PlatformHostQuarantined(plugins.get());
     return stopped ? ERROR_SUCCESS : ERROR_TIMEOUT;
 }
 

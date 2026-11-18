@@ -25,7 +25,7 @@ class MaydayAdapter;
 class StructuredLogger;
 }
 
-namespace ue5mem {
+namespace anomaly {
 
 class PluginManager;
 
@@ -174,4 +174,4 @@ void FlushPlatformUiActions();
 [[nodiscard]] bool StandaloneHostQuarantined(const PluginManager* owner = nullptr) noexcept;
 [[nodiscard]] bool PlatformHostQuarantined(const PluginManager* owner = nullptr) noexcept;
 
-}  // namespace ue5mem
+}  // namespace anomaly

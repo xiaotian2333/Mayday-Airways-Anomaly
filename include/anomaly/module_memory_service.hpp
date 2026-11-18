@@ -13,25 +13,25 @@ namespace anomaly {
 
 class ModuleMemoryService final {
 public:
-    [[nodiscard]] std::vector<ue5mem::ModuleInfo> EnumerateModules() const;
-    [[nodiscard]] std::optional<ue5mem::ModuleInfo> FindModule(
+    [[nodiscard]] std::vector<anomaly::ModuleInfo> EnumerateModules() const;
+    [[nodiscard]] std::optional<anomaly::ModuleInfo> FindModule(
         std::wstring_view name) const;
-    [[nodiscard]] std::vector<ue5mem::SectionInfo> EnumerateSections(
-        const ue5mem::ModuleInfo& module) const;
-    [[nodiscard]] std::vector<ue5mem::RegionInfo> EnumerateRegions(
-        const ue5mem::ModuleInfo& module) const;
+    [[nodiscard]] std::vector<anomaly::SectionInfo> EnumerateSections(
+        const anomaly::ModuleInfo& module) const;
+    [[nodiscard]] std::vector<anomaly::RegionInfo> EnumerateRegions(
+        const anomaly::ModuleInfo& module) const;
     [[nodiscard]] std::vector<std::uintptr_t> ScanSection(
-        const ue5mem::ModuleInfo& module,
+        const anomaly::ModuleInfo& module,
         std::string_view section_name,
-        const ue5mem::Pattern& pattern,
+        const anomaly::Pattern& pattern,
         std::size_t limit) const;
     [[nodiscard]] std::vector<std::uintptr_t> ScanSection(
-        const ue5mem::SectionInfo& section,
-        const ue5mem::Pattern& pattern,
+        const anomaly::SectionInfo& section,
+        const anomaly::Pattern& pattern,
         std::size_t limit) const;
     [[nodiscard]] std::vector<std::vector<std::uintptr_t>> ScanSectionBatch(
-        const ue5mem::SectionInfo& section,
-        std::span<const ue5mem::Pattern> patterns,
+        const anomaly::SectionInfo& section,
+        std::span<const anomaly::Pattern> patterns,
         std::size_t limit) const;
 
     [[nodiscard]] std::optional<std::uintptr_t> ResolveRipRelative(

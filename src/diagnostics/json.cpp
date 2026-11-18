@@ -5,7 +5,7 @@
 #include <array>
 #include <cstdio>
 
-namespace ue5mem::json {
+namespace anomaly::json {
 namespace {
 
 std::string Utf8(std::wstring_view value) {
@@ -65,4 +65,4 @@ std::string Hex(std::uintptr_t value) {
     return Quote(buffer.data());
 }
 
-}  // namespace ue5mem::json
+}  // namespace anomaly::json

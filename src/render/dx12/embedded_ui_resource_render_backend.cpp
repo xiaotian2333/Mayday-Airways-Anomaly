@@ -23,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 constexpr std::uint64_t kUiTextureCacheBudgetBytes = 128ULL * 1024ULL * 1024ULL;
@@ -966,4 +966,4 @@ CreateEmbeddedUiResourceRenderBackend(EmbeddedState& state) noexcept {
     }
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

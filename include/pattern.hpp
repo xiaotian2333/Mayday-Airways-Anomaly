@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-namespace ue5mem {
+namespace anomaly {
 
 struct PatternByte {
     std::uint8_t value{};
@@ -35,4 +35,4 @@ private:
     std::vector<std::uint8_t> anchor_;
 };
 
-}  // namespace ue5mem
+}  // namespace anomaly

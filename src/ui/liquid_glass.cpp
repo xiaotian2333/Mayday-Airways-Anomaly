@@ -791,7 +791,7 @@ ImVec4 Mix(const ImVec4& from, const ImVec4& to, const float amount) noexcept {
         from.z + (to.z - from.z) * amount, from.w + (to.w - from.w) * amount};
 }
 
-ImVec4 ToVec4(const ue5mem::PlatformUiColor& color) noexcept {
+ImVec4 ToVec4(const anomaly::PlatformUiColor& color) noexcept {
     return {color.red, color.green, color.blue, color.alpha};
 }
 
@@ -829,7 +829,7 @@ struct Look final {
 // one at all.
 Look ResolveLook(const SurfaceOptions& options) noexcept {
     const bool dark = DarkAppearance();
-    const ImVec4 surface = ToVec4(ue5mem::PlatformUiSurfaceColor());
+    const ImVec4 surface = ToVec4(anomaly::PlatformUiSurfaceColor());
     Look look;
     look.tint = !g_palette_tint
         ? (dark ? ImVec4(0.10f, 0.10f, 0.10f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f))
@@ -1268,7 +1268,7 @@ void SetReduceMotion(const bool enabled) noexcept { g_reduce_motion = enabled; }
 bool ReduceMotion() noexcept { return g_reduce_motion; }
 
 bool DarkAppearance() noexcept {
-    const auto surface = ue5mem::PlatformUiSurfaceColor();
+    const auto surface = anomaly::PlatformUiSurfaceColor();
     return 0.2126f * surface.red + 0.7152f * surface.green + 0.0722f * surface.blue < 0.45f;
 }
 
@@ -1481,7 +1481,7 @@ void PrepareDrawData(ImDrawData* data) noexcept {
 void DrawThumb(ImDrawList* list, const ImVec2 min, const ImVec2 max, const float rounding,
     const float scale, const bool accent) noexcept {
     if (list == nullptr || max.x - min.x < 1.0f || max.y - min.y < 1.0f) return;
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     SurfaceOptions options;
     options.variant = Variant::Thumb;
     options.rounding = rounding;
@@ -1542,7 +1542,7 @@ ImVec2 SwitchSize() noexcept {
 void DrawSwitch(ImDrawList* list, const ImVec2 min, const ImVec2 max, const float on,
     const float press, const bool hovered, const float scale) noexcept {
     if (list == nullptr) return;
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     const bool dark = DarkAppearance();
     const float height = max.y - min.y;
     const float width = max.x - min.x;
@@ -1905,7 +1905,7 @@ bool SliderScalar(const char* label, const ImGuiDataType data_type, void* value,
     if (changed) ImGui::MarkItemEdited(id);
 
     ImDrawList* const list = window->DrawList;
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     const bool dark = DarkAppearance();
     const bool active = context.ActiveId == id;
     ImGui::RenderNavCursor(frame, id);
@@ -1966,7 +1966,7 @@ bool SliderInt(const char* label, int* value, const int minimum, const int maxim
 }
 
 ImVec4 ControlAccent() noexcept {
-    const auto& accent = ue5mem::PlatformUiTheme().accent;
+    const auto& accent = anomaly::PlatformUiTheme().accent;
     return ImVec4(accent.red, accent.green, accent.blue, 1.0f);
 }
 

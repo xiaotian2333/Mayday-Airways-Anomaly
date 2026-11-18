@@ -38,7 +38,7 @@
 #include <unordered_set>
 #include <utility>
 
-namespace ue5mem {
+namespace anomaly {
 
 struct PluginCacheOwnerLease final {
     explicit PluginCacheOwnerLease(HANDLE value) noexcept : value(value) {}
@@ -6313,4 +6313,4 @@ bool PluginManager::SetVisible(std::string_view plugin_id, bool visible) {
     return (*found)->view.visibility_control;
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly

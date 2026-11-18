@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace ue5mem {
+namespace anomaly {
 namespace {
 
 int HexValue(char value) {
@@ -203,4 +203,4 @@ std::vector<std::vector<std::size_t>> Pattern::FindAllBatch(
     return results;
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly

@@ -138,7 +138,7 @@ nlohmann::json Serialize(
         {"revision", revision},
         {"lastRoute", last_route},
         {"values", {
-            {"interface.palette", ue5mem::ToString(values.interface_palette)},
+            {"interface.palette", anomaly::ToString(values.interface_palette)},
             {"interface.custom_accent", SerializeColor(values.interface_custom_colors.accent)},
             {"interface.custom_text", SerializeColor(values.interface_custom_colors.text)},
             {"interface.custom_window_background",
@@ -293,7 +293,7 @@ public:
                     302, "platform settings document has an unsupported shape", &document);
             }
             const nlohmann::json& values = document.at("values");
-            snapshot_.values.interface_palette = ue5mem::ParsePlatformUiPalette(
+            snapshot_.values.interface_palette = anomaly::ParsePlatformUiPalette(
                 values.value("interface.palette", std::string{"naiwa"}));
             ReadColorValue(values, "interface.custom_accent",
                 snapshot_.values.interface_custom_colors.accent);

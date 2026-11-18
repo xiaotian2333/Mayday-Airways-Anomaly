@@ -473,14 +473,14 @@ add_custom_command(
     VERBATIM
 )
 
-add_library(ue5mem_memory STATIC
+add_library(anomaly_memory STATIC
     src/platform/windows/memory.cpp
     src/platform/windows/pattern.cpp)
-target_include_directories(ue5mem_memory PUBLIC include)
+target_include_directories(anomaly_memory PUBLIC include)
 target_compile_definitions(
-    ue5mem_memory PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(ue5mem_memory PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(ue5mem_memory PUBLIC Psapi)
+    anomaly_memory PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(anomaly_memory PRIVATE /W4 /permissive- /EHsc)
+target_link_libraries(anomaly_memory PUBLIC Psapi)
 
 add_library(anomaly_i18n STATIC src/i18n/i18n.cpp)
 target_include_directories(
@@ -518,7 +518,7 @@ target_include_directories(anomaly_internal_memory_services PUBLIC include)
 target_compile_definitions(
     anomaly_internal_memory_services PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anomaly_internal_memory_services PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(anomaly_internal_memory_services PUBLIC ue5mem_memory)
+target_link_libraries(anomaly_internal_memory_services PUBLIC anomaly_memory)
 
 
 # AdapterServiceRegistry：插件可见的服务表注册中心（通用设施）
@@ -551,7 +551,7 @@ target_include_directories(anomaly_signature_updater PUBLIC include
 target_compile_definitions(anomaly_signature_updater PUBLIC
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anomaly_signature_updater PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(anomaly_signature_updater PUBLIC ue5mem_memory
+target_link_libraries(anomaly_signature_updater PUBLIC anomaly_memory
     PRIVATE anomaly_reliable_storage minhook nlohmann_json::nlohmann_json)
 
 
@@ -567,18 +567,18 @@ target_compile_options(anomaly_websocket_server PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(anomaly_websocket_server PUBLIC Ws2_32 bcrypt)
 
 
-add_library(ue5mem_core STATIC
+add_library(anomaly_diagnostics STATIC
     src/diagnostics/analyzer.cpp
     src/diagnostics/diagnostic_pipe_service.cpp
     src/diagnostics/json.cpp
     src/diagnostics/pipe_server.cpp
     src/runtime/service_graph_diagnostics.cpp)
-target_include_directories(ue5mem_core PUBLIC include)
-target_compile_definitions(ue5mem_core PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(ue5mem_core PRIVATE /W4 /permissive- /EHsc)
+target_include_directories(anomaly_diagnostics PUBLIC include)
+target_compile_definitions(anomaly_diagnostics PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(anomaly_diagnostics PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(
-    ue5mem_core
-    PUBLIC anomaly_config anomaly_internal_memory_services ue5mem_memory Advapi32
+    anomaly_diagnostics
+    PUBLIC anomaly_config anomaly_internal_memory_services anomaly_memory Advapi32
     PRIVATE nlohmann_json::nlohmann_json)
 
 add_library(anomaly_runtime_kernel STATIC src/runtime/runtime_session.cpp)
@@ -950,7 +950,7 @@ target_link_libraries(
     bcrypt
     d3dcompiler
     anomaly_telemetry
-    ue5mem_core
+    anomaly_diagnostics
     anomaly_runtime_kernel
     anomaly_imgui
     anomaly_minhook_backend
@@ -980,11 +980,11 @@ target_link_libraries(
 set(ANOMALY_MANUAL_MAP_TLS_FREE_TARGETS
     anomaly_core
     anomaly_telemetry
-    ue5mem_core
+    anomaly_diagnostics
     anomaly_config
     anomaly_i18n
     anomaly_internal_memory_services
-    ue5mem_memory
+    anomaly_memory
     anomaly_runtime_kernel
     anomaly_service_graph
     anomaly_runtime_dispatchers
@@ -1109,7 +1109,7 @@ target_include_directories(anomaly_test_host PRIVATE include)
 target_compile_definitions(anomaly_test_host PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anomaly_test_host PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(anomaly_test_host PRIVATE
-    ue5mem_core anomaly_plugin_shadow anomaly_plugin_dependency_resolver anomaly_plugin_enablement
+    anomaly_diagnostics anomaly_plugin_shadow anomaly_plugin_dependency_resolver anomaly_plugin_enablement
     anomaly_adapter_services anomaly_plugin_runtime
     anomaly_structured_logger anomaly_scoped_platform anomaly_ui_resources
     anomaly_i18n anomaly_plugin_profile nlohmann_json::nlohmann_json Psapi)
@@ -1149,7 +1149,7 @@ if(ANOMALY_BUILD_TEST_FIXTURES)
     target_compile_options(anomaly-platform-preview PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_link_libraries(
         anomaly-platform-preview PRIVATE
-        ue5mem_core anomaly_imgui anomaly_plugin_shadow anomaly_plugin_dependency_resolver
+        anomaly_diagnostics anomaly_imgui anomaly_plugin_shadow anomaly_plugin_dependency_resolver
         anomaly_platform_ui_model anomaly_plugin_enablement anomaly_adapter_services
         anomaly_platform_settings anomaly_platform_ui_layout anomaly_platform_notice
         anomaly_plugin_runtime
@@ -1275,7 +1275,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
         target_compile_options(anomaly_ui_overlay_fixture PRIVATE /utf-8 /W4 /permissive- /EHsc)
         target_link_libraries(anomaly_ui_overlay_fixture PRIVATE
-            ue5mem_core anomaly_plugin_shadow anomaly_plugin_dependency_resolver anomaly_plugin_enablement
+            anomaly_diagnostics anomaly_plugin_shadow anomaly_plugin_dependency_resolver anomaly_plugin_enablement
             anomaly_adapter_services anomaly_plugin_runtime
             anomaly_structured_logger anomaly_scoped_platform anomaly_ui_resources
             anomaly_i18n anomaly_plugin_profile nlohmann_json::nlohmann_json)

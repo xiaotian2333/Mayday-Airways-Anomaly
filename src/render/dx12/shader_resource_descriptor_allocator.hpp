@@ -8,7 +8,7 @@
 #include <limits>
 #include <optional>
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 // The ImGui DX12 backend consumes the first allocation for its font atlas.
 // Keeping every UI SRV in this one shader-visible heap lets future host-owned
@@ -174,4 +174,4 @@ private:
     std::array<bool, kEmbeddedShaderResourceDescriptorCapacity> reserved_{};
 };
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

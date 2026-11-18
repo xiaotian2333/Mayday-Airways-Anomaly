@@ -19,7 +19,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace ue5mem {
+namespace anomaly {
 namespace {
 
 constexpr std::size_t kMaximumReadBytes = 1024U * 1024U;
@@ -88,7 +88,7 @@ bool AddressIntersectsPluginModule(
 }
 
 bool IsPluginModule(
-    const ue5mem::ModuleInfo& module, const std::filesystem::path& root,
+    const anomaly::ModuleInfo& module, const std::filesystem::path& root,
     const AnalyzerConfig& config) {
     const std::wstring plugin_root = AbsolutePluginRoot(config, root).wstring();
     return StartsWithPathInsensitive(module.path, plugin_root);
@@ -706,4 +706,4 @@ std::string Analyzer::Execute(std::string_view command_line) const {
     return Error("unknown command; use help");
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly

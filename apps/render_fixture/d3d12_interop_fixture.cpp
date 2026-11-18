@@ -10,7 +10,7 @@
 #include <thread>
 
 using Microsoft::WRL::ComPtr;
-using namespace ue5mem::embedded;
+using namespace anomaly::embedded;
 
 namespace {
 

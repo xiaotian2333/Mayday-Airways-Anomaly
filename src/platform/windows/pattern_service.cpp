@@ -10,28 +10,28 @@ PatternService::PatternService(std::shared_ptr<const ModuleMemoryService> memory
     if (!memory_) throw std::invalid_argument("PatternService requires memory");
 }
 
-ue5mem::Pattern PatternService::Parse(std::string_view text) const {
-    return ue5mem::Pattern::Parse(text);
+anomaly::Pattern PatternService::Parse(std::string_view text) const {
+    return anomaly::Pattern::Parse(text);
 }
 
 std::vector<std::uintptr_t> PatternService::ScanSection(
-    const ue5mem::ModuleInfo& module,
+    const anomaly::ModuleInfo& module,
     std::string_view section_name,
-    const ue5mem::Pattern& pattern,
+    const anomaly::Pattern& pattern,
     std::size_t limit) const {
     return memory_->ScanSection(module, section_name, pattern, limit);
 }
 
 std::vector<std::uintptr_t> PatternService::ScanSection(
-    const ue5mem::SectionInfo& section,
-    const ue5mem::Pattern& pattern,
+    const anomaly::SectionInfo& section,
+    const anomaly::Pattern& pattern,
     std::size_t limit) const {
     return memory_->ScanSection(section, pattern, limit);
 }
 
 std::vector<std::vector<std::uintptr_t>> PatternService::ScanSectionBatch(
-    const ue5mem::SectionInfo& section,
-    std::span<const ue5mem::Pattern> patterns,
+    const anomaly::SectionInfo& section,
+    std::span<const anomaly::Pattern> patterns,
     std::size_t limit) const {
     return memory_->ScanSectionBatch(section, patterns, limit);
 }

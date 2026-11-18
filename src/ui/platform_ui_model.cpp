@@ -491,7 +491,7 @@ void ReconcileUiStateSelection(
 }
 
 PlatformUiSnapshot BuildPlatformUiSnapshot(
-    std::uint64_t revision, std::vector<ue5mem::PluginView> runtime_plugins) {
+    std::uint64_t revision, std::vector<anomaly::PluginView> runtime_plugins) {
     PlatformUiSnapshot snapshot;
     snapshot.revision = revision;
     snapshot.installed_plugins.reserve(runtime_plugins.size());
@@ -509,7 +509,7 @@ PlatformUiSnapshot BuildPlatformUiSnapshot(
 
 PlatformUiSnapshot BuildPlatformUiSnapshot(
     std::uint64_t revision,
-    std::vector<ue5mem::PluginView> runtime_plugins,
+    std::vector<anomaly::PluginView> runtime_plugins,
     const PluginCatalogSnapshot& catalog,
     const PluginDependencyPlan& dependencies,
     const std::map<std::string, PluginEnablementDecision, std::less<>>& enablement,

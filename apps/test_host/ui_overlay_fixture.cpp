@@ -59,7 +59,7 @@ struct Probe final {
     }
 };
 
-ue5mem::PluginView View(const ue5mem::PluginManager& manager) {
+anomaly::PluginView View(const anomaly::PluginManager& manager) {
     for (const auto& plugin : manager.Plugins()) if (plugin.id == kPluginId) return plugin;
     throw std::runtime_error("status bar was not discovered");
 }
@@ -75,7 +75,7 @@ void Run(const std::filesystem::path& root, bool legacy) {
     const auto dispatch = [](std::string, uint64_t, std::function<void()> callback) {
         callback(); return true;
     };
-    ue5mem::PluginManager manager(root, root, {}, {}, {}, dispatch, dispatch);
+    anomaly::PluginManager manager(root, root, {}, {}, {}, dispatch, dispatch);
     manager.SetUiService(&probe.ui);
     manager.LoadAll();
     if (!View(manager).enabled) Require(manager.SetEnabled(kPluginId, true), "could not enable status bar");

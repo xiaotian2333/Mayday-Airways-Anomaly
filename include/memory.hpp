@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-namespace ue5mem {
+namespace anomaly {
 
 struct ModuleInfo {
     std::wstring name;
@@ -73,4 +73,4 @@ std::string ProtectionName(DWORD protection);
 std::string StateName(DWORD state);
 std::string TypeName(DWORD type);
 
-}  // namespace ue5mem
+}  // namespace anomaly

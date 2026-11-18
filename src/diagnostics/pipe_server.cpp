@@ -8,7 +8,7 @@
 #include <memory>
 #include <string>
 
-namespace ue5mem {
+namespace anomaly {
 namespace {
 
 void LogPipeError(const Analyzer& analyzer, DWORD error) noexcept {
@@ -59,4 +59,4 @@ void RunPipeServer(
     RunPipeServerLoop(analyzer, pipe_name, stop_token);
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly

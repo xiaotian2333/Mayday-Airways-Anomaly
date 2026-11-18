@@ -118,12 +118,12 @@ bool g_update_prompt_requested{};
 constexpr float kLauncherFontScale = 20.0f / 13.0f;
 constexpr float kDefaultDpi = 96.0f;
 
-ImVec4 ThemeColor(const ue5mem::PlatformUiColor& color) noexcept {
+ImVec4 ThemeColor(const anomaly::PlatformUiColor& color) noexcept {
     return {color.red, color.green, color.blue, color.alpha};
 }
 
 ImVec4 ThemeColorWithAlpha(
-    const ue5mem::PlatformUiColor& color, const float alpha) noexcept {
+    const anomaly::PlatformUiColor& color, const float alpha) noexcept {
     return {color.red, color.green, color.blue, alpha};
 }
 
@@ -133,7 +133,7 @@ ImVec4 ThemeColorWithAlpha(
 // therefore decides which side of that line every label, chip and button lands on, so a
 // theme switch in the settings page cannot leave black text on a dark body.
 bool LauncherSurfaceIsLight() noexcept {
-    const auto surface = ue5mem::PlatformUiSurfaceColor();
+    const auto surface = anomaly::PlatformUiSurfaceColor();
     return 0.2126f * surface.red + 0.7152f * surface.green +
         0.0722f * surface.blue >= 0.5f;
 }
@@ -143,13 +143,13 @@ ImVec4 LauncherInk() noexcept {
     // panels, and those are empty while a wallpaper is showing.
     return LauncherSurfaceIsLight()
         ? ImVec4(0.0f, 0.0f, 0.0f, 1.0f)
-        : ThemeColor(ue5mem::PlatformUiTheme().text);
+        : ThemeColor(anomaly::PlatformUiTheme().text);
 }
 
 ImVec4 LauncherMutedInk() noexcept {
     return LauncherSurfaceIsLight()
         ? kLauncherMutedInkLightSurface
-        : ThemeColor(ue5mem::PlatformUiTheme().text_muted);
+        : ThemeColor(anomaly::PlatformUiTheme().text_muted);
 }
 
 enum class LauncherMode : std::uint8_t { Launch, Settings };
@@ -1138,7 +1138,7 @@ private:
     void RefreshHotkeyImpl() {
         const auto roots = RuntimeSettingsRoots();
         const auto root = roots.empty() ? source_.runtime_directory : roots.front();
-        const auto config = ue5mem::AnalyzerConfig::Load(root / L"anomaly.ini");
+        const auto config = anomaly::AnalyzerConfig::Load(root / L"anomaly.ini");
         std::scoped_lock lock(state_mutex_);
         state_.toggle_key = config.platform_toggle_key;
     }
@@ -1265,8 +1265,8 @@ private:
         // which is what an installation upgraded from an older build has. From here on the
         // configuration owns the value and the ini is the only seed.
         if (configuration.language.empty()) {
-            const ue5mem::AnalyzerConfig ini =
-                ue5mem::AnalyzerConfig::Load(LauncherSettingsPath());
+            const anomaly::AnalyzerConfig ini =
+                anomaly::AnalyzerConfig::Load(LauncherSettingsPath());
             configuration.language =
                 std::string(anomaly::LanguagePreferenceName(ini.platform_language));
         }
@@ -1325,7 +1325,7 @@ private:
             const auto day = anomaly::TelemetryDay(std::chrono::system_clock::now());
             if (telemetry_attempt_day_ == day) return;
             anomaly::TelemetryOptions options;
-            options.enabled = ue5mem::AnalyzerConfig::Load(LauncherSettingsPath()).telemetry_enabled;
+            options.enabled = anomaly::AnalyzerConfig::Load(LauncherSettingsPath()).telemetry_enabled;
             if (!options.enabled) return;
             const auto snapshot = Snapshot();
             if (!snapshot.theme) return;
@@ -1788,11 +1788,11 @@ void ApplyLauncherDpiScale() noexcept {
     // This launcher has one baked font. Minimal atlas retention discards its source
     // name, so the host's name-based font selection cannot be used after upload.
     if (io.FontDefault != nullptr && io.FontDefault->FontSize > 0.0f) {
-        io.FontDefault->Scale = ue5mem::PlatformUiBaseFontSize() / io.FontDefault->FontSize;
+        io.FontDefault->Scale = anomaly::PlatformUiBaseFontSize() / io.FontDefault->FontSize;
     }
     io.FontGlobalScale = g_launcher_dpi_scale * kLauncherFontScale;
     // The shared style already scales its metrics by FontGlobalScale.
-    ue5mem::ApplyPlatformUiStyle();
+    anomaly::ApplyPlatformUiStyle();
     // The launcher writes with its own two ink tones rather than the palette's: it
     // paints the body itself under the wallpaper and its veil, and both are chosen for
     // the surface the palette actually has -- see LauncherInk.
@@ -2014,9 +2014,9 @@ void ApplyLauncherTheme(const std::shared_ptr<const LauncherTheme>& theme,
     const anomaly::PlatformUiCustomColors& custom_colors) {
     if (theme == nullptr) return;
     if (theme->palette == anomaly::PlatformUiPalette::Custom)
-        ue5mem::SetPlatformUiCustomColors(custom_colors);
-    ue5mem::SetPlatformUiPalette(theme->palette);
-    ue5mem::SetPlatformUiSurfaceAlpha(
+        anomaly::SetPlatformUiCustomColors(custom_colors);
+    anomaly::SetPlatformUiPalette(theme->palette);
+    anomaly::SetPlatformUiSurfaceAlpha(
         theme->HasBackground() ? theme->layout.surface_opacity : 1.0f);
     // Rebuilds the style from the palette just stored, so every control follows the
     // theme rather than the one the previous frame drew with.
@@ -2051,7 +2051,7 @@ void DrawLauncherThemeImages(
         // instead of against the surface colour, and whatever sits behind the launcher
         // would show through the window.
         list->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y),
-            tint(ue5mem::PlatformUiSurfaceColor(), 1.0f), body_rounding);
+            tint(anomaly::PlatformUiSurfaceColor(), 1.0f), body_rounding);
     }
     if (!front && graphics.theme_background != nullptr &&
         graphics.theme_background_width != 0 && graphics.theme_background_height != 0) {
@@ -2084,10 +2084,10 @@ void DrawLauncherThemeImages(
         const bool wallpaper = graphics.theme_background != nullptr &&
             layout.background.mode != anomaly::PlatformUiBackgroundMode::Disabled;
         const float veil_alpha =
-            wallpaper ? ue5mem::GetPlatformUiSurfaceAlpha() : 1.0f;
+            wallpaper ? anomaly::GetPlatformUiSurfaceAlpha() : 1.0f;
         if (veil_alpha > 0.0f) {
             list->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y),
-                tint(ue5mem::PlatformUiSurfaceColor(), veil_alpha), body_rounding);
+                tint(anomaly::PlatformUiSurfaceColor(), veil_alpha), body_rounding);
         }
     }
     list->PopClipRect();
@@ -2376,7 +2376,7 @@ bool CommandButton(
     if (scaled_size.x > 0.0f) {
         text = Ellipsize(text, (std::max)(0.0f, scaled_size.x - Scale(16.0f)));
     }
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     LauncherChipStyle style;
     // A primary command keeps the accent colour inside the glass; a secondary one is the plain
     // material, so the two differ by tint rather than by being made of different things.
@@ -2398,7 +2398,7 @@ bool CommandButton(
 // danger colour, so a list of grey commands never gets a destructive click by mistake -- on a
 // grid card the same applies, where every other command is a plain chip.
 bool DestructiveButton(const char* label, const ImVec2 size, const bool enabled) {
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     LauncherChipStyle style;
     style.tint = ThemeColor(theme.danger);
     style.tint.w = 1.0f;
@@ -2443,7 +2443,7 @@ std::string RenderMessage(
 }
 
 ImVec4 ProxyStateColor(anomaly::launcher::ProxyInstallationState state) {
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     using State = anomaly::launcher::ProxyInstallationState;
     switch (state) {
     case State::Enabled: return ThemeColor(theme.success);
@@ -2489,7 +2489,7 @@ void DrawModes(
         style.tint = ImVec4(1.0f, 0.639f, 0.102f, 1.0f);
         style.tint.w = 1.0f;
         style.tint_strength = 0.86f;
-        style.ink = ThemeColor(ue5mem::PlatformUiTheme().inverse_text);
+        style.ink = ThemeColor(anomaly::PlatformUiTheme().inverse_text);
         if (LauncherChip(Format(translator, anomaly::MessageId::LauncherUpdateAvailable,
                 {snapshot.update.remote_version}).c_str(),
                 ImVec2(0.0f, ButtonHeight(38.0f)), true, style)) {
@@ -2565,7 +2565,7 @@ bool StatusRefreshButton(
 void DrawProxyMode(
     LauncherController& controller, const LauncherSnapshot& snapshot,
     const anomaly::Translator& translator) {
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     using State = anomaly::launcher::ProxyInstallationState;
 
     ImGui::TextDisabled("%s",
@@ -2940,7 +2940,7 @@ std::string LauncherHttpGetUrl(const std::string& url, const bool use_system_pro
 void DrawAttachMode(
     LauncherController& controller, const LauncherSnapshot& snapshot,
     const anomaly::Translator& translator) {
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     ImGui::TextDisabled("%s", Text(translator, anomaly::MessageId::LauncherSectionProcesses));
     // The status is the controller's own last message, which already carries every
     // distinction this needs: waiting for MaydayAirways.exe while the launch runs, then the
@@ -3200,7 +3200,7 @@ std::string UpdatePhaseText(
 }
 
 ImVec4 UpdatePhaseInk(const LauncherUpdatePhase phase) {
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     switch (phase) {
     case LauncherUpdatePhase::Available: return ThemeColor(theme.warning);
     case LauncherUpdatePhase::Installed: return ThemeColor(theme.success);
@@ -3277,7 +3277,7 @@ void LauncherDrawEmphasis(const std::string& text) {
 
 // One line of a block: the runs stay in a single sentence, so emphasis and links keep their place.
 void LauncherDrawNoticeRuns(const std::vector<anomaly::NoticeRun>& runs) {
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     ImGui::PushTextWrapPos();
     for (std::size_t index = 0; index < runs.size(); ++index) {
         if (index > 0) ImGui::SameLine(0.0f, 0.0f);
@@ -3489,7 +3489,7 @@ void DrawUpdatePrompt(
         // A plain recess, not a second pane of glass: the material belongs to the surface a window is
         // cut from, and another layer of it inside the first only muddies both. A tinted fill with a
         // hairline is what a panel inside a dialog reads as, and it keeps the notes legible.
-        const auto& theme = ue5mem::PlatformUiTheme();
+        const auto& theme = anomaly::PlatformUiTheme();
         ImDrawList* const draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(pane_min, pane_max,
             ImGui::GetColorU32(ThemeColorWithAlpha(theme.child_background, 0.72f)),
@@ -3638,7 +3638,7 @@ void DrawAboutSettings(const anomaly::Translator& translator) {
 void DrawSettingsMode(
     HWND window, LauncherController& controller, const LauncherSnapshot& snapshot,
     const anomaly::Translator& translator) {
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     // The page may outgrow the body -- theme, language, the mods page options and the startup
     // settings together are taller than the canvas on a narrow window -- so it scrolls on its
     // own, and its scrollbar appears only when it actually needs one.
@@ -3862,7 +3862,7 @@ void DrawSettingsMode(
 // Nothing here paints a background, so the wallpaper and the stickers show
 // through the caption exactly as they do behind the rest of the window.
 void DrawLauncherTitleBar(Graphics& graphics) {
-    const auto& theme = ue5mem::PlatformUiTheme();
+    const auto& theme = anomaly::PlatformUiTheme();
     const float height = Scale(64.0f);
     // The marks are narrower than the caption is tall. At the full height the two of
     // them sat a whole caption apart, which read as two unrelated buttons rather than
@@ -4143,7 +4143,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int) {
     // so a language or hotkey change written here is what the next launch sees.
     const std::filesystem::path settings_path = runtime_root / L"anomaly.ini";
     const std::filesystem::path locale_directory = runtime_root / L"locales" / L"host";
-    const ue5mem::AnalyzerConfig config = ue5mem::AnalyzerConfig::Load(settings_path);
+    const anomaly::AnalyzerConfig config = anomaly::AnalyzerConfig::Load(settings_path);
     if (!LoadLauncherCatalog(config.platform_language, locale_directory)) {
         return ERROR_RESOURCE_DATA_NOT_FOUND;
     }
@@ -4205,8 +4205,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int) {
     // scale, its eight icons, an atlas no taller than the glyphs need, and none of the
     // symbol blocks plugin copy draws from. The host keeps its own ladder of sizes, the
     // whole icon range and those blocks for the in-game windows.
-    static_cast<void>(ue5mem::ConfigurePlatformUiFontAtlas(runtime_root,
-        ue5mem::PlatformUiFontBake{
+    static_cast<void>(anomaly::ConfigurePlatformUiFontAtlas(runtime_root,
+        anomaly::PlatformUiFontBake{
             .scales = kLauncherFontScales, .icons = kLauncherIcons, .tight_atlas = true,
             .symbol_blocks = false}));
     g_launcher_dpi_scale = DpiScale(GetDpiForWindow(window));
@@ -4236,7 +4236,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int) {
     // owns its device for its lifetime and never adds another font, so it keeps
     // neither the texture pixels nor the font files.
     static_cast<void>(ImGui_ImplDX11_CreateDeviceObjects());
-    ue5mem::ReleasePlatformUiFontAtlas(ue5mem::PlatformUiFontRetention::Minimal);
+    anomaly::ReleasePlatformUiFontAtlas(anomaly::PlatformUiFontRetention::Minimal);
     ApplyLauncherDpiScale();
     graphics.logo = LoadEmbeddedTexture(graphics, kLogoResourceId);
     LauncherController controller(ExecutableDirectory());

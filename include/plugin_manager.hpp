@@ -34,7 +34,7 @@ class StructuredLogger;
 class ScopedPlatformServices;
 }
 
-namespace ue5mem {
+namespace anomaly {
 
 struct UiResourceWorkerGate;
 struct PluginCacheOwnerLease;
@@ -378,4 +378,4 @@ private:
     std::vector<PluginStopDiagnostic> stop_diagnostics_;
 };
 
-}  // namespace ue5mem
+}  // namespace anomaly

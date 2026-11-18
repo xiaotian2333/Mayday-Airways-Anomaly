@@ -7,7 +7,7 @@
 
 struct ImFont;
 
-namespace ue5mem {
+namespace anomaly {
 
 enum class PlatformUiPalette : std::uint8_t {
     Moss,
@@ -144,54 +144,4 @@ enum class PlatformUiFontRetention : std::uint8_t { Rebuildable, Minimal };
 
 void ReleasePlatformUiFontAtlas(PlatformUiFontRetention retention) noexcept;
 
-}  // namespace ue5mem
-
-// The platform host model lives in the anomaly namespace. Keep a small alias
-// surface there so custom host drawing can consume the same theme tokens.
-namespace anomaly {
-using PlatformUiPalette = ue5mem::PlatformUiPalette;
-using PlatformUiColor = ue5mem::PlatformUiColor;
-using PlatformUiCustomColors = ue5mem::PlatformUiCustomColors;
-using PlatformUiThemeColors = ue5mem::PlatformUiThemeColors;
-
-inline void SetPlatformUiPalette(const PlatformUiPalette palette) noexcept {
-    ue5mem::SetPlatformUiPalette(palette);
-}
-
-[[nodiscard]] inline PlatformUiPalette GetPlatformUiPalette() noexcept {
-    return ue5mem::GetPlatformUiPalette();
-}
-
-inline void SetPlatformUiCustomColors(const PlatformUiCustomColors& colors) noexcept {
-    ue5mem::SetPlatformUiCustomColors(colors);
-}
-
-[[nodiscard]] inline const PlatformUiCustomColors& GetPlatformUiCustomColors() noexcept {
-    return ue5mem::GetPlatformUiCustomColors();
-}
-
-inline void SetPlatformUiSurfaceAlpha(const float alpha) noexcept {
-    ue5mem::SetPlatformUiSurfaceAlpha(alpha);
-}
-
-[[nodiscard]] inline float GetPlatformUiSurfaceAlpha() noexcept {
-    return ue5mem::GetPlatformUiSurfaceAlpha();
-}
-
-[[nodiscard]] inline ue5mem::PlatformUiColor PlatformUiSurfaceColor() noexcept {
-    return ue5mem::PlatformUiSurfaceColor();
-}
-
-[[nodiscard]] inline const PlatformUiThemeColors& PlatformUiTheme() noexcept {
-    return ue5mem::PlatformUiTheme();
-}
-
-[[nodiscard]] inline PlatformUiPalette ParsePlatformUiPalette(
-    const std::string_view value) noexcept {
-    return ue5mem::ParsePlatformUiPalette(value);
-}
-
-[[nodiscard]] inline std::string_view ToString(const PlatformUiPalette palette) noexcept {
-    return ue5mem::ToString(palette);
-}
 }  // namespace anomaly

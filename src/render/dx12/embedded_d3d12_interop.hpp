@@ -7,7 +7,7 @@
 
 #include <unordered_map>
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 // NVIDIA Streamline's QueryInterface contract, not a proxy object layout.
 // See source/core/sl.api/internal.h and sl.interposer/*/QueryInterface.
@@ -81,4 +81,4 @@ private:
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> latest_;
 };
 
-} // namespace ue5mem::embedded
+} // namespace anomaly::embedded

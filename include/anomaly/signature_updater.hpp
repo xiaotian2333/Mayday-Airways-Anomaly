@@ -14,8 +14,8 @@ namespace anomaly {
 // Synchronous read/scan ports shared by the Profile resolver and plugin signature
 // service. The caller supplies a declared executable section, never a game object.
 struct SignatureScanContext {
-    ue5mem::ModuleInfo module;
-    ue5mem::SectionInfo section;
+    anomaly::ModuleInfo module;
+    anomaly::SectionInfo section;
     std::function<bool(std::uintptr_t, void*, std::size_t)> read;
     std::function<std::vector<std::uintptr_t>(std::string_view, std::size_t)> scan;
 };

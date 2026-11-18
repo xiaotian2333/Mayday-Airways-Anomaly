@@ -172,12 +172,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const HRESULT com =
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     static_cast<void>(com);
-    const auto palette = ue5mem::ParsePlatformUiPalette(PreviewPaletteArgument());
-    ue5mem::SetPlatformUiPalette(palette);
+    const auto palette = anomaly::ParsePlatformUiPalette(PreviewPaletteArgument());
+    anomaly::SetPlatformUiPalette(palette);
     const auto root = ExecutableDirectory() / L"Anomaly";
-    auto config = ue5mem::AnalyzerConfig::Load(root / L"anomaly.ini");
+    auto config = anomaly::AnalyzerConfig::Load(root / L"anomaly.ini");
     const auto locale = anomaly::ResolveUserLocale(config.platform_language);
-    ue5mem::PlatformDiagnostics diagnostics;
+    anomaly::PlatformDiagnostics diagnostics;
     diagnostics.runtime_root = root;
     diagnostics.translator = anomaly::LoadHostCatalog(
         locale.locale, root / L"locales" / L"host").translator;
@@ -185,7 +185,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     config.platform_visible = true;
     config.platform_embedded = false;
     config.platform_attach_to_process_window = false;
-    auto plugins = std::make_shared<ue5mem::PluginManager>(root, config.plugin_directory);
+    auto plugins = std::make_shared<anomaly::PluginManager>(root, config.plugin_directory);
     plugins->SetTranslator(diagnostics.translator);
     plugins->LoadAll();
     std::filesystem::create_directories(root / L"config");
@@ -207,7 +207,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     controls->always_on_top = GetPrivateProfileIntW(
         L"Preview", L"AlwaysOnTop", 0, configuration.c_str()) != 0;
     const auto translator = diagnostics.translator;
-    ue5mem::PlatformWindowAppearance appearance;
+    anomaly::PlatformWindowAppearance appearance;
     appearance.clear_color = controls->background;
     appearance.show_in_taskbar = true;
     appearance.close_exits = true;
@@ -218,7 +218,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         controls->HandleCommand(static_cast<HWND>(window), command);
     };
     appearance.background_color = [controls] { return controls->background; };
-    ue5mem::RunPlatform(root, config, {}, {}, {}, std::move(diagnostics), plugins,
+    anomaly::RunPlatform(root, config, {}, {}, {}, std::move(diagnostics), plugins,
         std::move(appearance));
     SaveBackground(configuration, controls->background);
     static_cast<void>(WritePrivateProfileStringW(L"Preview", L"AlwaysOnTop",

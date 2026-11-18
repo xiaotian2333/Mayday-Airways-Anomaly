@@ -6,14 +6,14 @@
 #include <stop_token>
 #include <string>
 
-namespace ue5mem {
+namespace anomaly {
 class Analyzer;
 }
 
 namespace anomaly {
 
 struct PipeServiceOptions final {
-    std::shared_ptr<const ue5mem::Analyzer> analyzer;
+    std::shared_ptr<const anomaly::Analyzer> analyzer;
     std::wstring pipe_name;
 };
 

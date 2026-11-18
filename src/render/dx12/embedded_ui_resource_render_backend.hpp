@@ -6,7 +6,7 @@ namespace anomaly {
 class UiResourceRenderBackend;
 }
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 struct EmbeddedState;
 
@@ -15,4 +15,4 @@ struct EmbeddedState;
 [[nodiscard]] std::shared_ptr<anomaly::UiResourceRenderBackend>
 CreateEmbeddedUiResourceRenderBackend(EmbeddedState& state) noexcept;
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

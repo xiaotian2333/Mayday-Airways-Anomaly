@@ -22,7 +22,7 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 bool IsMouseMessage(UINT message) noexcept {
@@ -548,4 +548,4 @@ bool RestoreEmbeddedInput(EmbeddedState& state) noexcept {
     return true;
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

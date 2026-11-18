@@ -18,7 +18,7 @@
 #include <vector>
 #include <atomic>
 
-namespace ue5mem {
+namespace anomaly {
 namespace {
 
 constexpr PlatformUiColor Color(
@@ -702,4 +702,4 @@ void ReleasePlatformUiFontAtlas(const PlatformUiFontRetention retention) noexcep
     io.Fonts->ClearInputData();
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly

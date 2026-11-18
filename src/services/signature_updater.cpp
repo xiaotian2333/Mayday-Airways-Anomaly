@@ -36,7 +36,7 @@ Key RecipeKey(const SignatureScanContext& context, std::string_view contract,
     // Canonicalize whitespace and hex case using the same parser as CLI scan.
     std::string pattern;
     constexpr char hex[] = "0123456789ABCDEF";
-    const auto parsed = ue5mem::Pattern::Parse(original);
+    const auto parsed = anomaly::Pattern::Parse(original);
     for (const auto byte : parsed.Bytes()) {
         if (!pattern.empty()) pattern.push_back(' ');
         pattern.push_back(byte.mask & 0xF0 ? hex[byte.value >> 4] : '?');
@@ -54,7 +54,7 @@ struct DecodedInstruction {
 };
 
 std::optional<DecodedInstruction> Decode(
-    std::span<const ue5mem::PatternByte> source, std::size_t offset) {
+    std::span<const anomaly::PatternByte> source, std::size_t offset) {
     if (offset >= source.size()) return std::nullopt;
     std::array<std::uint8_t, 32> bytes{};
     const auto remaining = (std::min)(bytes.size(), source.size() - offset);
@@ -114,11 +114,11 @@ constexpr std::size_t kAnchorReadBytes = 48;
 constexpr std::size_t kAnchorMinimumFixed = 8;
 constexpr std::size_t kMaximumAnchorCandidates = 256;
 
-std::string Normalize(std::span<const ue5mem::PatternByte> source,
+std::string Normalize(std::span<const anomaly::PatternByte> source,
                       std::span<const MemberSite> members = {},
                       std::size_t minimum_fixed = kMinimumFixedBytes,
                       std::size_t minimum_instructions = 4) {
-    std::vector<ue5mem::PatternByte> result;
+    std::vector<anomaly::PatternByte> result;
     std::size_t offset{};
     std::size_t instructions{};
     while (offset < source.size()) {
@@ -157,15 +157,15 @@ std::string Normalize(std::span<const ue5mem::PatternByte> source,
 }
 
 bool ValidCachedPattern(std::string_view original,
-    std::span<const ue5mem::PatternByte> learned, std::span<const MemberSite> sites = {},
+    std::span<const anomaly::PatternByte> learned, std::span<const MemberSite> sites = {},
     std::size_t minimum_fixed = kMinimumFixedBytes) {
-    auto fixed = std::vector<ue5mem::PatternByte>(learned.begin(), learned.end());
+    auto fixed = std::vector<anomaly::PatternByte>(learned.begin(), learned.end());
     for (auto& byte : fixed) byte.mask = 0xFF;
-    const auto normalized = ue5mem::Pattern::Parse(Normalize(fixed, sites, minimum_fixed));
-    const auto declaration = ue5mem::Pattern::Parse(original);
+    const auto normalized = anomaly::Pattern::Parse(Normalize(fixed, sites, minimum_fixed));
+    const auto declaration = anomaly::Pattern::Parse(original);
     // Never omit declared member/stack operands when compacting an address-only
     // recipe. Its consumers still use those original offsets after recovery.
-    if (learned.size() < ue5mem::Pattern::Parse(Normalize(declaration.Bytes(), {}, 0, 0)).Size()) return false;
+    if (learned.size() < anomaly::Pattern::Parse(Normalize(declaration.Bytes(), {}, 0, 0)).Size()) return false;
     if (normalized.Size() != learned.size()) return false;
     for (std::size_t i{}; i < learned.size(); ++i) {
         auto required = normalized.Bytes()[i].mask;
@@ -178,7 +178,7 @@ bool ValidCachedPattern(std::string_view original,
     return true;
 }
 
-bool ImpliesPattern(const ue5mem::Pattern& known, const ue5mem::Pattern& required) {
+bool ImpliesPattern(const anomaly::Pattern& known, const anomaly::Pattern& required) {
     const auto known_bytes = known.Bytes();
     const auto required_bytes = required.Bytes();
     return known_bytes.size() >= required_bytes.size() &&
@@ -216,7 +216,7 @@ std::vector<std::size_t> CallSites(std::span<const std::uint8_t> bytes) {
     return sites;
 }
 
-bool AnchorsFit(std::span<const ue5mem::PatternByte> pattern, std::span<const CalleeAnchor> anchors) {
+bool AnchorsFit(std::span<const anomaly::PatternByte> pattern, std::span<const CalleeAnchor> anchors) {
     std::vector<std::uint8_t> bytes;
     for (auto byte : pattern) bytes.push_back(byte.value);
     const auto sites = CallSites(bytes);
@@ -235,7 +235,7 @@ bool InSection(const SignatureScanContext& context, std::uintptr_t address, std:
 std::string CalleeFingerprint(const SignatureScanContext& context, std::uintptr_t target) {
     std::array<std::uint8_t, kAnchorReadBytes> bytes{};
     if (!InSection(context, target, bytes.size()) || !context.read(target, bytes.data(), bytes.size())) return {};
-    std::vector<ue5mem::PatternByte> source;
+    std::vector<anomaly::PatternByte> source;
     source.reserve(bytes.size());
     for (const auto byte : bytes) source.push_back({byte, 0xFF});
     return Normalize(source, {}, kAnchorMinimumFixed, 1);
@@ -251,7 +251,7 @@ bool AnchorMatches(const SignatureScanContext& context, std::uintptr_t candidate
     if ((decoded.flags & F_ERROR) || !RelativeBranch(decoded)) return false;
     const auto target = BranchTarget(candidate + anchor.instruction, decoded);
     std::array<std::uint8_t, kAnchorReadBytes> bytes{};
-    const auto pattern = ue5mem::Pattern::Parse(anchor.callee);
+    const auto pattern = anomaly::Pattern::Parse(anchor.callee);
     if (pattern.Size() == 0 || pattern.Size() > bytes.size()) return false;
     const auto width = pattern.Size();
     if (!InSection(context, target, width) || !context.read(target, bytes.data(), width)) return false;
@@ -321,8 +321,8 @@ std::vector<CalleeAnchor> LearnCalleeAnchors(const SignatureScanContext& context
 std::string CompactRecipe(const SignatureScanContext& context, std::string_view pattern,
                           std::uintptr_t instruction, std::span<const CalleeAnchor> anchors,
                           std::size_t declaration_size, std::stop_token stop,
-                          const ue5mem::Pattern& declaration, bool original_unique) {
-    const auto parsed = ue5mem::Pattern::Parse(pattern);
+                          const anomaly::Pattern& declaration, bool original_unique) {
+    const auto parsed = anomaly::Pattern::Parse(pattern);
     const auto bytes = parsed.Bytes();
     std::size_t minimum = declaration_size;
     for (const auto& anchor : anchors)
@@ -343,7 +343,7 @@ std::string CompactRecipe(const SignatureScanContext& context, std::string_view 
         const auto middle = low + (high - low) / 2;
         const auto candidate = prefix(middle);
         bool unique = original_unique &&
-            ImpliesPattern(ue5mem::Pattern::Parse(candidate), declaration);
+            ImpliesPattern(anomaly::Pattern::Parse(candidate), declaration);
         if (!unique) {
             const auto matches = context.scan(candidate, kMaximumAnchorCandidates);
             unique = matches.size() < kMaximumAnchorCandidates &&
@@ -366,7 +366,7 @@ struct ObjectOperand {
 // Track the function's RCX object through 64-bit MOV/LEA and invalidate register
 // writes/call-clobbered registers. Unsupported instructions end this evidence
 // window; no register provenance is guessed across them.
-std::vector<ObjectOperand> ObjectOperands(std::span<const ue5mem::PatternByte> source) {
+std::vector<ObjectOperand> ObjectOperands(std::span<const anomaly::PatternByte> source) {
     std::array<std::optional<std::int64_t>, 16> objects{};
     objects[1] = 0; // RCX
     bool conditional_path{};
@@ -496,7 +496,7 @@ bool MatchesUse(const ObjectOperand& operand, const SignatureLayoutMember& bindi
         (operand.access == 4 || operand.width == binding.width);
 }
 
-MemberRecipe MakeMemberRecipe(std::span<const ue5mem::PatternByte> source,
+MemberRecipe MakeMemberRecipe(std::span<const anomaly::PatternByte> source,
     const SignatureLayoutWitness& witness, std::span<const std::uint32_t> offsets) {
     MemberRecipe recipe;
     std::vector<bool> seen(witness.members.size());
@@ -523,7 +523,7 @@ MemberRecipe MakeMemberRecipe(std::span<const ue5mem::PatternByte> source,
     return recipe;
 }
 
-std::vector<ue5mem::PatternByte> ReadInstructions(
+std::vector<anomaly::PatternByte> ReadInstructions(
     const SignatureScanContext& context, std::uintptr_t address) {
     if (address < context.section.base ||
         address - context.section.base >= context.section.virtual_size) return {};
@@ -531,13 +531,13 @@ std::vector<ue5mem::PatternByte> ReadInstructions(
         context.section.virtual_size - (address - context.section.base));
     std::vector<std::uint8_t> bytes(size);
     if (!context.read(address, bytes.data(), bytes.size())) return {};
-    std::vector<ue5mem::PatternByte> source;
+    std::vector<anomaly::PatternByte> source;
     for (auto byte : bytes) source.push_back({byte, 0xFF});
     return source;
 }
 
 std::optional<std::vector<std::optional<std::uint32_t>>> ExtractMembers(
-    const MemberRecipe& recipe, std::span<const ue5mem::PatternByte> source,
+    const MemberRecipe& recipe, std::span<const anomaly::PatternByte> source,
     const SignatureLayoutWitness& witness, const SignatureLayoutDefinition& definition) {
     std::vector<std::optional<std::uint32_t>> values(definition.fields.size());
     std::vector<bool> seen(witness.members.size());
@@ -598,7 +598,7 @@ public:
                 MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, module_utf8.data(),
                     static_cast<int>(module_utf8.size()), module.data(), size);
                 const auto pattern = row.at("learned").get<std::string>();
-                const auto parsed = ue5mem::Pattern::Parse(pattern);
+                const auto parsed = anomaly::Pattern::Parse(pattern);
                 // Only accept records this version of the instruction normalizer
                 // can reproduce; corrupted cache data never loosens the matcher.
                 const auto contract = row.at("contract").get<std::string>();
@@ -608,7 +608,7 @@ public:
                 std::string extended;
                 if (row.contains("extended")) {
                     extended = row.at("extended").get<std::string>();
-                    const auto full = ue5mem::Pattern::Parse(extended);
+                    const auto full = anomaly::Pattern::Parse(extended);
                     if (full.Size() <= parsed.Size() || full.Size() > kWindowBytes ||
                         !extended.starts_with(pattern + " ") || Normalize(full.Bytes()) != extended ||
                         !ValidCachedPattern(original, full.Bytes())) continue;
@@ -622,7 +622,7 @@ public:
                         if (!entry.is_object()) { valid = false; break; }
                         const auto instruction = entry.at("instruction").get<std::size_t>();
                         const auto callee = entry.at("callee").get<std::string>();
-                        const auto callee_pattern = ue5mem::Pattern::Parse(callee);
+                        const auto callee_pattern = anomaly::Pattern::Parse(callee);
                         if (instruction >= parsed.Size() ||
                             callee_pattern.Size() < kAnchorMinimumFixed ||
                             callee_pattern.Size() > kAnchorReadBytes ||
@@ -655,7 +655,7 @@ public:
                     static_cast<int>(module_utf8.size()), module.data(), size);
                 MemberRecipe recipe;
                 recipe.pattern = row.at("learned").get<std::string>();
-                const auto parsed = ue5mem::Pattern::Parse(recipe.pattern);
+                const auto parsed = anomaly::Pattern::Parse(recipe.pattern);
                 const auto contract = row.at("contract").get<std::string>();
                 if (!contract.starts_with("members:") || parsed.Size() > kWindowBytes ||
                     Normalize(parsed.Bytes(), {}, 16) != recipe.pattern ||
@@ -774,12 +774,12 @@ SignatureRecovery SignatureUpdater::Recover(
     // signature. If that surrounding code changes, derive fresh evidence from
     // the original declaration instead of requiring a manually supplied backup.
     if (matches.empty()) {
-        const auto parsed = ue5mem::Pattern::Parse(original_pattern);
+        const auto parsed = anomaly::Pattern::Parse(original_pattern);
         auto derived = Normalize(parsed.Bytes());
         if (derived.empty()) return {0, {}, "insufficient instruction evidence for signature recovery"};
         // Anchors belong to decoded call sites, not arbitrary bytes beyond a new
         // shorter declaration. Never discard mandatory evidence to force a hit.
-        if (!AnchorsFit(ue5mem::Pattern::Parse(derived).Bytes(), anchors))
+        if (!AnchorsFit(anomaly::Pattern::Parse(derived).Bytes(), anchors))
             return {0, {}, "declaration does not cover learned callee evidence"};
         if (derived != learned) {
             if (stop.stop_requested()) return {0, {}, "signature recovery cancelled"};
@@ -833,11 +833,11 @@ std::string SignatureUpdater::Learn(
     // unanchored recovery evidence still matches here, relearning adds only
     // repeated full-section scans and a possible cache write.
     if (!cached.empty() && !anchored) {
-        const auto declaration = ue5mem::Pattern::Parse(original_pattern);
-        const auto compact = ue5mem::Pattern::Parse(cached);
+        const auto declaration = anomaly::Pattern::Parse(original_pattern);
+        const auto compact = anomaly::Pattern::Parse(cached);
         if (original_unique && ImpliesPattern(compact, declaration)) {
             const auto& evidence = extended.empty() ? cached : extended;
-            const auto pattern = ue5mem::Pattern::Parse(evidence);
+            const auto pattern = anomaly::Pattern::Parse(evidence);
             if (pattern.Size() <= context.section.virtual_size - (instruction - context.section.base)) {
                 std::vector<std::uint8_t> current(pattern.Size());
                 if (context.read(instruction, current.data(), current.size()) &&
@@ -850,19 +850,19 @@ std::string SignatureUpdater::Learn(
         context.section.virtual_size - (instruction - context.section.base));
     std::vector<std::uint8_t> bytes(size);
     if (!context.read(instruction, bytes.data(), bytes.size())) return "signature learning memory is unreadable";
-    std::vector<ue5mem::PatternByte> source;
+    std::vector<anomaly::PatternByte> source;
     for (auto byte : bytes) source.push_back({byte, 0xFF});
     // Preserve the declaration's intentional operand wildcards. Freezing their
     // observed values would make learned evidence less portable than its seed.
     // Decode still requires concrete instruction prefixes/opcodes/ModRM bytes.
-    const auto declaration = ue5mem::Pattern::Parse(original_pattern);
+    const auto declaration = anomaly::Pattern::Parse(original_pattern);
     for (std::size_t i{}; i < (std::min)(source.size(), declaration.Size()); ++i)
         source[i].mask &= declaration.Bytes()[i].mask;
     auto learned = Normalize(source);
     if (learned.empty()) return "insufficient instruction evidence for signature learning";
     if (stop.stop_requested()) return "signature learning cancelled";
     const auto matches = original_unique &&
-            ImpliesPattern(ue5mem::Pattern::Parse(learned), declaration)
+            ImpliesPattern(anomaly::Pattern::Parse(learned), declaration)
         ? std::vector<std::uintptr_t>{instruction}
         : context.scan(learned, kMaximumAnchorCandidates);
     if (matches.empty() || matches.size() >= kMaximumAnchorCandidates ||
@@ -871,13 +871,13 @@ std::string SignatureUpdater::Learn(
     std::vector<CalleeAnchor> anchors;
     if (matches.size() > 1) {
         anchors = LearnCalleeAnchors(context, instruction, matches,
-            ue5mem::Pattern::Parse(learned).Size(), stop);
+            anomaly::Pattern::Parse(learned).Size(), stop);
         if (anchors.empty()) return "learned instruction signature is ambiguous";
     }
     if (stop.stop_requested()) return "signature learning cancelled";
     const auto full = learned;
     learned = CompactRecipe(context, learned, instruction, anchors,
-        ue5mem::Pattern::Parse(Normalize(declaration.Bytes(), {}, 0, 0)).Size(), stop,
+        anomaly::Pattern::Parse(Normalize(declaration.Bytes(), {}, 0, 0)).Size(), stop,
         declaration, original_unique);
     if (stop.stop_requested()) return "signature learning cancelled";
     std::scoped_lock lock(impl_->mutex_);
@@ -925,7 +925,7 @@ SignatureLayoutResolution SignatureUpdater::ResolveLayout(
     struct Winner {
         std::uintptr_t address{};
         MemberRecipe recipe;
-        std::vector<ue5mem::PatternByte> source;
+        std::vector<anomaly::PatternByte> source;
         std::vector<std::optional<std::uint32_t>> fields;
         bool original{};
         [[nodiscard]] bool Present() const noexcept { return address != 0; }
@@ -967,7 +967,7 @@ SignatureLayoutResolution SignatureUpdater::ResolveLayout(
             if (stop.stop_requested()) return fail("signature layout resolution cancelled");
             if (matches.size() > 1) return fail(witness.id + ": learned member signature is ambiguous", true);
             if (matches.empty()) {
-                const auto parsed = ue5mem::Pattern::Parse(witness.pattern);
+                const auto parsed = anomaly::Pattern::Parse(witness.pattern);
                 auto derived = MakeMemberRecipe(parsed.Bytes(), witness, seeds);
                 if (!derived.pattern.empty() && derived.pattern != recipe.pattern) {
                     recipe = std::move(derived);
@@ -1013,7 +1013,7 @@ SignatureLayoutResolution SignatureUpdater::ResolveLayout(
         // which the scan above already required to be unique. A learned
         // generalization is weaker evidence, so a short one needs a second,
         // independently agreeing witness for every field it names.
-        const auto parsed = ue5mem::Pattern::Parse(winner.recipe.pattern);
+        const auto parsed = anomaly::Pattern::Parse(winner.recipe.pattern);
         const auto fixed = std::ranges::count_if(parsed.Bytes(), [](auto byte) { return byte.mask == 0xFF; });
         if (fixed >= kMinimumFixedBytes) continue;
         for (std::size_t i{}; i < winner.fields.size(); ++i)

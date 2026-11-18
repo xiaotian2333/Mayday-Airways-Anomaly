@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace ue5mem {
+namespace anomaly {
 
 struct ConfigDiagnostic final {
     std::string key;
@@ -33,4 +33,4 @@ struct AnalyzerConfig {
     static AnalyzerConfig Load(const std::filesystem::path& path);
 };
 
-}  // namespace ue5mem
+}  // namespace anomaly

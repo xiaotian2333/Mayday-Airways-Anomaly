@@ -1300,7 +1300,7 @@ AnomalyStatusV1 ScopedPlatformServices::ResolveSignature(
             return value.name == section_name;
         });
         if (section == sections.end()) return Status(ANOMALY_STATUS_V1_NOT_FOUND, "section is not loaded");
-        const ue5mem::Pattern parsed = impl_->memory_services_.patterns->Parse(pattern);
+        const anomaly::Pattern parsed = impl_->memory_services_.patterns->Parse(pattern);
         auto matches = impl_->memory_services_.patterns->ScanSection(
             *section, parsed, 2);
         std::shared_ptr<SignatureUpdater> updater;
@@ -1360,7 +1360,7 @@ AnomalyStatusV1 ScopedPlatformServices::ResolveSignatures(
     if (!allow_recovery_io)
         return Status(ANOMALY_STATUS_V1_UNAVAILABLE, "batch resolution requires Lifecycle or Worker");
     try {
-        std::vector<ue5mem::Pattern> parsed;
+        std::vector<anomaly::Pattern> parsed;
         parsed.reserve(count);
         for (std::uint32_t index = 0; index < count; ++index) {
             const auto text = patterns[index].data

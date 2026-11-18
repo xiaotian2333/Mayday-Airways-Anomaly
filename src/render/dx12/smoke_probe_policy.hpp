@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 struct SmokeProbeRegion {
     std::uint32_t width{};
@@ -128,4 +128,4 @@ inline void CompleteSmokeProbePolicy(
     policy.retry_frames = retry_frames;
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

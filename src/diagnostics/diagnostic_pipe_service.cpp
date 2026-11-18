@@ -411,7 +411,7 @@ private:
 }
 
 [[nodiscard]] std::string ExecuteJsonEnvelope(
-    const ue5mem::Analyzer& analyzer,
+    const anomaly::Analyzer& analyzer,
     std::string_view request_text) {
     const Json request = Json::parse(request_text, nullptr, false);
     if (request.is_discarded()) {

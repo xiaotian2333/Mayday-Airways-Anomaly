@@ -1,6 +1,6 @@
 #include "embedded_host_internal.hpp"
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 LRESULT CALLBACK DummyWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -85,4 +85,4 @@ HookTargets DiscoverD3D12HookTargets() {
     return targets;
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

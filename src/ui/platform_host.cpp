@@ -56,7 +56,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND window, UINT message, WPARAM wparam, LPARAM lparam);
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
-namespace ue5mem {
+namespace anomaly {
 namespace {
 
 // Half extent of the clip rectangle a theme sticker draws under. It is far
@@ -3577,8 +3577,8 @@ private:
             Route::Plugins, Route::Diagnostics, Route::Settings};
         const float scale = PlatformUiScale();
         const float icon_scale = IsCompact() ? 1.40f : 1.55f;
-        ImFont* const icon_font = ue5mem::PlatformUiFontForScale(scale * icon_scale);
-        const float icon_size = Scaled(ue5mem::PlatformUiBaseFontSize() * icon_scale);
+        ImFont* const icon_font = anomaly::PlatformUiFontForScale(scale * icon_scale);
+        const float icon_size = Scaled(anomaly::PlatformUiBaseFontSize() * icon_scale);
         ImFont* const label_font = ImGui::GetFont();
         const float label_size = ImGui::GetFontSize();
         float content_width = 0.0f;
@@ -3770,8 +3770,8 @@ private:
             // A fixed product title, drawn from a bake of its own size.
             const float title_scale = 1.45f;
             ImFont* const title_font =
-                ue5mem::PlatformUiFontForScale(PlatformUiScale() * title_scale);
-            const float title_size = Scaled(ue5mem::PlatformUiBaseFontSize() * title_scale);
+                anomaly::PlatformUiFontForScale(PlatformUiScale() * title_scale);
+            const float title_size = Scaled(anomaly::PlatformUiBaseFontSize() * title_scale);
             list->AddText(title_font, title_size,
                 ImVec2(std::round(origin.x + Scaled(56.0f)),
                     std::round(origin.y + (size.y - title_size) * 0.5f)),
@@ -6777,9 +6777,9 @@ private:
     void DrawNoticeDocument(const anomaly::NoticeDocument& document) {
         // Baked tiers, not window scaling: scaling a baked atlas blurs the glyphs.
         const float ui_scale = PlatformUiScale();
-        ImFont* const body_font = ue5mem::PlatformUiFontForScale(ui_scale * 1.12f);
-        ImFont* const heading_font = ue5mem::PlatformUiFontForScale(ui_scale * 1.55f);
-        ImFont* const subheading_font = ue5mem::PlatformUiFontForScale(ui_scale * 1.28f);
+        ImFont* const body_font = anomaly::PlatformUiFontForScale(ui_scale * 1.12f);
+        ImFont* const heading_font = anomaly::PlatformUiFontForScale(ui_scale * 1.55f);
+        ImFont* const subheading_font = anomaly::PlatformUiFontForScale(ui_scale * 1.28f);
         const auto draw_block = [&](const anomaly::NoticeBlock& block) {
             ImFont* font = body_font;
             if (block.kind == anomaly::NoticeBlockKind::Heading) font = heading_font;
@@ -6922,7 +6922,7 @@ private:
         ImGui::Separator();
         ImGui::PopStyleColor();
         ImFont* const footer_font =
-            ue5mem::PlatformUiFontForScale(PlatformUiScale() * 1.12f);
+            anomaly::PlatformUiFontForScale(PlatformUiScale() * 1.12f);
         const bool footer_pushed = footer_font != nullptr;
         if (footer_pushed) ImGui::PushFont(footer_font);
         const std::string agree = StableLabel(
@@ -9295,4 +9295,4 @@ void RunPlatform(
     guard.cleanup();
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly

@@ -15,7 +15,7 @@
 #include <optional>
 #include <vector>
 
-namespace ue5mem {
+namespace anomaly {
 namespace {
 
 // HasRange 的 VirtualQuery 是每次读取一次内核调用。全量实体/actor 扫描每帧要做上万次
@@ -491,4 +491,4 @@ std::string TypeName(DWORD type) {
     }
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly

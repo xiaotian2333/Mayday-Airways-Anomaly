@@ -7,7 +7,7 @@
 #include <charconv>
 #include <string_view>
 
-namespace ue5mem {
+namespace anomaly {
 namespace {
 
 std::wstring ReadWide(
@@ -84,4 +84,4 @@ AnalyzerConfig AnalyzerConfig::Load(const std::filesystem::path& path) {
     return result;
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly

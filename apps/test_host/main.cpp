@@ -105,24 +105,24 @@ std::uint64_t PrivateBytes() {
 bool VerifyPatternMatcher() {
     const std::array<std::uint8_t, 10> bytes{
         0x00, 0xA1, 0x2B, 0xCC, 0xA7, 0x3B, 0xCC, 0x7F, 0x7F, 0x7F};
-    const auto masked = ue5mem::Pattern::Parse("A? ?B CC");
+    const auto masked = anomaly::Pattern::Parse("A? ?B CC");
     if (masked.FindAll(bytes) != std::vector<std::size_t>{1, 4}) return false;
 
-    const auto overlap = ue5mem::Pattern::Parse("7F 7F");
+    const auto overlap = anomaly::Pattern::Parse("7F 7F");
     if (overlap.FindAll(bytes) != std::vector<std::size_t>{7, 8}) return false;
     if (overlap.FindAll(bytes, 1) != std::vector<std::size_t>{7}) return false;
 
-    const auto wildcard = ue5mem::Pattern::Parse("??");
+    const auto wildcard = anomaly::Pattern::Parse("??");
     if (wildcard.FindAll(std::span(bytes).first(3), 2) !=
         std::vector<std::size_t>{0, 1}) return false;
     const std::array batch{
-        ue5mem::Pattern::Parse("A? ?B CC"),
-        ue5mem::Pattern::Parse("7F 7F"),
-        ue5mem::Pattern::Parse("??"),
-        ue5mem::Pattern::Parse("A1 2B"),
-        ue5mem::Pattern::Parse("?? A1 2B CC A?"),
-        ue5mem::Pattern::Parse("00 00")};
-    return ue5mem::Pattern::FindAllBatch(bytes, batch, 2) ==
+        anomaly::Pattern::Parse("A? ?B CC"),
+        anomaly::Pattern::Parse("7F 7F"),
+        anomaly::Pattern::Parse("??"),
+        anomaly::Pattern::Parse("A1 2B"),
+        anomaly::Pattern::Parse("?? A1 2B CC A?"),
+        anomaly::Pattern::Parse("00 00")};
+    return anomaly::Pattern::FindAllBatch(bytes, batch, 2) ==
         std::vector<std::vector<std::size_t>>{{1, 4}, {7, 8}, {0, 1}, {1}, {0}, {}};
 }
 
@@ -334,7 +334,7 @@ bool VerifyEnablementConfigReload(const std::filesystem::path& root) {
         callback();
         return true;
     };
-    ue5mem::PluginManager manager(
+    anomaly::PluginManager manager(
         root, root, {}, {}, {}, inline_dispatch, inline_dispatch);
     manager.SetUiService(&kUi);
     manager.LoadAll();
@@ -425,7 +425,7 @@ bool VerifyHookStopOrderFixture(const std::filesystem::path& root) {
         return true;
     };
     auto probe = std::make_shared<HookStopOrderProbe>();
-    ue5mem::PluginManager manager(
+    anomaly::PluginManager manager(
         root, root, {}, {}, {}, inline_dispatch, inline_dispatch, {},
         std::make_unique<RejectBatchHookBackend>(probe));
     manager.LoadAll();
@@ -499,7 +499,7 @@ bool VerifyEnablementDrainFixture(const std::filesystem::path& root) {
     auto probe = std::make_shared<HookStopOrderProbe>();
     bool valid{};
     {
-        ue5mem::PluginManager manager(
+        anomaly::PluginManager manager(
             root, root, {}, {}, {}, inline_dispatch, inline_dispatch, {},
             std::make_unique<RejectBatchHookBackend>(probe));
         manager.LoadAll();
@@ -695,7 +695,7 @@ int wmain(int argc, wchar_t** argv) {
         // The standalone host has no RuntimeSession dispatcher. It runs
         // resource staging synchronously only for deterministic SDK smoke
         // coverage; production routes both adapters through RuntimeDispatchers.
-        ue5mem::PluginManager manager(
+        anomaly::PluginManager manager(
             root, root, {}, {}, {}, inline_dispatch, inline_dispatch);
         manager.SetUiService(&kUi);
         manager.LoadAll();

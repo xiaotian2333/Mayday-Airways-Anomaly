@@ -120,7 +120,7 @@ class Channel final {
 
 struct ImGuiContext;
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 enum class EmbeddedPerformanceStage : std::uint8_t {
     PresentInterval,
@@ -447,4 +447,4 @@ void HandlePresentResult(IDXGISwapChain* swap_chain, HRESULT result);
 [[nodiscard]] bool ReleaseGraphics(
     EmbeddedState& state, RendererLifecycle final_state, bool force_release = false);
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded

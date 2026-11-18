@@ -27,7 +27,7 @@
 #include <string_view>
 #include <utility>
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 // Says why the overlay is not on screen.
@@ -127,7 +127,7 @@ private:
 };
 
 }  // namespace
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 namespace {
@@ -215,7 +215,7 @@ void CS(uint3 pixel : SV_DispatchThreadID, uint3 group : SV_GroupID,
 }  // namespace
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 void AllocateSrv(
@@ -310,7 +310,7 @@ void NotifyPixelProbe(
 }
 
 }  // namespace
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 namespace {
@@ -353,7 +353,7 @@ void Channel::Prepare() noexcept {
 }
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 void ReleasePixelProbeResources(PixelProbeState& probe) noexcept {
@@ -902,7 +902,7 @@ std::string DescribeSwapChainApi(IDXGISwapChain* swap_chain) {
 }
 
 }  // namespace
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 void Channel::UpdateKey(const std::optional<std::string>& key,
@@ -968,7 +968,7 @@ void Channel::UpdateKey(const std::optional<std::string>& key,
 }
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 bool CompleteGraphicsInitialization(EmbeddedState& state);
@@ -1422,7 +1422,7 @@ bool InitializeGraphics(EmbeddedState& state, IDXGISwapChain* swap_chain) {
 
 }  // namespace
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 bool Channel::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
@@ -1556,7 +1556,7 @@ bool Channel::Initialize(ID3D12Device* device, ID3D12CommandQueue* queue,
 }
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 bool ReleaseGraphics(
     EmbeddedState& state, RendererLifecycle final_state, bool force_release) {
@@ -2082,7 +2082,7 @@ void FinishResizeEvidenceHandoff(bool successful) noexcept {
     }
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 void Channel::ResetList(ID3D12GraphicsCommandList* list) noexcept {
@@ -2248,7 +2248,7 @@ void Channel::Execute(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* 
 }
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 void CaptureCommandQueue(ID3D12CommandQueue* queue) {
     auto* state = g_state.load(std::memory_order_acquire);
@@ -2276,7 +2276,7 @@ void HandlePresentResult(IDXGISwapChain* swap_chain, HRESULT result) {
     }
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 bool Channel::Release(DWORD timeout_ms) noexcept {

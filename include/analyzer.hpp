@@ -9,7 +9,7 @@
 #include <string>
 #include <string_view>
 
-namespace ue5mem {
+namespace anomaly {
 
 class Analyzer {
 public:
@@ -50,4 +50,4 @@ private:
     ProfileStatusProvider profile_status_;
 };
 
-}  // namespace ue5mem
+}  // namespace anomaly

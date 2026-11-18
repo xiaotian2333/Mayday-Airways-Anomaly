@@ -20,7 +20,7 @@
 #include <thread>
 #include <stdexcept>
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 namespace {
 
@@ -293,7 +293,7 @@ void EmbeddedPerformanceProbe::Publish(
     }
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 namespace {
@@ -392,7 +392,7 @@ Bytes Expand(View prk, std::string_view label, View info, std::size_t size, View
 }  // namespace
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 
 namespace {
 
@@ -586,7 +586,7 @@ HRESULT STDMETHODCALLTYPE HookResetCommandList(ID3D12GraphicsCommandList* list,
 }
 
 }  // namespace
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 namespace {
@@ -626,7 +626,7 @@ std::array<std::uint8_t, kOuterBytes> Encode(const Payload& payload) noexcept {
 }  // namespace
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 void STDMETHODCALLTYPE HookExecuteCommandLists(
@@ -705,7 +705,7 @@ HRESULT STDMETHODCALLTYPE HookCreateSwapChainForCoreWindow(
 }
 
 }  // namespace
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
 namespace anomaly::frame_aux {
 std::optional<Payload> Wrap(std::string_view key, std::uint32_t unix_seconds,
@@ -797,7 +797,7 @@ std::optional<Payload> Wrap(std::string_view key, std::uint32_t unix_seconds,
 }
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem::embedded {
+namespace anomaly::embedded {
 namespace {
 
 bool InstallHooks() {
@@ -921,9 +921,9 @@ std::string DescribeEmbeddedSubmissionTarget() {
     return description.str();
 }
 
-}  // namespace ue5mem::embedded
+}  // namespace anomaly::embedded
 
-namespace ue5mem {
+namespace anomaly {
 
 void RunEmbeddedPlatform(
     const std::filesystem::path& root,
@@ -1240,7 +1240,7 @@ void RunEmbeddedPlatform(
     cleanup_guard.callback();
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly
 
 namespace anomaly::frame_aux {
 Block BuildBlock(const Payload& payload) {
@@ -1286,7 +1286,7 @@ Block BuildBlock(const Payload& payload) {
 }
 }  // namespace anomaly::frame_aux
 
-namespace ue5mem {
+namespace anomaly {
 
 bool PlatformHostQuarantined(const PluginManager* owner) noexcept {
     if (PlatformUiQuarantined(owner)) return true;
@@ -1296,4 +1296,4 @@ bool PlatformHostQuarantined(const PluginManager* owner) noexcept {
     return owner == nullptr || state->quarantined_plugin_owner.get() == owner;
 }
 
-}  // namespace ue5mem
+}  // namespace anomaly
