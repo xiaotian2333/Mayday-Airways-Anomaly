@@ -370,14 +370,11 @@ LRESULT CALLBACK EmbeddedWindowProc(HWND window, UINT message, WPARAM wparam, LP
         // never owns input. The menu gate therefore precedes all ImGui flags.
         const bool menus_expanded = !anomaly::HostUiMenusCollapsed();
         if (!menus_expanded) state->ime.Reset();
-        const ImGuiIO& io = ImGui::GetIO();
         const bool capture_mouse = anomaly::HostUiMenusCaptureMouse();
-        const bool capture_keyboard = menus_expanded && io.WantCaptureKeyboard;
-        // WantTextInput is the explicit desktop/mobile text-input signal. On
-        // desktop ImGui versions it is commonly false for InputText, while
-        // WantCaptureKeyboard is true, so accept either signal for text.
-        const bool capture_text = menus_expanded &&
-            (io.WantTextInput || io.WantCaptureKeyboard);
+        // 覆盖层展开时窗口消息整体归覆盖层。游戏自己的 InputSystem 状态
+        // 由游戏适配层的按钮 hook 阻断；这里保证消息路径也不会漏给游戏。
+        const bool capture_keyboard = menus_expanded;
+        const bool capture_text = menus_expanded;
         const bool mouse_message = IsMouseMessage(message);
         const bool raw_mouse = message == WM_INPUT && IsRawMouseInput(lparam);
         const bool keyboard_message = IsKeyboardMessage(message);
@@ -389,6 +386,11 @@ LRESULT CALLBACK EmbeddedWindowProc(HWND window, UINT message, WPARAM wparam, LP
                 capture_mouse, message,
                 static_cast<std::uint16_t>(LOWORD(lparam)))) {
             return ForwardToGameWindowProc(state, window, message, wparam, lparam);
+        }
+
+        if (menus_expanded && message == WM_SETCURSOR) {
+            // 菜单展开期间由 ImGui 绘制光标，阻止游戏把系统光标切回去。
+            return TRUE;
         }
 
         if (capture_mouse && (mouse_message || raw_mouse)) {
@@ -405,9 +407,9 @@ LRESULT CALLBACK EmbeddedWindowProc(HWND window, UINT message, WPARAM wparam, LP
         }
 
         // Keep ImGui's key state coherent across a menu transition. Release
-        // messages are forwarded without ever being consumed by the game.
+        // messages are forwarded so the game never keeps a key stuck down.
         const bool forward_keyboard = keyboard_message &&
-            ((menus_expanded && capture_keyboard) || IsKeyboardReleaseMessage(message));
+            (capture_keyboard || IsKeyboardReleaseMessage(message));
         const bool forward_text = text_message && capture_text;
         const bool forward_clipboard = clipboard_message && capture_text;
         if (forward_keyboard || forward_text || forward_clipboard ||
@@ -422,7 +424,12 @@ LRESULT CALLBACK EmbeddedWindowProc(HWND window, UINT message, WPARAM wparam, LP
 
         LRESULT ime_result{};
         if (state->ime.HandleMessage(message, wparam, lparam, ime_result)) return ime_result;
-        if (capture_keyboard && keyboard_message) return TRUE;
+        // 覆盖层展开时按键按下与文本输入全部截断。释放消息继续转发，
+        // 只用于清除游戏侧可能残留的按下状态。
+        if (capture_keyboard && keyboard_message &&
+            !IsKeyboardReleaseMessage(message)) {
+            return TRUE;
+        }
         if (capture_text && (text_message || clipboard_message)) {
             return TRUE;
         }

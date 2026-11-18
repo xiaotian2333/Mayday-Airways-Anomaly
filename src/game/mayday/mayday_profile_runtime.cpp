@@ -1,8 +1,9 @@
 #include "anomaly/mayday_adapter.hpp"
 #include "anomaly/mayday_profile_runtime.hpp"
 #include "anomaly/adapter_service_registry.hpp"
-#include "anomaly/sdk/services/mayday.h"
 #include "anomaly/hook_manager.hpp"
+#include "anomaly/host_ui_service.hpp"
+#include "anomaly/sdk/services/mayday.h"
 #include "anomaly/thread_local_value.hpp"
 
 #include <Windows.h>
@@ -33,7 +34,12 @@ constexpr std::uint32_t kIl2CppServiceVersion = 1;
 constexpr std::uint32_t kMoneyServiceVersion = ANOMALY_MAYDAY_MONEY_SERVICE_V1_VERSION;
 constexpr std::uint32_t kFreecamServiceVersion = ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION;
 
-// il2cpp 值类型的内存布局（UnityEngine.Vector3 / Quaternion）。
+// il2cpp 值类型的内存布局（UnityEngine.Vector2 / Vector3 / Quaternion）。
+struct Vec2 {
+    float x;
+    float y;
+};
+
 struct Vec3 {
     float x;
     float y;
@@ -75,6 +81,7 @@ using FnClassGetMethods = void* (*)(void* klass, void** iterator);
 using FnMethodGetName = const char* (*)(void* method);
 using FnMethodGetParamCount = int (*)(void* method);
 using FnClassGetField = void* (*)(void* klass, const char* name);
+using FnClassGetParent = void* (*)(void* klass);
 using FnFieldGetOffset = std::size_t (*)(void* field);
 using FnRuntimeInvoke = void* (*)(void* method, void* obj, void** params, void** exc);
 using FnThreadAttach = void* (*)(void* domain);
@@ -109,6 +116,7 @@ struct MaydayAdapter::Impl {
     FnImageGetName image_get_name{};
     FnClassFromName class_from_name{};
     FnClassGetMethod class_get_method{};
+    FnClassGetParent class_get_parent{};
     FnClassGetMethods class_get_methods{};
     FnMethodGetName method_get_name{};
     FnMethodGetParamCount method_get_param_count{};
@@ -190,6 +198,35 @@ struct MaydayAdapter::Impl {
     AnomalyMaydayFreecamServiceV1 freecam_service{};
     static std::atomic<Impl*> freecam_owner;
 
+    // ---- 覆盖层输入阻断 ----
+    // 游戏走 Unity InputSystem：它从原始设备状态更新控件，不依赖 WndProc
+    // 是否把消息转发给游戏窗口。因此只吞窗口消息挡不住点击与按键，必须把
+    // ButtonControl 的状态读取在覆盖层展开期间固定为 false。
+    bool input_block_resolved{};
+    std::atomic<bool> input_hook_installed{false};
+    bool input_hook_shutdown{};
+    std::chrono::steady_clock::time_point input_hook_retry_after{};
+    std::unique_ptr<HookBackend> input_hook_backend;
+    void* is_pressed_target{};
+    void* is_pressed_original{};
+    void* was_pressed_target{};
+    void* was_pressed_original{};
+    void* was_released_target{};
+    void* was_released_original{};
+    // 滚轮与鼠标增量都是 DeltaControl，游戏可能读整个 Vector2，也可能读
+    // 它的 AxisControl 分量；这两个泛型 ReadValue 也要在覆盖层期间归零。
+    void* delta_control_class{};
+    std::size_t input_control_parent_offset{};
+    void* vector2_read_value_target{};
+    void* vector2_read_value_original{};
+    void* float_read_value_target{};
+    void* float_read_value_original{};
+    // UGUI 的 StandaloneInputModule 仍走旧版 Input.mouseScrollDelta。
+    void* mouse_scroll_delta_target{};
+    void* mouse_scroll_delta_original{};
+    std::atomic<int> input_hook_in_callback{0};
+    static std::atomic<Impl*> input_hook_owner;
+
     // 服务表回调：Impl 是 MaydayAdapter 的私有嵌套类型，只有成员才能访问。
     static AnomalyStatusV1 ANOMALY_CALL MoneyGetMoney(void* user, std::int32_t* out_money);
     static AnomalyStatusV1 ANOMALY_CALL MoneySetMoney(void* user, std::int32_t value);
@@ -240,6 +277,20 @@ struct MaydayAdapter::Impl {
     // 方法名失配时列出 PlayerRig 上关心的候选方法（诊断用）。
     std::string DescribeRigMethods();
     void ApplyFreecamInput();
+
+    // InputSystem 的按钮状态 getter：覆盖层展开时强制返回 false。
+    static bool ANOMALY_CALL IsPressedThunk(void* self, void* method);
+    static bool ANOMALY_CALL WasPressedThunk(void* self, void* method);
+    static bool ANOMALY_CALL WasReleasedThunk(void* self, void* method);
+    // DeltaControl（滚轮/鼠标增量）及其 AxisControl 分量的 ReadValue。
+    static Vec2 ANOMALY_CALL Vector2ReadValueThunk(void* self, void* method);
+    static float ANOMALY_CALL FloatReadValueThunk(void* self, void* method);
+    static Vec2 ANOMALY_CALL InputMouseScrollDeltaThunk(void* method);
+    [[nodiscard]] bool IsDeltaControlValue(void* control) const noexcept;
+    [[nodiscard]] void* FindMethodTarget(void* klass, const char* name, int args) const;
+    bool ResolveInputBlock();
+    bool EnsureInputBlockHook();
+    void TeardownInputBlockHook() noexcept;
 };
 
 void MaydayAdapter::Impl::ProbeWorker() {
@@ -278,6 +329,7 @@ bool MaydayAdapter::Impl::ResolveExports(const HMODULE game_assembly) {
         {reinterpret_cast<void**>(&image_get_name), "il2cpp_image_get_name"},
         {reinterpret_cast<void**>(&class_from_name), "il2cpp_class_from_name"},
         {reinterpret_cast<void**>(&class_get_method), "il2cpp_class_get_method_from_name"},
+        {reinterpret_cast<void**>(&class_get_parent), "il2cpp_class_get_parent"},
         {reinterpret_cast<void**>(&class_get_methods), "il2cpp_class_get_methods"},
         {reinterpret_cast<void**>(&method_get_name), "il2cpp_method_get_name"},
         {reinterpret_cast<void**>(&method_get_param_count), "il2cpp_method_get_param_count"},
@@ -1013,6 +1065,314 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetInput(
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
 
+// ---------------------------------------------------------------------------
+// 覆盖层输入阻断：Unity InputSystem 的 ButtonControl 状态读取
+// ---------------------------------------------------------------------------
+std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::input_hook_owner{nullptr};
+
+bool MaydayAdapter::Impl::ResolveInputBlock() {
+    if (input_block_resolved) return true;
+    if (domain_get == nullptr || domain_get_assemblies == nullptr ||
+        assembly_get_image == nullptr || image_get_name == nullptr ||
+        class_from_name == nullptr || class_get_method == nullptr) {
+        return false;
+    }
+    if (domain == nullptr) {
+        domain = domain_get();
+        if (domain == nullptr) return false;
+    }
+    std::size_t count{};
+    void** const assemblies = domain_get_assemblies(domain, &count);
+    if (assemblies == nullptr) return false;
+    void* input_image{};
+    void* legacy_input_image{};
+    for (std::size_t i = 0; i < count; ++i) {
+        void* const candidate = assembly_get_image(assemblies[i]);
+        if (candidate == nullptr) continue;
+        const char* const name = image_get_name(candidate);
+        if (name == nullptr) continue;
+        if (std::strcmp(name, "Unity.InputSystem.dll") == 0 ||
+            std::strcmp(name, "Unity.InputSystem") == 0) {
+            input_image = candidate;
+        } else if (std::strcmp(name, "UnityEngine.InputLegacyModule.dll") == 0 ||
+                   std::strcmp(name, "UnityEngine.InputLegacyModule") == 0) {
+            legacy_input_image = candidate;
+        }
+    }
+    if (input_image == nullptr) return false;
+    void* const button_class =
+        class_from_name(input_image, "UnityEngine.InputSystem.Controls", "ButtonControl");
+    if (button_class == nullptr) return false;
+    const auto resolve_target = [this, button_class](const char* name) noexcept {
+        void* const method = class_get_method(button_class, name, 0);
+        return method != nullptr ? *reinterpret_cast<void**>(method) : nullptr;
+    };
+    is_pressed_target = resolve_target("get_isPressed");
+    was_pressed_target = resolve_target("get_wasPressedThisFrame");
+    was_released_target = resolve_target("get_wasReleasedThisFrame");
+    if (is_pressed_target == nullptr || was_pressed_target == nullptr) return false;
+
+    // DeltaControl 承载鼠标增量与滚轮。ReadValue 定义在泛型基类
+    // InputControl<T> 上，因此按实际控件类型从继承链上取实例化后的入口。
+    delta_control_class = class_from_name(
+        input_image, "UnityEngine.InputSystem.Controls", "DeltaControl");
+    void* const axis_control_class = class_from_name(
+        input_image, "UnityEngine.InputSystem.Controls", "AxisControl");
+    void* const input_control_class = class_from_name(
+        input_image, "UnityEngine.InputSystem", "InputControl");
+    if (class_get_field != nullptr && field_get_offset != nullptr &&
+        input_control_class != nullptr) {
+        void* const parent_field = class_get_field(input_control_class, "m_Parent");
+        if (parent_field != nullptr) {
+            input_control_parent_offset = field_get_offset(parent_field);
+        }
+    }
+    if (delta_control_class != nullptr && input_control_parent_offset != 0) {
+        vector2_read_value_target = FindMethodTarget(delta_control_class, "ReadValue", 0);
+        float_read_value_target = FindMethodTarget(axis_control_class, "ReadValue", 0);
+    }
+    if (legacy_input_image != nullptr) {
+        void* const legacy_input_class =
+            class_from_name(legacy_input_image, "UnityEngine", "Input");
+        mouse_scroll_delta_target =
+            FindMethodTarget(legacy_input_class, "get_mouseScrollDelta", 0);
+    }
+
+    input_block_resolved = true;
+    return true;
+}
+
+void* MaydayAdapter::Impl::FindMethodTarget(
+    void* klass, const char* name, int args) const {
+    for (int depth = 0; klass != nullptr && depth < 8; ++depth) {
+        if (class_get_method != nullptr) {
+            void* const method = class_get_method(klass, name, args);
+            if (method != nullptr) {
+                void* const target = *reinterpret_cast<void**>(method);
+                if (target != nullptr) return target;
+            }
+        }
+        klass = class_get_parent != nullptr ? class_get_parent(klass) : nullptr;
+    }
+    return nullptr;
+}
+
+bool MaydayAdapter::Impl::IsDeltaControlValue(void* control) const noexcept {
+    if (control == nullptr || delta_control_class == nullptr ||
+        input_control_parent_offset == 0) {
+        return false;
+    }
+    // 控件对象头第一个指针就是 Il2CppClass；分量 AxisControl 需要沿
+    // m_Parent 向上找到 DeltaControl。
+    void* current = control;
+    for (int depth = 0; depth < 4 && current != nullptr; ++depth) {
+        if (*reinterpret_cast<void**>(current) == delta_control_class) return true;
+        current = *reinterpret_cast<void**>(
+            reinterpret_cast<std::uint8_t*>(current) + input_control_parent_offset);
+    }
+    return false;
+}
+
+bool ANOMALY_CALL MaydayAdapter::Impl::IsPressedThunk(void* self, void* method) {
+    Impl* const impl = input_hook_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return false;
+    impl->input_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    bool result = false;
+    // 覆盖层展开时游戏读不到任何按下的按钮；收起后原样放行。
+    if (!HostUiMenusCaptureMouse()) {
+        auto* const original = reinterpret_cast<bool (ANOMALY_CALL*)(void*, void*)>(
+            impl->is_pressed_original);
+        if (original != nullptr) result = original(self, method);
+    }
+    impl->input_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+    return result;
+}
+
+bool ANOMALY_CALL MaydayAdapter::Impl::WasPressedThunk(void* self, void* method) {
+    Impl* const impl = input_hook_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return false;
+    impl->input_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    bool result = false;
+    if (!HostUiMenusCaptureMouse()) {
+        auto* const original = reinterpret_cast<bool (ANOMALY_CALL*)(void*, void*)>(
+            impl->was_pressed_original);
+        if (original != nullptr) result = original(self, method);
+    }
+    impl->input_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+    return result;
+}
+
+bool ANOMALY_CALL MaydayAdapter::Impl::WasReleasedThunk(void* self, void* method) {
+    Impl* const impl = input_hook_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return false;
+    impl->input_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    bool result = false;
+    if (!HostUiMenusCaptureMouse()) {
+        auto* const original = reinterpret_cast<bool (ANOMALY_CALL*)(void*, void*)>(
+            impl->was_released_original);
+        if (original != nullptr) result = original(self, method);
+    }
+    impl->input_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+    return result;
+}
+
+Vec2 ANOMALY_CALL MaydayAdapter::Impl::Vector2ReadValueThunk(void* self, void* method) {
+    Impl* const impl = input_hook_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return {};
+    impl->input_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    Vec2 result{};
+    // 覆盖层展开时滚轮与鼠标增量都按零处理；其余 Vector2 控件不受影响。
+    if (!HostUiMenusCaptureMouse() || !impl->IsDeltaControlValue(self)) {
+        auto* const original = reinterpret_cast<Vec2 (ANOMALY_CALL*)(void*, void*)>(
+            impl->vector2_read_value_original);
+        if (original != nullptr) result = original(self, method);
+    }
+    impl->input_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+    return result;
+}
+
+float ANOMALY_CALL MaydayAdapter::Impl::FloatReadValueThunk(void* self, void* method) {
+    Impl* const impl = input_hook_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return 0.0F;
+    impl->input_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    float result = 0.0F;
+    if (!HostUiMenusCaptureMouse() || !impl->IsDeltaControlValue(self)) {
+        auto* const original = reinterpret_cast<float (ANOMALY_CALL*)(void*, void*)>(
+            impl->float_read_value_original);
+        if (original != nullptr) result = original(self, method);
+    }
+    impl->input_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+    return result;
+}
+
+Vec2 ANOMALY_CALL MaydayAdapter::Impl::InputMouseScrollDeltaThunk(void* method) {
+    Impl* const impl = input_hook_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return {};
+    impl->input_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    Vec2 result{};
+    if (!HostUiMenusCaptureMouse()) {
+        auto* const original = reinterpret_cast<Vec2 (ANOMALY_CALL*)(void*)>(
+            impl->mouse_scroll_delta_original);
+        if (original != nullptr) result = original(method);
+    }
+    impl->input_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+    return result;
+}
+
+bool MaydayAdapter::Impl::EnsureInputBlockHook() {
+    std::scoped_lock lock(resolve_mutex);
+    if (input_hook_installed) return true;
+    if (input_hook_shutdown) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < input_hook_retry_after) return false;
+    if (!ResolveInputBlock()) {
+        // InputSystem 可能尚未加载，按固定节奏重试，避免逐帧遍历程序集。
+        input_hook_retry_after = now + std::chrono::seconds(1);
+        return false;
+    }
+    if (input_hook_backend == nullptr) {
+        input_hook_backend = CreateMinHookBackend();
+        if (input_hook_backend == nullptr || !input_hook_backend->Initialize()) {
+            input_hook_backend.reset();
+            input_hook_retry_after = now + std::chrono::seconds(1);
+            return false;
+        }
+    }
+    struct Entry final {
+        void* target;
+        void* detour;
+        void** original;
+        bool required;
+    };
+    // 按钮状态必须拦住；滚轮相关 hook 是补充能力，安装失败时不能把
+    // 已经生效的按钮阻断一起拆掉。
+    const Entry entries[] = {
+        {is_pressed_target, reinterpret_cast<void*>(&Impl::IsPressedThunk),
+         &is_pressed_original, true},
+        {was_pressed_target, reinterpret_cast<void*>(&Impl::WasPressedThunk),
+         &was_pressed_original, true},
+        {was_released_target, reinterpret_cast<void*>(&Impl::WasReleasedThunk),
+         &was_released_original, false},
+        {vector2_read_value_target, reinterpret_cast<void*>(&Impl::Vector2ReadValueThunk),
+         &vector2_read_value_original, false},
+        {float_read_value_target, reinterpret_cast<void*>(&Impl::FloatReadValueThunk),
+         &float_read_value_original, false},
+        {mouse_scroll_delta_target, reinterpret_cast<void*>(&Impl::InputMouseScrollDeltaThunk),
+         &mouse_scroll_delta_original, false},
+    };
+    input_hook_owner.store(this, std::memory_order_release);
+    std::array<bool, std::size(entries)> created{};
+    bool ok = true;
+    for (std::size_t i = 0; i < std::size(entries); ++i) {
+        if (entries[i].target == nullptr) {
+            if (entries[i].required) {
+                ok = false;
+                break;
+            }
+            continue;
+        }
+        if (!input_hook_backend->Create(
+                entries[i].target, entries[i].detour, entries[i].original)) {
+            if (entries[i].required) {
+                ok = false;
+                break;
+            }
+            continue;
+        }
+        created[i] = true;
+    }
+    if (ok) {
+        for (std::size_t i = 0; i < std::size(entries); ++i) {
+            if (!created[i]) continue;
+            if (!input_hook_backend->Enable(entries[i].target) && entries[i].required) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    if (!ok) {
+        for (std::size_t i = 0; i < std::size(entries); ++i) {
+            if (created[i]) {
+                static_cast<void>(input_hook_backend->Remove(entries[i].target));
+            }
+        }
+        input_hook_owner.store(nullptr, std::memory_order_release);
+        static_cast<void>(input_hook_backend->Uninitialize());
+        input_hook_backend.reset();
+        input_hook_retry_after = now + std::chrono::seconds(1);
+        return false;
+    }
+    input_hook_installed.store(true, std::memory_order_release);
+    return true;
+}
+
+void MaydayAdapter::Impl::TeardownInputBlockHook() noexcept {
+    void* const targets[] = {
+        is_pressed_target, was_pressed_target, was_released_target,
+        vector2_read_value_target, float_read_value_target,
+        mouse_scroll_delta_target};
+    if (input_hook_backend != nullptr && input_hook_installed) {
+        for (void* const target : targets) {
+            if (target != nullptr) static_cast<void>(input_hook_backend->Disable(target));
+        }
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (input_hook_in_callback.load(std::memory_order_acquire) != 0 &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        for (void* const target : targets) {
+            if (target != nullptr) static_cast<void>(input_hook_backend->Remove(target));
+        }
+    }
+    input_hook_owner.store(nullptr, std::memory_order_release);
+    if (input_hook_backend != nullptr) {
+        static_cast<void>(input_hook_backend->Uninitialize());
+        input_hook_backend.reset();
+    }
+    input_hook_installed.store(false, std::memory_order_release);
+}
+
 void MaydayAdapter::Impl::RevokePublished() {
     void* const previous = table_published.exchange(nullptr, std::memory_order_acq_rel);
     if (previous != nullptr) {
@@ -1044,6 +1404,13 @@ bool MaydayAdapter::Start(std::stop_token stop_token) {
 bool MaydayAdapter::Stop(std::chrono::milliseconds timeout) noexcept {
     if (!impl_->started.exchange(false, std::memory_order_acq_rel)) return true;
     impl_->stopping.store(true, std::memory_order_release);
+    {
+        // 输入阻断在渲染线程可能仍尝试安装；先与安装路径串行化再拆除，
+        // 关闭后不得再重装。
+        std::scoped_lock lock(impl_->resolve_mutex);
+        impl_->input_hook_shutdown = true;
+        impl_->TeardownInputBlockHook();
+    }
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (impl_->probe_worker.joinable() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1098,6 +1465,8 @@ bool MaydayAdapter::ClearTickCallback(std::chrono::seconds timeout) noexcept {
 }
 
 void MaydayAdapter::OnFrame(double delta_seconds) {
+    // 覆盖层输入阻断只安装一次；hook 内部实时读取菜单状态，无需逐帧同步。
+    static_cast<void>(impl_->EnsureInputBlockHook());
     TickCallback callback;
     {
         std::scoped_lock lock(impl_->tick_mutex);
@@ -1129,6 +1498,8 @@ std::string MaydayAdapter::DiagnosticsJson() const {
          << (impl_->money_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
          << ",\"freecamServicePublished\":"
          << (impl_->freecam_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
+         << ",\"inputBlockHooks\":"
+         << (impl_->input_hook_installed.load(std::memory_order_acquire) ? "true" : "false")
          << "}";
     return json.str();
 }
