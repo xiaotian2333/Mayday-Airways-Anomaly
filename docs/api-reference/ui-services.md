@@ -121,7 +121,7 @@ typedef struct AnomalyUiServiceV1 {
 | `begin_child` / `begin_table` / `begin_menu` / `begin_popup_modal` 及对应 `end_*` | 作用域 UI 容器 |
 | `begin_tab_bar` / `begin_tab_item` 及对应 `end_*` | 原生选项卡容器；只有 begin 返回 1 时才调用匹配的 end 函数 |
 | `filter_match` / `frame_state` / `developer_mode_enabled` | 当前帧和会话状态查询 |
-| `draw_entity_bbox` | 用 Unreal rotator 约定投影一个轴对齐世界盒并在前景绘制；仅当可见时返回 1 |
+| `draw_entity_bbox` | 按 pitch/yaw/roll 旋转约定投影一个轴对齐世界盒并在前景绘制；仅当可见时返回 1 |
 | `draw_entity_box3d` | 投影并绘制世界盒的全部 12 条棱 |
 | `draw_entity_label` | 投影盒并在其 2D 边界上方绘制居中标签 |
 | `draw_screen_primitives` | 一次提交一批位于插件窗口下方的屏幕空间线段、矩形或圆形；可在 `on_draw` 或 `on_overlay` 中调用 |

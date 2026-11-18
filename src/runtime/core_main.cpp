@@ -435,7 +435,7 @@ DWORD InitializeCore(const std::shared_ptr<CoreContext>& context, std::stop_toke
     }
 
     // Hosts go first: an upscaler host must install its swapchain/device hooks
-    // before Unreal initializes graphics, and it must see an unpatched process.
+    // before the game initializes graphics, and it must see an unpatched process.
     LoadHostPayloads(context);
 
     auto crash_reporter = std::make_unique<anomaly::CrashReporter>(

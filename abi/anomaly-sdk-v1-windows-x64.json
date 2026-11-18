@@ -1153,7 +1153,6 @@
     { "id": "anomaly.texture", "version": 1, "table": "AnomalyTextureServiceV1" },
     { "id": "anomaly.input", "version": 1, "table": "AnomalyInputServiceV1" },
     { "id": "anomaly.localization", "version": 1, "table": "AnomalyLocalizationServiceV1" },
-    { "id": "anomaly.mods", "version": 1, "table": "AnomalyModsServiceV1" },
     { "id": "mayday.money", "version": 1, "table": "AnomalyMaydayMoneyServiceV1" },
     { "id": "mayday.freecam", "version": 1, "table": "AnomalyMaydayFreecamServiceV1" },
     { "id": "mayday.weather", "version": 1, "table": "AnomalyMaydayWeatherServiceV1" }
