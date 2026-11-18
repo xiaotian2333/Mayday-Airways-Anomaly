@@ -678,9 +678,6 @@ ANOMALY_I18N_MESSAGE(LauncherUpdateNotRelease, "launcher.update.not_release")
 ANOMALY_I18N_MESSAGE(LauncherUpdateCheckFailed, "launcher.update.check_failed")
 ANOMALY_I18N_MESSAGE(LauncherUpdateQuark, "launcher.update.quark")
 ANOMALY_I18N_MESSAGE(LauncherUpdateBaidu, "launcher.update.baidu")
-ANOMALY_I18N_MESSAGE(LauncherSectionSupport, "launcher.section.support")
-ANOMALY_I18N_MESSAGE(LauncherSupportAfdian, "launcher.support.afdian")
-ANOMALY_I18N_MESSAGE(LauncherSupportKofi, "launcher.support.kofi")
 // The about section that closes the page, and the two labels of the addresses it offers. The labels
 // are the platforms' own names in both locales, so only the heading changes with the language.
 ANOMALY_I18N_MESSAGE(LauncherSectionAbout, "launcher.section.about")

@@ -80,25 +80,11 @@ using Microsoft::WRL::ComPtr;
 
 constexpr int kLogoResourceId = 101;
 constexpr int kModPlaceholderResourceId = 102;
-// The support buttons. They are pictures rather than drawn controls because they are the platforms'
-// own artwork, and they are embedded rather than fetched so the buttons work on a machine that never
-// reaches the networks those pages live on.
-constexpr int kSponsorResourceId = 103;
-constexpr int kKofiResourceId = 104;
 constexpr int kIconResourceId = 201;
-// Where the support buttons point. Data, not copy -- a translated address leads nowhere.
-constexpr std::wstring_view kSponsorUrl{L"https://afdian.com/a/bananachicken"};
-constexpr std::wstring_view kKofiUrl{L"https://ko-fi.com/bananachicken"};
 // Where the project itself answers. The about section at the foot of the settings page offers these
 // two, so the addresses live here with the other links rather than inside the drawing code.
 constexpr std::string_view kRepositoryUrl{"https://github.com/xiaotian2333/Mayday-Airways-Anomaly"};
 constexpr std::string_view kDiscordUrl{"https://discord.gg/0000"};
-// The capsule both support buttons are drawn in, in canvas pixels before the DPI scale. The two
-// pictures are re-cut onto exactly this shape -- one canvas, one radius, one content height -- so the
-// pair lines up and neither label is stretched. The artwork files carry their own rounded capsule at
-// twice this size, which is why nothing here rounds or clips them.
-constexpr float kSupportButtonWidth = 200.0f;
-constexpr float kSupportButtonHeight = 53.0f;
 // Sized for the launcher's 17px font. These were laid out for 13px text, and a
 // child that cannot fit its own contents grows a scrollbar instead of clipping,
 // which is what a mode row of 48px did to a 30px button plus its padding.
@@ -1770,10 +1756,6 @@ struct Graphics final {
     // drawing is not stretched to whatever shape the slot happens to have.
     std::uint32_t mod_placeholder_width{};
     std::uint32_t mod_placeholder_height{};
-    // The two support buttons' artwork. It fills the shared capsule rather than dictating it, so its
-    // own pixel size is not needed here.
-    ComPtr<ID3D11ShaderResourceView> sponsor;
-    ComPtr<ID3D11ShaderResourceView> kofi;
     ComPtr<ID3D11ShaderResourceView> theme_background;
     std::uint32_t theme_background_width{};
     std::uint32_t theme_background_height{};
@@ -7117,46 +7099,6 @@ void DrawAttachMode(
 
 // The two controls in this window that leave the machine: they hand the address to the shell, which
 // opens it in the user's browser, rather than reimplementing a payment flow in a game launcher.
-// A support button is the platform's own artwork, re-cut onto the capsule the two of them share: one
-// canvas, one height, one corner radius, one content height, so the pair lines up and the labels are
-// the same size. The picture is embedded in the image rather than fetched, so the button also appears
-// on a machine that never reaches the network -- and a launcher whose texture failed to upload falls
-// back to a box of the same size carrying its label.
-bool SupportButton(const ComPtr<ID3D11ShaderResourceView>& texture, const char* id,
-    const char* tooltip, const std::wstring_view url) {
-    const ImVec2 size(Scale(kSupportButtonWidth), Scale(kSupportButtonHeight));
-    const ImVec2 min = ImGui::GetCursorScreenPos();
-    const ImVec2 max(min.x + size.x, min.y + size.y);
-    const bool pressed = ImGui::InvisibleButton(id, size);
-    const bool hovered = ImGui::IsItemHovered();
-    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    ImDrawList* const draw = ImGui::GetWindowDrawList();
-    if (texture != nullptr) {
-        // Full brightness under the pointer, a shade less without it: the artwork carries its own
-        // colour, so the only feedback these buttons can give is how brightly they are painted. It also
-        // carries its own rounded capsule, so it is drawn as it is -- clipping it to a rounded rectangle
-        // here would only eat into that edge.
-        draw->AddImage(
-            static_cast<ImTextureID>(reinterpret_cast<std::uintptr_t>(texture.Get())),
-            min, max, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
-            ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, hovered ? 1.0f : 0.92f)));
-    } else {
-        // The palette's own accent, and the label centred in it.
-        draw->AddRectFilled(min, max,
-            ImGui::GetColorU32(ThemeColor(ue5mem::PlatformUiTheme().accent)), size.y * 0.5f);
-        const ImVec2 caption = ImGui::CalcTextSize(tooltip);
-        draw->AddText(ImVec2(min.x + (size.x - caption.x) * 0.5f,
-                          min.y + (size.y - caption.y) * 0.5f),
-            ImGui::GetColorU32(ThemeColor(ue5mem::PlatformUiTheme().inverse_text)), tooltip);
-    }
-    Tooltip(tooltip);
-    if (pressed) {
-        const std::wstring address(url);
-        ShellExecuteW(nullptr, L"open", address.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    }
-    return pressed;
-}
-
 void DrawLaunchMode(
     HWND window, LauncherController& controller,
     const LauncherSnapshot& snapshot, const anomaly::Translator& translator) {
@@ -7825,24 +7767,6 @@ void DrawUpdatePrompt(
     ImGui::PopStyleVar();
 }
 
-// The support buttons: the platforms' own artwork, side by side under one heading. Both open in the
-// browser; neither is a payment flow this window implements.
-void DrawSupportSettings(const anomaly::Translator& translator) {
-    if (g_graphics == nullptr) return;
-    const Graphics& graphics = *g_graphics;
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    ImGui::TextDisabled("%s", Text(translator, anomaly::MessageId::LauncherSectionSupport));
-    // The pair sits on one line at the section's own left edge, so it starts where the heading and
-    // every row above it start. Both draw in the same capsule, so the row needs no centring of its own.
-    SupportButton(graphics.sponsor, "##support-afdian",
-        Text(translator, anomaly::MessageId::LauncherSupportAfdian), kSponsorUrl);
-    ImGui::SameLine(0.0f, Scale(12.0f));
-    SupportButton(graphics.kofi, "##support-kofi",
-        Text(translator, anomaly::MessageId::LauncherSupportKofi), kKofiUrl);
-}
-
 // The about section closes the page: the project's own two addresses -- where its source lives, and
 // where the people using it gather -- side by side under one heading. Neither is a page this window
 // draws; both are handed to the shell, the way every other link here leaves the machine.
@@ -8127,7 +8051,6 @@ void DrawSettingsMode(
 
     DrawStartupSettings(controller, snapshot, translator);
     DrawUpdateSettings(controller, snapshot, translator);
-    DrawSupportSettings(translator);
     DrawAboutSettings(translator);
 
     // The page reports the outcome of its own writes. Everything it can change is saved
@@ -8536,8 +8459,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int) {
     graphics.logo = LoadEmbeddedTexture(graphics, kLogoResourceId);
     graphics.mod_placeholder = LoadEmbeddedTexture(graphics, kModPlaceholderResourceId,
         &graphics.mod_placeholder_width, &graphics.mod_placeholder_height);
-    graphics.sponsor = LoadEmbeddedTexture(graphics, kSponsorResourceId);
-    graphics.kofi = LoadEmbeddedTexture(graphics, kKofiResourceId);
     LauncherController controller(ExecutableDirectory());
     LauncherMode mode = LauncherMode::Launch;
 
