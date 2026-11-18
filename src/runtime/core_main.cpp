@@ -1257,7 +1257,7 @@ anomaly::RuntimeSessionOptions BuildSessionOptions(
     pipe.required_dependencies.push_back({"anomaly.config", 1});
     pipe.required_dependencies.push_back({"anomaly.internal.module-memory", 1});
     pipe.required_dependencies.push_back({"anomaly.internal.pattern", 1});
-    pipe.required_dependencies.push_back({"anomaly.internal.nte-profile", 1});
+    pipe.required_dependencies.push_back({"anomaly.internal.mayday-profile", 1});
     const std::weak_ptr<anomaly::ServiceGraph> weak_services = services;
     pipe.start = [context, weak_services](std::stop_token stop_token) {
         return PrepareDiagnosticPipe(context, weak_services, stop_token);
