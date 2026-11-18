@@ -2123,8 +2123,11 @@ private:
             // The shell body follows the window's continuous corners, so the
             // wallpaper and the veil are clipped to the same rounded shape.
             const float body_rounding = ImGui::GetStyle().WindowRounding;
+            // 壁纸绘制判定与下方 veil 的 wallpaper 判定保持一致：都要求
+            // opacity > 0，透明壁纸不再白跑一帧 EmitThemeImage。
             if (!front && applied->background.Valid() &&
-                layout.background.mode != anomaly::PlatformUiBackgroundMode::Disabled) {
+                layout.background.mode != anomaly::PlatformUiBackgroundMode::Disabled &&
+                layout.background.opacity > 0.0f) {
                 const auto placement = anomaly::ComputePlatformUiBackgroundPlacement(
                     layout.background.mode, applied->background.width,
                     applied->background.height, origin.x, origin.y, size.x, size.y);

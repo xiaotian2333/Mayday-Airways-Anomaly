@@ -502,22 +502,11 @@ bool InstallEmbeddedInput(EmbeddedState& state) noexcept {
     const LONG_PTR previous = SetWindowLongPtrW(
         state.window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(EmbeddedWindowProc));
     if (previous == 0) {
+        // 返回 0 一律按失败处理：无论是交换被拒绝（游戏仍持有自己的过程），
+        // 还是拿不到转发目标，都没有可执行的还原动作——把窗口过程设回 0 不是
+        // 合法的还原方式。此处直接失败退出，交给上层清理路径恢复。
         const DWORD error = GetLastError();
         state.input_install_error = error == ERROR_SUCCESS ? ERROR_NOT_SUPPORTED : error;
-        if (error != ERROR_SUCCESS) {
-            // The exchange was refused, so the game still owns its procedure and
-            // there is nothing to undo.
-            return false;
-        }
-        // The exchange went through but produced no forwarding target. Leaving
-        // this procedure installed would route every game message to
-        // DefWindowProc and the window would stop responding, so put the
-        // window back the only way still available and report the failure.
-        if (GetWindowLongPtrW(state.window, GWLP_WNDPROC) ==
-            reinterpret_cast<LONG_PTR>(EmbeddedWindowProc)) {
-            SetLastError(ERROR_SUCCESS);
-            static_cast<void>(SetWindowLongPtrW(state.window, GWLP_WNDPROC, previous));
-        }
         return false;
     }
     state.original_window_proc = reinterpret_cast<WNDPROC>(previous);

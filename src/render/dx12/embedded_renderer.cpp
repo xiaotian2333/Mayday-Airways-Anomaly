@@ -51,8 +51,17 @@ void ReportEmbeddedGate(
         }
         std::string message = std::string(prefix) + reason;
         if (!detail.empty()) message += " (" + detail + ")";
-        std::ofstream(state.root / L"anomaly-platform.log", std::ios::app)
-            << "pid=" << GetCurrentProcessId() << ' ' << message << std::endl;
+        // Present 线程禁止文件 I/O：原因集合留在内存（每原因一次），可见性交给
+        // 调试输出与结构化 logger；文件侧由 logger 自己的通道落盘。
+        const int wide_length = MultiByteToWideChar(
+            CP_UTF8, 0, message.c_str(), -1, nullptr, 0);
+        if (wide_length > 0) {
+            std::wstring wide(static_cast<std::size_t>(wide_length), L'\0');
+            if (MultiByteToWideChar(
+                    CP_UTF8, 0, message.c_str(), -1, wide.data(), wide_length) > 0) {
+                OutputDebugStringW(wide.c_str());
+            }
+        }
         if (state.diagnostics.logger != nullptr) {
             anomaly::LogDetails details;
             details.thread_domain = anomaly::LogThreadDomain::Render;
@@ -257,7 +266,7 @@ void SynchronizeHostFontScale(EmbeddedState& state) noexcept {
 bool WaitForFrame(
     EmbeddedState& state,
     FrameContext& frame,
-    std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+    std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
     if (frame.fence_value == 0 || state.fence == nullptr ||
         state.fence->GetCompletedValue() >= frame.fence_value) return true;
     if (state.fence_event == nullptr ||
@@ -633,6 +642,9 @@ void SelectPendingResizeQueue(
     bool validate_present_queues) noexcept {
     ClearPendingResizeQueue(state);
     if (!validate_present_queues) return;
+    // D3D11 overlay 没有命令队列概念；按 D3D12 语义校验 ResizeBuffers1 的队列
+    // 数组会把一次常规 resize 误判为终局 invalid，因此仅 D3D12 生成期做校验。
+    if (state.render_api != EmbeddedRenderApi::D3D12) return;
     const UINT queue_count = present_queue_count != 0
         ? present_queue_count
         : static_cast<UINT>(state.frames.size());
@@ -985,7 +997,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
     // still be waiting for an untracked callback. Finish that owner handoff
     // before allocating a new device/context generation.
     if (state.platform_ui_initialized &&
-        !ReleaseGraphics(state, RendererLifecycle::Cold)) {
+        !ReleaseGraphics(state, RendererLifecycle::Cold, true)) {
         return false;
     }
     state.renderer = RendererLifecycle::Discovering;
@@ -1078,7 +1090,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
         Release(queue);
         Release(device);
         Release(swap_chain3);
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     const UINT shader_descriptor_increment = device->GetDescriptorHandleIncrementSize(
@@ -1091,7 +1103,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
         Release(queue);
         Release(device);
         Release(swap_chain3);
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     state.fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -1099,7 +1111,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
         Release(queue);
         Release(device);
         Release(swap_chain3);
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
 
@@ -1114,7 +1126,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
             Release(queue);
             Release(device);
             Release(swap_chain3);
-            static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+            static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
             return false;
         }
         frame.render_target = render_target;
@@ -1127,7 +1139,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
         Release(queue);
         Release(device);
         Release(swap_chain3);
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     state.command_list->Close();
@@ -1142,7 +1154,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
     state.imgui_context = ImGui::CreateContext();
     if (state.imgui_context == nullptr) {
         Release(queue);
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     static_cast<void>(ConfigurePlatformUiFontAtlas(state.root));
@@ -1152,7 +1164,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
     io.IniFilename = state.imgui_ini_path.c_str();
     if (!ImGui_ImplWin32_Init(state.window)) {
         Release(queue);
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     state.win32_initialized = true;
@@ -1169,7 +1181,7 @@ bool InitializeGraphicsD3D12(EmbeddedState& state, IDXGISwapChain* swap_chain) {
     const bool renderer_initialized = ImGui_ImplDX12_Init(&init_info);
     if (!renderer_initialized) {
         Release(queue);
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     state.render_queue = queue;
@@ -1240,7 +1252,7 @@ bool CompleteGraphicsInitialization(EmbeddedState& state) {
         !InitializePlatformUi(*state.plugins, state.diagnostics, plugin_owner)) {
         // A quarantined owner still references the previous generation. Do
         // not mark this context as initialized or publish a second UI owner.
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     {
@@ -1249,12 +1261,12 @@ bool CompleteGraphicsInitialization(EmbeddedState& state) {
     }
     state.platform_ui_initialized = true;
     if (!state.ui_services.Publish(EmbeddedUiServiceTable())) {
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     const auto resource_backend = CreateEmbeddedUiResourceRenderBackend(state);
     if (resource_backend == nullptr) {
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     bool ui_device_rebuilt{};
@@ -1270,7 +1282,7 @@ bool CompleteGraphicsInitialization(EmbeddedState& state) {
         ui_device_rebuilt = state.plugins->OnUiDeviceRebuilt();
     }
     if (!ui_device_rebuilt) {
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     state.renderer = RendererLifecycle::Ready;
@@ -1332,7 +1344,7 @@ bool InitializeGraphicsD3D11(EmbeddedState& state, IDXGISwapChain* swap_chain) {
         return false;
     }
     if (state.platform_ui_initialized &&
-        !ReleaseGraphics(state, RendererLifecycle::Cold)) {
+        !ReleaseGraphics(state, RendererLifecycle::Cold, true)) {
         return false;
     }
     state.renderer = RendererLifecycle::Discovering;
@@ -1374,13 +1386,13 @@ bool InitializeGraphicsD3D11(EmbeddedState& state, IDXGISwapChain* swap_chain) {
     state.selected_area = static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
     if (state.d3d11_context == nullptr || !CreateD3D11RenderTarget(state)) {
         ReportEmbeddedGate(state, "could not bind a render target to the D3D11 back buffer");
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     IMGUI_CHECKVERSION();
     state.imgui_context = ImGui::CreateContext();
     if (state.imgui_context == nullptr) {
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     static_cast<void>(ConfigurePlatformUiFontAtlas(state.root));
@@ -1389,12 +1401,12 @@ bool InitializeGraphicsD3D11(EmbeddedState& state, IDXGISwapChain* swap_chain) {
     state.imgui_ini_path = (state.root / L"anomaly-imgui.ini").string();
     io.IniFilename = state.imgui_ini_path.c_str();
     if (!ImGui_ImplWin32_Init(state.window)) {
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     state.win32_initialized = true;
     if (!ImGui_ImplDX11_Init(state.d3d11_device, state.d3d11_context)) {
-        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(state, RendererLifecycle::DeviceLost, true));
         return false;
     }
     state.dx11_initialized = true;
@@ -1709,7 +1721,7 @@ void RenderEmbedded(IDXGISwapChain* swap_chain, UINT flags) {
         // A failed release means the previous UI/device generation is still
         // owned by an in-flight callback. Do not initialize a second
         // generation against the same PluginManager or ImGui context.
-        if (!ReleaseGraphics(*state, RendererLifecycle::Cold)) return;
+        if (!ReleaseGraphics(*state, RendererLifecycle::Cold, true)) return;
     }
     if (state->renderer.load() != RendererLifecycle::Ready &&
         !InitializeGraphics(*state, swap_chain)) return;
@@ -1775,7 +1787,7 @@ void RenderEmbedded(IDXGISwapChain* swap_chain, UINT flags) {
             state->performance, EmbeddedPerformanceStage::RenderFrameReset, sampled);
         if (FAILED(frame_context->allocator->Reset()) ||
             FAILED(state->command_list->Reset(frame_context->allocator, nullptr))) {
-            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost));
+            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost, true));
             return;
         }
         probing = capture_generation != 0 &&
@@ -1900,7 +1912,7 @@ void RenderEmbedded(IDXGISwapChain* swap_chain, UINT flags) {
         PerformanceTimer command_timer(
             state->performance, EmbeddedPerformanceStage::RenderCommands, sampled);
         if (state->d3d11_context == nullptr || state->d3d11_render_target == nullptr) {
-            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost));
+            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost, true));
             return;
         }
         // The game leaves its own targets bound. Binding the back buffer for the
@@ -1970,7 +1982,7 @@ void RenderEmbedded(IDXGISwapChain* swap_chain, UINT flags) {
     }
     if (FAILED(state->command_list->Close())) {
         if (probing) ReleasePixelProbeResources(state->pixel_probe);
-        static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost, true));
         return;
     }
     command_timer.Stop();
@@ -1980,7 +1992,7 @@ void RenderEmbedded(IDXGISwapChain* swap_chain, UINT flags) {
     ID3D12CommandQueue* queue = state->render_queue;
     if (queue == nullptr) {
         if (probing) ReleasePixelProbeResources(state->pixel_probe);
-        static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost, true));
         return;
     }
     queue->ExecuteCommandLists(1, command_lists);
@@ -2038,14 +2050,14 @@ bool AfterResize(bool affected, HRESULT result) {
     std::scoped_lock lock(state->render_mutex);
     if (!state->pending_resize_queue_valid) {
         ClearPendingResizeQueue(*state);
-        static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::Stopped));
+        static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::Stopped, true));
         return false;
     }
     bool queue_changed{};
     if (SUCCEEDED(result)) {
         const ResizeQueueAdoption queue = AdoptPendingResizeQueue(*state);
         if (queue == ResizeQueueAdoption::Invalid) {
-            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::Stopped));
+            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::Stopped, true));
             return false;
         }
         queue_changed = queue == ResizeQueueAdoption::Changed;
@@ -2061,7 +2073,8 @@ bool AfterResize(bool affected, HRESULT result) {
         return SUCCEEDED(result);
     }
     static_cast<void>(ReleaseGraphics(
-        *state, SUCCEEDED(result) ? RendererLifecycle::Cold : RendererLifecycle::DeviceLost));
+        *state, SUCCEEDED(result) ? RendererLifecycle::Cold : RendererLifecycle::DeviceLost,
+        true));
     return false;
 }
 
@@ -2272,7 +2285,7 @@ void HandlePresentResult(IDXGISwapChain* swap_chain, HRESULT result) {
     if (state == nullptr) return;
     std::scoped_lock lock(state->render_mutex);
     if (state->source_swap_chain == swap_chain) {
-        static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost));
+        static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::DeviceLost, true));
     }
 }
 

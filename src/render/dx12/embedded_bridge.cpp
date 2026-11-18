@@ -15,6 +15,8 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <stop_token>
 #include <thread>
@@ -412,7 +414,34 @@ std::uint64_t CaptureGeneration(const EmbeddedState* state) noexcept {
     }
 }
 
-HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swap_chain, UINT interval, UINT flags) {
+// 渲染 hook 最外层异常兜底的记录入口。Present 线程禁止文件 I/O，因此这里只写
+// 调试输出并经结构化 logger 上报；同一原因只记一次，避免逐帧刷屏。
+void ReportHookFault(const char* hook) noexcept {
+    try {
+        static std::mutex mutex;
+        static std::set<std::string> reported;
+        const std::string message =
+            std::string("embedded hook exception survived: ") + hook;
+        {
+            std::scoped_lock lock(mutex);
+            if (!reported.insert(message).second) return;
+        }
+        OutputDebugStringA(message.c_str());
+        auto* state = g_state.load(std::memory_order_acquire);
+        if (state != nullptr && state->diagnostics.logger != nullptr) {
+            anomaly::LogDetails details;
+            details.thread_domain = anomaly::LogThreadDomain::Render;
+            details.event_id = "embedded.hook_fault";
+            static_cast<void>(state->diagnostics.logger->Log(
+                anomaly::LogLevel::Error, "embedded-renderer", message, std::move(details)));
+        }
+    } catch (...) {
+    }
+}
+
+HRESULT PresentImpl(
+    IDXGISwapChain* swap_chain, UINT interval, UINT flags,
+    bool& original_invoked, HRESULT& original_result) {
     const EmbeddedPresentScope present_scope(g_present_active);
     const bool requested = g_performance_diagnostics_enabled.load(std::memory_order_relaxed);
     const auto lease_started = requested ? std::chrono::steady_clock::now()
@@ -420,7 +449,11 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swap_chain, UINT interval,
     auto callback = g_hooks != nullptr
         ? g_hooks->AcquireCallback(kRendererHookOwner, kRendererHookGeneration)
         : anomaly::PluginScope::CallbackLease{};
-    if (!present_scope.Outermost()) return g_present(swap_chain, interval, flags);
+    if (!present_scope.Outermost()) {
+        const HRESULT forwarded = g_present(swap_chain, interval, flags);
+        original_invoked = true;
+        return forwarded;
+    }
     auto* const state = callback ? g_state.load(std::memory_order_acquire) : nullptr;
     const bool sampled = requested && state != nullptr && state->performance.Enabled();
     if (sampled) state->performance.ObservePresent();
@@ -438,6 +471,72 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swap_chain, UINT interval,
     const auto original_started = sampled ? std::chrono::steady_clock::now()
                                           : std::chrono::steady_clock::time_point{};
     const HRESULT result = g_present(swap_chain, interval, flags);
+    original_invoked = true;
+    original_result = result;
+    const auto tail_started = sampled ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
+    if (callback) HandlePresentResult(swap_chain, result);
+    if (sampled) {
+        const auto completed = std::chrono::steady_clock::now();
+        state->performance.Record(
+            EmbeddedPerformanceStage::PresentLease, render_started - lease_started);
+        state->performance.Record(
+            EmbeddedPerformanceStage::PresentRender, original_started - render_started);
+        state->performance.Record(
+            EmbeddedPerformanceStage::PresentOriginal, tail_started - original_started);
+        state->performance.Record(
+            EmbeddedPerformanceStage::PresentTail, completed - tail_started);
+    }
+    return result;
+}
+
+HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swap_chain, UINT interval, UINT flags) {
+    bool original_invoked{};
+    HRESULT original_result{};
+    try {
+        return PresentImpl(swap_chain, interval, flags, original_invoked, original_result);
+    } catch (...) {
+        // 最外层兜底：异常不得穿透回游戏进程，且原 Present 必须仍然被调用。
+        ReportHookFault("Present");
+        return original_invoked ? original_result : g_present(swap_chain, interval, flags);
+    }
+}
+
+HRESULT Present1Impl(
+    IDXGISwapChain1* swap_chain, UINT interval, UINT flags,
+    const DXGI_PRESENT_PARAMETERS* parameters,
+    bool& original_invoked, HRESULT& original_result) {
+    const EmbeddedPresentScope present_scope(g_present_active);
+    const bool requested = g_performance_diagnostics_enabled.load(std::memory_order_relaxed);
+    const auto lease_started = requested ? std::chrono::steady_clock::now()
+                                         : std::chrono::steady_clock::time_point{};
+    auto callback = g_hooks != nullptr
+        ? g_hooks->AcquireCallback(kRendererHookOwner, kRendererHookGeneration)
+        : anomaly::PluginScope::CallbackLease{};
+    if (!present_scope.Outermost()) {
+        const HRESULT forwarded = g_present1(swap_chain, interval, flags, parameters);
+        original_invoked = true;
+        return forwarded;
+    }
+    auto* const state = callback ? g_state.load(std::memory_order_acquire) : nullptr;
+    const bool sampled = requested && state != nullptr && state->performance.Enabled();
+    if (sampled) state->performance.ObservePresent();
+    const auto render_started = sampled ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
+    if (callback) RenderEmbedded(swap_chain, flags);
+    if (callback && g_mayday_adapter) {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        const long long last = g_last_frame_ticks.exchange(now);
+        const double delta = last == 0
+            ? 0.0
+            : static_cast<double>(now - last) / 1'000'000'000.0;
+        g_mayday_adapter->OnFrame(delta);
+    }
+    const auto original_started = sampled ? std::chrono::steady_clock::now()
+                                          : std::chrono::steady_clock::time_point{};
+    const HRESULT result = g_present1(swap_chain, interval, flags, parameters);
+    original_invoked = true;
+    original_result = result;
     const auto tail_started = sampled ? std::chrono::steady_clock::now()
                                       : std::chrono::steady_clock::time_point{};
     if (callback) HandlePresentResult(swap_chain, result);
@@ -458,51 +557,22 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swap_chain, UINT interval,
 HRESULT STDMETHODCALLTYPE HookPresent1(
     IDXGISwapChain1* swap_chain, UINT interval, UINT flags,
     const DXGI_PRESENT_PARAMETERS* parameters) {
-    const EmbeddedPresentScope present_scope(g_present_active);
-    const bool requested = g_performance_diagnostics_enabled.load(std::memory_order_relaxed);
-    const auto lease_started = requested ? std::chrono::steady_clock::now()
-                                         : std::chrono::steady_clock::time_point{};
-    auto callback = g_hooks != nullptr
-        ? g_hooks->AcquireCallback(kRendererHookOwner, kRendererHookGeneration)
-        : anomaly::PluginScope::CallbackLease{};
-    if (!present_scope.Outermost()) return g_present1(swap_chain, interval, flags, parameters);
-    auto* const state = callback ? g_state.load(std::memory_order_acquire) : nullptr;
-    const bool sampled = requested && state != nullptr && state->performance.Enabled();
-    if (sampled) state->performance.ObservePresent();
-    const auto render_started = sampled ? std::chrono::steady_clock::now()
-                                        : std::chrono::steady_clock::time_point{};
-    if (callback) RenderEmbedded(swap_chain, flags);
-    if (callback && g_mayday_adapter) {
-        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-        const long long last = g_last_frame_ticks.exchange(now);
-        const double delta = last == 0
-            ? 0.0
-            : static_cast<double>(now - last) / 1'000'000'000.0;
-        g_mayday_adapter->OnFrame(delta);
+    bool original_invoked{};
+    HRESULT original_result{};
+    try {
+        return Present1Impl(
+            swap_chain, interval, flags, parameters, original_invoked, original_result);
+    } catch (...) {
+        // 最外层兜底：异常不得穿透回游戏进程，且原 Present1 必须仍然被调用。
+        ReportHookFault("Present1");
+        return original_invoked ? original_result
+                                : g_present1(swap_chain, interval, flags, parameters);
     }
-    const auto original_started = sampled ? std::chrono::steady_clock::now()
-                                          : std::chrono::steady_clock::time_point{};
-    const HRESULT result = g_present1(swap_chain, interval, flags, parameters);
-    const auto tail_started = sampled ? std::chrono::steady_clock::now()
-                                      : std::chrono::steady_clock::time_point{};
-    if (callback) HandlePresentResult(swap_chain, result);
-    if (sampled) {
-        const auto completed = std::chrono::steady_clock::now();
-        state->performance.Record(
-            EmbeddedPerformanceStage::PresentLease, render_started - lease_started);
-        state->performance.Record(
-            EmbeddedPerformanceStage::PresentRender, original_started - render_started);
-        state->performance.Record(
-            EmbeddedPerformanceStage::PresentOriginal, tail_started - original_started);
-        state->performance.Record(
-            EmbeddedPerformanceStage::PresentTail, completed - tail_started);
-    }
-    return result;
 }
 
-HRESULT STDMETHODCALLTYPE HookResizeBuffers(
+HRESULT ResizeBuffersImpl(
     IDXGISwapChain* swap_chain, UINT count, UINT width, UINT height,
-    DXGI_FORMAT format, UINT flags) {
+    DXGI_FORMAT format, UINT flags, bool& original_invoked, HRESULT& original_result) {
     const auto started = std::chrono::steady_clock::now();
     const DWORD thread_id = GetCurrentThreadId();
     auto callback = g_hooks != nullptr
@@ -512,6 +582,60 @@ HRESULT STDMETHODCALLTYPE HookResizeBuffers(
     const std::uint64_t capture_generation = CaptureGeneration(state);
     const bool affected = callback && BeforeResize(swap_chain);
     const HRESULT result = g_resize_buffers(swap_chain, count, width, height, format, flags);
+    original_invoked = true;
+    original_result = result;
+    const bool success = callback && AfterResize(affected, result);
+    if (affected && state != nullptr && state->diagnostics.resize) {
+        try {
+            state->diagnostics.resize(
+                capture_generation,
+                thread_id,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started),
+                success);
+        } catch (...) {
+        }
+    }
+    FinishResizeEvidenceHandoff(success);
+    return result;
+}
+
+HRESULT STDMETHODCALLTYPE HookResizeBuffers(
+    IDXGISwapChain* swap_chain, UINT count, UINT width, UINT height,
+    DXGI_FORMAT format, UINT flags) {
+    bool original_invoked{};
+    HRESULT original_result{};
+    try {
+        return ResizeBuffersImpl(
+            swap_chain, count, width, height, format, flags,
+            original_invoked, original_result);
+    } catch (...) {
+        // 最外层兜底：异常不得穿透回游戏进程，且原 ResizeBuffers 必须仍然被调用。
+        ReportHookFault("ResizeBuffers");
+        return original_invoked
+            ? original_result
+            : g_resize_buffers(swap_chain, count, width, height, format, flags);
+    }
+}
+
+HRESULT ResizeBuffers1Impl(
+    IDXGISwapChain3* swap_chain, UINT count, UINT width, UINT height,
+    DXGI_FORMAT format, UINT flags, const UINT* creation_node_mask,
+    IUnknown* const* present_queue, bool& original_invoked, HRESULT& original_result) {
+    const auto started = std::chrono::steady_clock::now();
+    const DWORD thread_id = GetCurrentThreadId();
+    auto callback = g_hooks != nullptr
+        ? g_hooks->AcquireCallback(kRendererHookOwner, kRendererHookGeneration)
+        : anomaly::PluginScope::CallbackLease{};
+    auto* state = g_state.load(std::memory_order_acquire);
+    const std::uint64_t capture_generation = CaptureGeneration(state);
+    const bool affected = callback && BeforeResize(
+        swap_chain, count, present_queue, true);
+    const HRESULT result = g_resize_buffers1(
+        swap_chain, count, width, height, format, flags,
+        creation_node_mask, present_queue);
+    original_invoked = true;
+    original_result = result;
     const bool success = callback && AfterResize(affected, result);
     if (affected && state != nullptr && state->diagnostics.resize) {
         try {
@@ -532,32 +656,21 @@ HRESULT STDMETHODCALLTYPE HookResizeBuffers1(
     IDXGISwapChain3* swap_chain, UINT count, UINT width, UINT height,
     DXGI_FORMAT format, UINT flags, const UINT* creation_node_mask,
     IUnknown* const* present_queue) {
-    const auto started = std::chrono::steady_clock::now();
-    const DWORD thread_id = GetCurrentThreadId();
-    auto callback = g_hooks != nullptr
-        ? g_hooks->AcquireCallback(kRendererHookOwner, kRendererHookGeneration)
-        : anomaly::PluginScope::CallbackLease{};
-    auto* state = g_state.load(std::memory_order_acquire);
-    const std::uint64_t capture_generation = CaptureGeneration(state);
-    const bool affected = callback && BeforeResize(
-        swap_chain, count, present_queue, true);
-    const HRESULT result = g_resize_buffers1(
-        swap_chain, count, width, height, format, flags,
-        creation_node_mask, present_queue);
-    const bool success = callback && AfterResize(affected, result);
-    if (affected && state != nullptr && state->diagnostics.resize) {
-        try {
-            state->diagnostics.resize(
-                capture_generation,
-                thread_id,
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - started),
-                success);
-        } catch (...) {
-        }
+    bool original_invoked{};
+    HRESULT original_result{};
+    try {
+        return ResizeBuffers1Impl(
+            swap_chain, count, width, height, format, flags,
+            creation_node_mask, present_queue, original_invoked, original_result);
+    } catch (...) {
+        // 最外层兜底：异常不得穿透回游戏进程，且原 ResizeBuffers1 必须仍然被调用。
+        ReportHookFault("ResizeBuffers1");
+        return original_invoked
+            ? original_result
+            : g_resize_buffers1(
+                swap_chain, count, width, height, format, flags,
+                creation_node_mask, present_queue);
     }
-    FinishResizeEvidenceHandoff(success);
-    return result;
 }
 
 void STDMETHODCALLTYPE HookResourceBarrier(ID3D12GraphicsCommandList* list, UINT count,
@@ -629,8 +742,9 @@ std::array<std::uint8_t, kOuterBytes> Encode(const Payload& payload) noexcept {
 namespace anomaly::embedded {
 namespace {
 
-void STDMETHODCALLTYPE HookExecuteCommandLists(
-    ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
+void ExecuteCommandListsImpl(
+    ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists,
+    bool& original_invoked) {
     const bool requested = g_performance_diagnostics_enabled.load(std::memory_order_relaxed);
     const auto lease_started = requested ? std::chrono::steady_clock::now()
                                          : std::chrono::steady_clock::time_point{};
@@ -648,7 +762,11 @@ void STDMETHODCALLTYPE HookExecuteCommandLists(
     if (state != nullptr && state->frame_aux.Prepared() && !g_frame_aux_active.Get()) {
         const EmbeddedPresentScope frame_aux_scope(g_frame_aux_active);
         state->frame_aux.Execute(queue, count, lists, g_execute_command_lists, !g_present_active.Get());
-    } else g_execute_command_lists(queue, count, lists);
+        original_invoked = true;
+    } else {
+        g_execute_command_lists(queue, count, lists);
+        original_invoked = true;
+    }
     if (sampled) {
         const auto completed = std::chrono::steady_clock::now();
         state->performance.Record(
@@ -657,6 +775,18 @@ void STDMETHODCALLTYPE HookExecuteCommandLists(
             EmbeddedPerformanceStage::ExecuteCapture, original_started - capture_started);
         state->performance.Record(
             EmbeddedPerformanceStage::ExecuteOriginal, completed - original_started);
+    }
+}
+
+void STDMETHODCALLTYPE HookExecuteCommandLists(
+    ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
+    bool original_invoked{};
+    try {
+        ExecuteCommandListsImpl(queue, count, lists, original_invoked);
+    } catch (...) {
+        // 最外层兜底：异常不得穿透回游戏进程，且原 ExecuteCommandLists 必须仍然被调用。
+        ReportHookFault("ExecuteCommandLists");
+        if (!original_invoked) g_execute_command_lists(queue, count, lists);
     }
 }
 

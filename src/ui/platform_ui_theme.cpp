@@ -14,6 +14,9 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string_view>
 #include <vector>
 #include <atomic>
@@ -258,25 +261,43 @@ constexpr std::string_view kPlatformFontNamePrefix{"Anomaly host "};
 std::vector<float> g_platform_font_bake_scales{
     kPlatformFontBakeScales.begin(), kPlatformFontBakeScales.end()};
 
-std::vector<unsigned char> LoadFontBytes(const std::filesystem::path& path) noexcept {
+std::shared_ptr<const std::vector<unsigned char>> LoadFontBytes(
+    const std::filesystem::path& path) noexcept {
     try {
+        // 字体文件（runtime assets 与系统字体）在运行期内容不变，而 atlas 重建
+        // （DPI/样式变化）会在 Render 线程反复走到这里；缓存已读到的字节并共享
+        // 同一份实例，避免每次重建都做同步文件读取与大块内存拷贝。读取失败不
+        // 缓存，保持下次重建重试的语义。
+        static std::mutex cache_mutex;
+        static std::map<std::filesystem::path,
+            std::shared_ptr<const std::vector<unsigned char>>> cache;
+        {
+            std::scoped_lock lock(cache_mutex);
+            const auto cached = cache.find(path);
+            if (cached != cache.end()) return cached->second;
+        }
         std::ifstream input(path, std::ios::binary);
         if (!input) return {};
         const std::istreambuf_iterator<char> first(input);
         const std::istreambuf_iterator<char> last;
-        std::vector<unsigned char> bytes(first, last);
-        if (bytes.empty() ||
-            bytes.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+        auto bytes = std::make_shared<std::vector<unsigned char>>(first, last);
+        if (bytes->empty() ||
+            bytes->size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
             return {};
         }
-        return bytes;
+        {
+            std::scoped_lock lock(cache_mutex);
+            // 并发首次加载时保留先写入者的实例，调用方拿到的是全局同一份字节。
+            return cache.emplace(path, bytes).first->second;
+        }
     } catch (...) {
         return {};
     }
 }
 
-// ImGui copies any source it does not own into an atlas-owned block, so the bytes
-// on the caller's side are only borrowed for the duration of the call.
+// FontDataOwnedByAtlas=false 时 ImGui 不拷贝字节：传入的缓冲指针被 atlas 保留到
+// atlas 销毁为止，调用方必须保证字节存活期覆盖整个 atlas 生命周期
+// （当前由 LoadFontBytes 的进程级缓存保证，缓存永生，勿改为短生命周期）。
 ImFont* AddBorrowedFontFromMemory(
     ImFontAtlas& atlas,
     const std::vector<unsigned char>& bytes,
@@ -582,8 +603,11 @@ bool ConfigurePlatformUiFontAtlas(
     if (bake.tight_atlas) io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
     else io.Fonts->Flags &= ~ImFontAtlasFlags_NoPowerOfTwoHeight;
     // Read once for all baked sizes: the atlas makes its own copy per source anyway.
-    const std::vector<unsigned char> cjk_bytes = LoadFontBytes(
+    const auto cjk_bytes = LoadFontBytes(
         runtime_root / L"assets" / L"fonts" / L"NotoSansCJKsc-Regular.ttf");
+    // 系统字体路径常驻不变，同样经 LoadFontBytes 的缓存取字节，重建时不再触碰磁盘。
+    const auto ui_bytes = LoadFontBytes(L"C:\\Windows\\Fonts\\segoeui.ttf");
+    const auto icon_bytes = LoadFontBytes(L"C:\\Windows\\Fonts\\segmdl2.ttf");
     ImFontConfig cjk_configuration;
     const ImWchar* const icon_range = PlatformIconGlyphRanges(bake.icons);
     g_platform_font_bake_scales.assign(scales.begin(), scales.end());
@@ -593,9 +617,10 @@ bool ConfigurePlatformUiFontAtlas(
         configuration.OversampleH = 2;
         configuration.OversampleV = 1;
         SetPlatformFontName(configuration, scale);
-        ImFont* const font = io.Fonts->AddFontFromFileTTF(
-            "C:\\Windows\\Fonts\\segoeui.ttf",
-            kPlatformFontSizePixels * scale, &configuration);
+        ImFont* const font = !ui_bytes
+            ? nullptr
+            : AddBorrowedFontFromMemory(*io.Fonts, *ui_bytes,
+                kPlatformFontSizePixels * scale, configuration, nullptr);
         if (io.FontDefault == nullptr && font != nullptr) io.FontDefault = font;
         if (font == nullptr) {
             complete = false;
@@ -605,8 +630,8 @@ bool ConfigurePlatformUiFontAtlas(
         cjk_configuration = {};
         cjk_configuration.MergeMode = true;
         cjk_configuration.PixelSnapH = true;
-        if (cjk_bytes.empty() ||
-            AddBorrowedFontFromMemory(*io.Fonts, cjk_bytes,
+        if (!cjk_bytes ||
+            AddBorrowedFontFromMemory(*io.Fonts, *cjk_bytes,
                 kPlatformFontSizePixels * scale, cjk_configuration,
                 PlatformChineseGlyphRanges(*io.Fonts, bake.symbol_blocks)) == nullptr) {
             complete = false;
@@ -617,9 +642,9 @@ bool ConfigurePlatformUiFontAtlas(
         icon_configuration.PixelSnapH = true;
         icon_configuration.GlyphOffset = ImVec2(0.0f, 2.0f * scale);
         icon_configuration.GlyphMinAdvanceX = kPlatformFontSizePixels * scale;
-        if (io.Fonts->AddFontFromFileTTF(
-                "C:\\Windows\\Fonts\\segmdl2.ttf", 14.0f * scale,
-                &icon_configuration, icon_range) == nullptr) {
+        if (!icon_bytes ||
+            AddBorrowedFontFromMemory(*io.Fonts, *icon_bytes, 14.0f * scale,
+                icon_configuration, icon_range) == nullptr) {
             complete = false;
         }
     }
