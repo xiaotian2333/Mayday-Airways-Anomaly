@@ -2,6 +2,7 @@
 #include "anomaly/mayday_profile_runtime.hpp"
 #include "anomaly/adapter_service_registry.hpp"
 #include "anomaly/sdk/services/mayday.h"
+#include "anomaly/hook_manager.hpp"
 #include "anomaly/thread_local_value.hpp"
 
 #include <Windows.h>
@@ -11,6 +12,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -127,13 +129,20 @@ struct MaydayAdapter::Impl {
     void* add_debt{};
     AnomalyMaydayMoneyServiceV1 money_service{};
 
-    // ---- 自由镜头（freecam_mutex 保护状态与相机操作） ----
+    // ---- 自由镜头：PlayerLook.Update 主线程 hook，渲染线程只提供输入 ----
     std::atomic<void*> freecam_published{nullptr};
-    std::mutex freecam_mutex;
+    std::mutex freecam_state_mutex;
+    std::condition_variable freecam_cv;
+    std::mutex freecam_input_mutex;
     bool freecam_resolved{false};
+    bool freecam_requested{false};
     bool freecam_applied{false};
     bool freecam_shutdown{false};
+    bool hook_installed{false};
+    std::atomic<int> freecam_in_callback{0};
+    std::unique_ptr<HookBackend> hook_backend;
     void* player_rig_class{};
+    void* player_look_class{};
     void* get_local_rig{};
     void* get_camera_rig{};
     void* get_view_camera{};
@@ -145,6 +154,9 @@ struct MaydayAdapter::Impl {
     void* component_get_transform{};
     void* get_look{};
     void* get_motor{};
+    void* look_update_method{};
+    void* look_update_target{};
+    void* look_update_original{};
     void* transform_get_position{};
     void* transform_set_position{};
     void* transform_get_euler{};
@@ -159,7 +171,6 @@ struct MaydayAdapter::Impl {
     void* fc_camera_rig{};
     void* fc_look{};
     void* fc_motor{};
-    bool fc_look_enabled{};
     bool fc_motor_enabled{};
     Vec3 fc_saved_local_position{};
     Quat fc_saved_local_rotation{};
@@ -170,7 +181,14 @@ struct MaydayAdapter::Impl {
     const char* fc_error_key{};
     std::string fc_diag_message;
     std::chrono::steady_clock::time_point fc_last_apply{};
+    float in_forward{};
+    float in_right{};
+    float in_up{};
+    float in_speed{};
+    float in_yaw{};
+    float in_pitch{};
     AnomalyMaydayFreecamServiceV1 freecam_service{};
+    static std::atomic<Impl*> freecam_owner;
 
     // 服务表回调：Impl 是 MaydayAdapter 的私有嵌套类型，只有成员才能访问。
     static AnomalyStatusV1 ANOMALY_CALL MoneyGetMoney(void* user, std::int32_t* out_money);
@@ -212,15 +230,16 @@ struct MaydayAdapter::Impl {
     bool InvokeBool(void* method, void* object, bool* out_value);
     bool InvokeVoidArg(void* method, void* object, void* argument);
 
-    bool ActivateFreecam();
+    static void ANOMALY_CALL PlayerLookUpdateThunk(void* self);
+    void HandleLookUpdate(void* self);
+    bool EnsureFreecamHook();
+    bool ActivateFreecam(void* local, void* look);
     bool DeactivateFreecam();
     // 玩家对象已失效（换局/重生）时丢弃现场，禁止再触碰旧指针。
     void AbandonFreecam() noexcept;
     // 方法名失配时列出 PlayerRig 上关心的候选方法（诊断用）。
     std::string DescribeRigMethods();
-    void ApplyFreecamInput(
-        float forward, float right, float up,
-        float yaw_delta, float pitch_delta, float speed);
+    void ApplyFreecamInput();
 };
 
 void MaydayAdapter::Impl::ProbeWorker() {
@@ -467,6 +486,8 @@ bool MaydayAdapter::Impl::ResolveFreecam() {
     if (!ResolveGame()) return fail("status.freecam_no_game_state");
     player_rig_class = class_from_name(image, "Mayday.Players", "PlayerRig");
     if (player_rig_class == nullptr) return fail("status.freecam_no_rig_class");
+    player_look_class = class_from_name(image, "Mayday.Players", "PlayerLook");
+    if (player_look_class == nullptr) return fail("status.freecam_no_look_class");
     get_local_rig = class_get_method(player_rig_class, "get_Local", 0);
     if (get_local_rig == nullptr) return fail("status.freecam_no_local_rig");
     get_camera_rig = class_get_method(player_rig_class, "get_CameraRig", 0);
@@ -499,6 +520,11 @@ bool MaydayAdapter::Impl::ResolveFreecam() {
     }
     get_motor = class_get_method(player_rig_class, "get_Motor", 0);
     if (get_motor == nullptr) get_motor = class_get_method(player_rig_class, "get_motor", 0);
+    look_update_method = class_get_method(player_look_class, "Update", 0);
+    if (look_update_method != nullptr) {
+        look_update_target = *reinterpret_cast<void**>(look_update_method);
+    }
+    if (look_update_target == nullptr) return fail("status.freecam_no_look_update");
     if (get_motor == nullptr) {
         const std::string candidates = DescribeRigMethods();
         if (!candidates.empty()) {
@@ -654,15 +680,107 @@ bool MaydayAdapter::Impl::InvokeVoidArg(void* method, void* object, void* argume
     return exception == nullptr;
 }
 
-bool MaydayAdapter::Impl::ActivateFreecam() {
-    if (freecam_applied) return true;
-    fc_error_key = nullptr;
+std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::freecam_owner{nullptr};
+
+void ANOMALY_CALL MaydayAdapter::Impl::PlayerLookUpdateThunk(void* self) {
+    Impl* const impl = freecam_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->freecam_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    impl->HandleLookUpdate(self);
+    impl->freecam_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+bool MaydayAdapter::Impl::EnsureFreecamHook() {
+    if (hook_installed) return true;
+    if (look_update_target == nullptr) {
+        fc_error_key = "status.freecam_no_look_update";
+        return false;
+    }
+    hook_backend = CreateMinHookBackend();
+    if (hook_backend == nullptr || !hook_backend->Initialize()) {
+        hook_backend.reset();
+        fc_error_key = "status.freecam_hook_failed";
+        return false;
+    }
+    if (!hook_backend->Create(
+            look_update_target, reinterpret_cast<void*>(&Impl::PlayerLookUpdateThunk),
+            &look_update_original)) {
+        static_cast<void>(hook_backend->Uninitialize());
+        hook_backend.reset();
+        fc_error_key = "status.freecam_hook_failed";
+        return false;
+    }
+    freecam_owner.store(this, std::memory_order_release);
+    if (!hook_backend->Enable(look_update_target)) {
+        static_cast<void>(hook_backend->Remove(look_update_target));
+        freecam_owner.store(nullptr, std::memory_order_release);
+        static_cast<void>(hook_backend->Uninitialize());
+        hook_backend.reset();
+        fc_error_key = "status.freecam_hook_failed";
+        return false;
+    }
+    hook_installed = true;
+    return true;
+}
+
+void MaydayAdapter::Impl::HandleLookUpdate(void* self) {
+    auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(void*)>(look_update_original);
+    std::unique_lock lock(freecam_state_mutex);
+    if (freecam_shutdown) {
+        lock.unlock();
+        if (original != nullptr) original(self);
+        return;
+    }
+    // hook 命中所有玩家的 PlayerLook；只接管本地玩家。
     void* exception{};
     void* const local = runtime_invoke(get_local_rig, nullptr, nullptr, &exception);
-    if (exception != nullptr || local == nullptr) {
+    void* const look = (exception == nullptr && local != nullptr)
+        ? runtime_invoke(get_look, local, nullptr, &exception)
+        : nullptr;
+    if (exception != nullptr || local == nullptr || look == nullptr || self != look) {
+        lock.unlock();
+        if (original != nullptr) original(self);
+        return;
+    }
+    if (freecam_applied && (local != fc_local_rig || look != fc_look)) {
+        // 换局/重生：旧相机与组件已不可触碰。
+        AbandonFreecam();
+    }
+    if (!freecam_requested) {
+        if (freecam_applied) {
+            lock.unlock();
+            static_cast<void>(DeactivateFreecam());
+            lock.lock();
+            freecam_applied = false;
+            freecam_cv.notify_all();
+        }
+        lock.unlock();
+        if (original != nullptr) original(self);
+        return;
+    }
+    if (!freecam_applied) {
+        if (!ActivateFreecam(local, look)) {
+            freecam_requested = false;
+            freecam_cv.notify_all();
+            lock.unlock();
+            if (original != nullptr) original(self);
+            return;
+        }
+        freecam_applied = true;
+        freecam_cv.notify_all();
+    }
+    lock.unlock();
+    ApplyFreecamInput();
+    // 激活期间跳过原 Update：否则它会把相机拉回玩家头部。
+}
+
+bool MaydayAdapter::Impl::ActivateFreecam(void* local, void* look) {
+    fc_error_key = nullptr;
+    if (local == nullptr || look == nullptr) {
         fc_error_key = "status.not_in_flight";
         return false;
     }
+    void* exception{};
     void* camera_rig{};
     if (camera_rig_field != nullptr && camera_rig_offset > 0 && camera_rig_offset < 0x1000) {
         camera_rig = *reinterpret_cast<void**>(
@@ -704,13 +822,6 @@ bool MaydayAdapter::Impl::ActivateFreecam() {
         fc_error_key = "status.freecam_no_camera";
         return false;
     }
-    void* const look = runtime_invoke(get_look, local, nullptr, &exception);
-    if (exception != nullptr) {
-        fc_error_key = "status.freecam_no_look";
-        return false;
-    }
-    void* motor = runtime_invoke(get_motor, local, nullptr, &exception);
-    if (exception != nullptr) motor = nullptr;  // 座位等状态可能没有 motor，相机仍可接管
 
     Vec3 local_position{};
     Quat local_rotation{};
@@ -724,27 +835,23 @@ bool MaydayAdapter::Impl::ActivateFreecam() {
         return false;
     }
 
-    bool look_enabled = false;
+    // 只停玩家移动；PlayerLook 由 hook 跳过 Update，不需要改 enabled。
+    void* motor = runtime_invoke(get_motor, local, nullptr, &exception);
+    if (exception != nullptr) motor = nullptr;
     bool motor_enabled = false;
-    if (look != nullptr) {
-        static_cast<void>(InvokeBool(behaviour_get_enabled, look, &look_enabled));
+    if (motor != nullptr) {
+        static_cast<void>(InvokeBool(behaviour_get_enabled, motor, &motor_enabled));
         bool disabled = false;
-        if (!InvokeVoidArg(behaviour_set_enabled, look, &disabled)) {
+        if (!InvokeVoidArg(behaviour_set_enabled, motor, &disabled)) {
             fc_error_key = "status.freecam_components";
             return false;
         }
     }
-    if (motor != nullptr) {
-        static_cast<void>(InvokeBool(behaviour_get_enabled, motor, &motor_enabled));
-        bool disabled = false;
-        static_cast<void>(InvokeVoidArg(behaviour_set_enabled, motor, &disabled));
-    }
 
-    fc_camera_rig = camera_rig;
     fc_local_rig = local;
+    fc_camera_rig = camera_rig;
     fc_look = look;
     fc_motor = motor;
-    fc_look_enabled = look_enabled;
     fc_motor_enabled = motor_enabled;
     fc_saved_local_position = local_position;
     fc_saved_local_rotation = local_rotation;
@@ -752,29 +859,17 @@ bool MaydayAdapter::Impl::ActivateFreecam() {
     fc_yaw = euler.y;
     fc_pitch = euler.x;
     fc_apply_started = false;
-    freecam_applied = true;
     return true;
 }
 
 bool MaydayAdapter::Impl::DeactivateFreecam() {
     if (!freecam_applied) return true;
-    // 玩家对象可能已随换局/重生被销毁；此时旧指针不可再触碰。
-    void* exception{};
-    void* const local = runtime_invoke(get_local_rig, nullptr, nullptr, &exception);
-    if (exception != nullptr || local == nullptr || local != fc_local_rig) {
-        AbandonFreecam();
-        return true;
-    }
     bool ok = true;
-    // 先恢复相机局部变换，再恢复组件；下一游戏帧 PlayerLook 会按正常逻辑摆放相机。
     if (fc_camera_rig != nullptr) {
         ok = InvokeVoidArg(transform_set_local_position, fc_camera_rig,
                            &fc_saved_local_position) && ok;
         ok = InvokeVoidArg(transform_set_local_rotation, fc_camera_rig,
                            &fc_saved_local_rotation) && ok;
-    }
-    if (fc_look != nullptr) {
-        ok = InvokeVoidArg(behaviour_set_enabled, fc_look, &fc_look_enabled) && ok;
     }
     if (fc_motor != nullptr) {
         ok = InvokeVoidArg(behaviour_set_enabled, fc_motor, &fc_motor_enabled) && ok;
@@ -792,10 +887,25 @@ void MaydayAdapter::Impl::AbandonFreecam() noexcept {
     freecam_applied = false;
 }
 
-void MaydayAdapter::Impl::ApplyFreecamInput(
-    float forward, float right, float up,
-    float yaw_delta, float pitch_delta, float speed) {
+void MaydayAdapter::Impl::ApplyFreecamInput() {
     if (!freecam_applied || fc_camera_rig == nullptr) return;
+    float forward{};
+    float right{};
+    float up{};
+    float yaw_delta{};
+    float pitch_delta{};
+    float speed{};
+    {
+        std::scoped_lock lock(freecam_input_mutex);
+        forward = std::clamp(in_forward, -1.0f, 1.0f);
+        right = std::clamp(in_right, -1.0f, 1.0f);
+        up = std::clamp(in_up, -1.0f, 1.0f);
+        yaw_delta = in_yaw;
+        pitch_delta = in_pitch;
+        in_yaw = 0.0f;
+        in_pitch = 0.0f;
+        speed = in_speed;
+    }
     constexpr float kPi = 3.14159265358979323846f;
     const auto now = std::chrono::steady_clock::now();
     double dt = 0.0;
@@ -817,13 +927,10 @@ void MaydayAdapter::Impl::ApplyFreecamInput(
     const float sin_yaw = std::sin(yaw_rad);
     const float cos_pitch = std::cos(pitch_rad);
     const float sin_pitch = std::sin(pitch_rad);
-    // Unity 欧拉角：x 为正 = 俯视，y 为正 = 右转；forward 自动包含俯仰。
-    const Vec3 direction{
-        std::clamp(forward, -1.0f, 1.0f) * sin_yaw * cos_pitch +
-            std::clamp(right, -1.0f, 1.0f) * cos_yaw,
-        -std::clamp(forward, -1.0f, 1.0f) * sin_pitch + std::clamp(up, -1.0f, 1.0f),
-        std::clamp(forward, -1.0f, 1.0f) * cos_yaw * cos_pitch -
-            std::clamp(right, -1.0f, 1.0f) * sin_yaw};
+    Vec3 direction{
+        forward * sin_yaw * cos_pitch + right * cos_yaw,
+        -forward * sin_pitch + up,
+        forward * cos_yaw * cos_pitch - right * sin_yaw};
     const float scale = (std::max)(speed, 0.0f) * static_cast<float>(dt);
     fc_position.x += direction.x * scale;
     fc_position.y += direction.y * scale;
@@ -840,21 +947,43 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetActive(
     void* user, std::int32_t active) {
     auto* const impl = static_cast<Impl*>(user);
     if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
-    std::scoped_lock lock(impl->resolve_mutex, impl->freecam_mutex);
-    if (impl->freecam_shutdown) return MoneyStatus("status.unavailable");
     if (active != 0) {
-        if (!impl->ResolveFreecam()) {
-            return MoneyStatus(impl->fc_error_key != nullptr
-                ? impl->fc_error_key : "status.freecam_symbols");
+        {
+            std::scoped_lock lock(impl->resolve_mutex);
+            if (!impl->ResolveFreecam()) {
+                return MoneyStatus(impl->fc_error_key != nullptr
+                    ? impl->fc_error_key : "status.freecam_symbols");
+            }
+            if (!impl->EnsureFreecamHook()) {
+                return MoneyStatus(impl->fc_error_key != nullptr
+                    ? impl->fc_error_key : "status.freecam_hook_failed");
+            }
         }
-        if (impl->AttachedThread() == nullptr) return MoneyStatus("status.attach_failed");
-        if (!impl->ActivateFreecam()) {
-            return MoneyStatus(impl->fc_error_key != nullptr
-                ? impl->fc_error_key : "status.freecam_failed");
-        }
+        std::unique_lock lock(impl->freecam_state_mutex);
+        if (impl->freecam_shutdown) return MoneyStatus("status.unavailable");
+        if (impl->freecam_applied) return {ANOMALY_STATUS_V1_OK, 0, {}};
+        impl->fc_error_key = nullptr;
+        impl->freecam_requested = true;
+        impl->freecam_cv.notify_all();
+        impl->freecam_cv.wait_for(lock, std::chrono::milliseconds(500), [&] {
+            return impl->freecam_applied ||
+                (!impl->freecam_requested && impl->fc_error_key != nullptr);
+        });
+        if (impl->freecam_applied) return {ANOMALY_STATUS_V1_OK, 0, {}};
+        impl->freecam_requested = false;
+        return MoneyStatus(impl->fc_error_key != nullptr
+            ? impl->fc_error_key : "status.freecam_failed");
+    }
+    std::unique_lock lock(impl->freecam_state_mutex);
+    if (!impl->freecam_requested && !impl->freecam_applied) {
         return {ANOMALY_STATUS_V1_OK, 0, {}};
     }
-    if (!impl->DeactivateFreecam()) return MoneyStatus("status.failed");
+    impl->freecam_requested = false;
+    impl->freecam_cv.notify_all();
+    impl->freecam_cv.wait_for(lock, std::chrono::milliseconds(500), [&] {
+        return !impl->freecam_applied;
+    });
+    if (impl->freecam_applied) return MoneyStatus("status.freecam_failed");
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
 
@@ -864,7 +993,7 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamGetState(
     if (impl == nullptr || out_state == nullptr) {
         return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
     }
-    std::scoped_lock lock(impl->freecam_mutex);
+    std::scoped_lock lock(impl->freecam_state_mutex);
     *out_state = impl->freecam_applied ? 1 : 0;
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
@@ -874,20 +1003,13 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetInput(
     float yaw_delta, float pitch_delta, float speed) {
     auto* const impl = static_cast<Impl*>(user);
     if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
-    std::scoped_lock lock(impl->freecam_mutex);
-    if (!impl->freecam_applied) return {ANOMALY_STATUS_V1_OK, 0, {}};
-    if (impl->AttachedThread() == nullptr) return MoneyStatus("status.attach_failed");
-    // 换局/重生会替换本地 PlayerRig；旧指针不可再用，直接按新对象重新接管。
-    void* exception{};
-    void* const local = impl->runtime_invoke(impl->get_local_rig, nullptr, nullptr, &exception);
-    if (exception != nullptr || local == nullptr || local != impl->fc_local_rig) {
-        impl->AbandonFreecam();
-        if (local == nullptr || !impl->ActivateFreecam()) {
-            return MoneyStatus(impl->fc_error_key != nullptr
-                ? impl->fc_error_key : "status.freecam_failed");
-        }
-    }
-    impl->ApplyFreecamInput(forward, right, up, yaw_delta, pitch_delta, speed);
+    std::scoped_lock lock(impl->freecam_input_mutex);
+    impl->in_forward = forward;
+    impl->in_right = right;
+    impl->in_up = up;
+    impl->in_yaw += yaw_delta;
+    impl->in_pitch += pitch_delta;
+    impl->in_speed = speed;
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
 
@@ -928,11 +1050,29 @@ bool MaydayAdapter::Stop(std::chrono::milliseconds timeout) noexcept {
         break;  // 轮询线程 500ms 一醒；析构兜底 join
     }
     {
-        std::scoped_lock lock(impl_->resolve_mutex, impl_->freecam_mutex);
-        impl_->freecam_shutdown = true;
-        if (impl_->freecam_applied && impl_->AttachedThread() != nullptr) {
-            static_cast<void>(impl_->DeactivateFreecam());
+        std::unique_lock lock(impl_->freecam_state_mutex);
+        impl_->freecam_requested = false;
+        impl_->freecam_cv.notify_all();
+        if (impl_->freecam_applied) {
+            impl_->freecam_cv.wait_for(lock, std::chrono::milliseconds(500), [&] {
+                return !impl_->freecam_applied;
+            });
         }
+        impl_->freecam_shutdown = true;
+    }
+    if (impl_->hook_installed && impl_->hook_backend != nullptr) {
+        static_cast<void>(impl_->hook_backend->Disable(impl_->look_update_target));
+        const auto drain_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (impl_->freecam_in_callback.load(std::memory_order_acquire) != 0 &&
+               std::chrono::steady_clock::now() < drain_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        static_cast<void>(impl_->hook_backend->Remove(impl_->look_update_target));
+        impl_->freecam_owner.store(nullptr, std::memory_order_release);
+        static_cast<void>(impl_->hook_backend->Uninitialize());
+        impl_->hook_backend.reset();
+        impl_->hook_installed = false;
     }
     impl_->RevokePublished();
     static_cast<void>(ClearTickCallback(std::chrono::seconds(2)));

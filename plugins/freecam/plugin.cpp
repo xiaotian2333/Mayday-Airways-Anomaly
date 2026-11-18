@@ -29,7 +29,7 @@ constexpr float kDefaultSpeed = 12.0f;
 constexpr float kDefaultSensitivity = 0.12f;
 constexpr std::string_view kSchemaId = "freecam";
 constexpr std::uint32_t kSchemaVersion = 1;
-constexpr std::string_view kSchema = R"json({"type":"object","additionalProperties":false,"required":["hotkey","speed","sensitivity"],"properties":{"hotkey":{"type":"integer","minimum":1,"maximum":254},"speed":{"type":"number","minimum":0.5,"maximum":200},"sensitivity":{"type":"number","minimum":0.01,"maximum":2}}})json";
+constexpr std::string_view kSchema = R"json({"type":"object","additionalProperties":false,"required":["hotkey","speed","sensitivity"],"properties":{"hotkey":{"type":"integer","minimum":1,"maximum":254},"speed":{"type":"number","minimum":0.5,"maximum":1000},"sensitivity":{"type":"number","minimum":0.01,"maximum":2}}})json";
 
 const AnomalyHostApiV1* g_host{};
 const AnomalyInputServiceV1* g_input{};
@@ -174,6 +174,14 @@ void SetStatusFromService(const AnomalyStatusV1& status) {
         LocalizedStatus("status.freecam_no_rig_methods", "PlayerRig methods were not found.");
     } else if (message == "status.freecam_no_local_rig") {
         LocalizedStatus("status.freecam_no_local_rig", "PlayerRig.get_Local was not found.");
+    } else if (message == "status.freecam_no_look_class") {
+        LocalizedStatus("status.freecam_no_look_class", "PlayerLook class was not found.");
+    } else if (message == "status.freecam_no_look_update") {
+        LocalizedStatus("status.freecam_no_look_update",
+                        "PlayerLook.Update was not found. The main-thread hook cannot be installed.");
+    } else if (message == "status.freecam_hook_failed") {
+        LocalizedStatus("status.freecam_hook_failed",
+                        "Installing the PlayerLook.Update hook failed.");
     } else if (message == "status.freecam_no_camera_rig") {
         LocalizedStatus("status.freecam_no_camera_rig", "PlayerRig.get_cameraRig was not found.");
     } else if (message == "status.freecam_no_look_getter") {
@@ -283,7 +291,7 @@ void LoadSettings() {
     if (ReadNumber(root, "hotkey", &hotkey) && hotkey >= 1.0 && hotkey <= 254.0) {
         g_hotkey.store(static_cast<std::uint32_t>(hotkey), std::memory_order_relaxed);
     }
-    if (ReadNumber(root, "speed", &speed) && speed >= 0.5 && speed <= 200.0) {
+    if (ReadNumber(root, "speed", &speed) && speed >= 0.5 && speed <= 1000.0) {
         g_speed.store(static_cast<float>(speed), std::memory_order_relaxed);
     }
     if (ReadNumber(root, "sensitivity", &sensitivity) &&
@@ -516,7 +524,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     if (ui->slider_float(
             ui->user, anomaly::sdk::StringView(
                 g_localizer.Text("speed.label", "Move speed")),
-            &speed, 0.5f, 100.0f) != 0) {
+            &speed, 0.5f, 1000.0f) != 0) {
         g_speed.store(speed, std::memory_order_relaxed);
         MarkSettingsDirty();
     }

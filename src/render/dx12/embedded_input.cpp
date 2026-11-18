@@ -9,6 +9,8 @@
 #include <imm.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <iterator>
 #include <limits>
 #include <string>
@@ -84,6 +86,8 @@ void ClearInputMailbox(
     mailbox.frame = {};
     mailbox.last_published_mouse_x = 0.0F;
     mailbox.last_published_mouse_y = 0.0F;
+    mailbox.raw_mouse_delta_x = 0.0F;
+    mailbox.raw_mouse_delta_y = 0.0F;
     mailbox.pending_wheel_delta = 0;
     mailbox.mouse_position_published = false;
     mailbox.reset_pending = true;
@@ -235,7 +239,15 @@ DrainedInputFrame DrainInputFrame(EmbeddedState& state) noexcept {
     ReconcileAsyncInput(state, mailbox);
     anomaly::InputFrameState frame = mailbox.frame;
     frame.timestamp_milliseconds = static_cast<std::uint64_t>(GetTickCount64());
-    if (mailbox.mouse_position_published) {
+    if (mailbox.raw_mouse_seen) {
+        // Raw deltas keep working while the game locks the cursor and never
+        // report the synthetic warp performed when the cursor is re-locked.
+        frame.mouse_delta_x = mailbox.raw_mouse_delta_x;
+        frame.mouse_delta_y = mailbox.raw_mouse_delta_y;
+        mailbox.raw_mouse_delta_x = 0.0F;
+        mailbox.raw_mouse_delta_y = 0.0F;
+        mailbox.mouse_position_published = true;
+    } else if (mailbox.mouse_position_published) {
         frame.mouse_delta_x = frame.mouse_x - mailbox.last_published_mouse_x;
         frame.mouse_delta_y = frame.mouse_y - mailbox.last_published_mouse_y;
     } else {
@@ -308,6 +320,28 @@ bool IsRawMouseInput(LPARAM lparam) noexcept {
                reinterpret_cast<HRAWINPUT>(lparam), RID_HEADER, &header, &size,
                sizeof(RAWINPUTHEADER)) == sizeof(header) &&
         header.dwType == RIM_TYPEMOUSE;
+}
+
+void RecordRawMouseDelta(EmbeddedInputMailbox& mailbox, LPARAM lparam) noexcept {
+    UINT size = 0;
+    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, nullptr, &size,
+                        sizeof(RAWINPUTHEADER)) != 0) {
+        return;
+    }
+    std::array<std::uint8_t, 128> buffer{};
+    if (size < sizeof(RAWINPUTHEADER) || size > buffer.size()) return;
+    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, buffer.data(),
+                        &size, sizeof(RAWINPUTHEADER)) != size) {
+        return;
+    }
+    const auto* const raw = reinterpret_cast<const RAWINPUT*>(buffer.data());
+    if (raw->header.dwType != RIM_TYPEMOUSE) return;
+    mailbox.raw_mouse_seen = true;
+    const RAWMOUSE& mouse = raw->data.mouse;
+    // Absolute coordinates are tablet-style input; the cursor path handles them.
+    if ((mouse.usFlags & MOUSE_MOVE_ABSOLUTE) != 0) return;
+    mailbox.raw_mouse_delta_x += static_cast<float>(mouse.lLastX);
+    mailbox.raw_mouse_delta_y += static_cast<float>(mouse.lLastY);
 }
 
 LRESULT ForwardToGameWindowProc(
@@ -409,6 +443,7 @@ void RecordEmbeddedInputMessage(
         }
         RecordKeyboardMessage(mailbox, message, wparam, lparam);
         RecordMouseMessage(mailbox, message, wparam, lparam);
+        if (message == WM_INPUT) RecordRawMouseDelta(mailbox, lparam);
     } catch (...) {
         // WndProc must not allow synchronization failures to unwind into the
         // game. A subsequent Render frame will reconcile physical input.

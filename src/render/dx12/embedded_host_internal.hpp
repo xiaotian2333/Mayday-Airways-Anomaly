@@ -260,6 +260,13 @@ struct EmbeddedInputMailbox {
     anomaly::InputFrameState frame;
     float last_published_mouse_x{};
     float last_published_mouse_y{};
+    // Raw mouse movement (WM_INPUT) accumulated since the last published frame.
+    // Cursor position does not move while the game locks the cursor, so it cannot
+    // drive look input; raw deltas also avoid the warp jump when the cursor is
+    // released and re-locked.
+    float raw_mouse_delta_x{};
+    float raw_mouse_delta_y{};
+    bool raw_mouse_seen{};
     std::int64_t pending_wheel_delta{};
     bool mouse_position_published{};
     bool reset_pending{};
