@@ -96,7 +96,7 @@ struct NoticeDocument final {
 inline constexpr std::string_view kNoticeDocumentDirectory = "notices";
 inline constexpr std::string_view kFirstRunNoticeDocument = "first-run";
 inline constexpr std::string_view kNoticeRemoteBaseUrl =
-    "https://raw.githubusercontent.com/AnomalyNTE/Anomaly/refs/heads/main/notices/";
+    "https://raw.githubusercontent.com/xiaotian2333/Mayday-Airways-Anomaly/refs/heads/main/notices/";
 // Upper bound on what the shell will parse.
 inline constexpr std::size_t kNoticeDocumentMaximumBytes = 64U * 1024U;
 

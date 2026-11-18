@@ -13,18 +13,19 @@ namespace anomaly::launcher {
 // The repository that publishes this launcher, and the asset its runtime ZIP is published as.
 // Both are release data rather than translation: a translated repository name would point at a
 // release that does not exist.
-inline constexpr std::string_view kReleaseRepository{"AnomalyNTE/Anomaly"};
+inline constexpr std::string_view kReleaseRepository{"xiaotian2333/Mayday-Airways-Anomaly"};
 inline constexpr std::string_view kReleasePageUrl{
-    "https://github.com/AnomalyNTE/Anomaly/releases/latest"};
+    "https://github.com/xiaotian2333/Mayday-Airways-Anomaly/releases/latest"};
 inline constexpr std::string_view kReleaseRuntimeAssetSuffix{"-runtime.zip"};
 inline constexpr std::wstring_view kLauncherExecutableName{L"AnomalyLauncher.exe"};
 // The mirrors the release is also published on. They are for the reader who cannot download a 28 MB
 // package from github.com at all: the launcher's own download stays on the release's address, and
-// these are offered as the alternative rather than used silently.
+// these are offered as the alternative rather than used silently. 本项目暂未发布网盘镜像，
+// 先指向 GitHub Releases 页面占位。
 inline constexpr std::wstring_view kReleaseQuarkUrl{
-    L"https://pan.quark.cn/s/81a25f50de52?pwd=gGdV"};
+    L"https://github.com/xiaotian2333/Mayday-Airways-Anomaly/releases"};
 inline constexpr std::wstring_view kReleaseBaiduUrl{
-    L"https://pan.baidu.com/s/1x5PpiYT8GM2z0_axmcAJ9w?pwd=hfs5"};
+    L"https://github.com/xiaotian2333/Mayday-Airways-Anomaly/releases"};
 
 // The release lookup and the package download both address github.com, which a restricted network
 // may not reach at all. These mirrors take an absolute github.com URL behind their own host and
