@@ -227,6 +227,33 @@ struct MaydayAdapter::Impl {
     std::atomic<int> input_hook_in_callback{0};
     static std::atomic<Impl*> input_hook_owner;
 
+    // ---- 暂停菜单入口：按钮点击等价于按下 Insert ----
+    bool pause_menu_resolved{};
+    bool pause_menu_hooks_installed{};
+    bool pause_menu_hook_shutdown{};
+    std::chrono::steady_clock::time_point pause_menu_retry_after{};
+    std::unique_ptr<HookBackend> pause_menu_hook_backend;
+    void* pause_screen_class{};
+    void* pause_build_target{};
+    void* pause_build_original{};
+    void* pause_open_target{};
+    void* pause_open_original{};
+    void* button_click_target{};
+    void* button_click_original{};
+    void* button_submit_target{};
+    void* button_submit_original{};
+    void* pause_get_invite_btn{};
+    void* pause_get_resume_btn{};
+    void* uif_button_method{};
+    void* ui_theme_button_height{};
+    void* transform_get_parent{};
+    void* transform_get_sibling_index{};
+    void* transform_set_sibling_index{};
+    void* pause_screen{};
+    std::atomic<void*> pause_button{nullptr};
+    std::atomic<int> pause_menu_in_callback{0};
+    static std::atomic<Impl*> pause_menu_owner;
+
     // 服务表回调：Impl 是 MaydayAdapter 的私有嵌套类型，只有成员才能访问。
     static AnomalyStatusV1 ANOMALY_CALL MoneyGetMoney(void* user, std::int32_t* out_money);
     static AnomalyStatusV1 ANOMALY_CALL MoneySetMoney(void* user, std::int32_t value);
@@ -287,10 +314,22 @@ struct MaydayAdapter::Impl {
     static float ANOMALY_CALL FloatReadValueThunk(void* self, void* method);
     static Vec2 ANOMALY_CALL InputMouseScrollDeltaThunk(void* method);
     [[nodiscard]] bool IsDeltaControlValue(void* control) const noexcept;
+    [[nodiscard]] void* FindMethodInfo(void* klass, const char* name, int args) const;
     [[nodiscard]] void* FindMethodTarget(void* klass, const char* name, int args) const;
     bool ResolveInputBlock();
     bool EnsureInputBlockHook();
     void TeardownInputBlockHook() noexcept;
+
+    // 暂停菜单入口
+    bool EnsureGameImage();
+    bool ResolvePauseMenu();
+    bool EnsurePauseMenuHook();
+    void TeardownPauseMenuHook() noexcept;
+    void InstallPauseMenuButton(void* screen);
+    static void ANOMALY_CALL PauseBuildThunk(void* self, void* method);
+    static void ANOMALY_CALL PauseOpenThunk(void* self, void* method);
+    static void ANOMALY_CALL ButtonClickThunk(void* self, void* event_data, void* method);
+    static void ANOMALY_CALL ButtonSubmitThunk(void* self, void* event_data, void* method);
 };
 
 void MaydayAdapter::Impl::ProbeWorker() {
@@ -492,14 +531,18 @@ void MaydayAdapter::Impl::PublishFreecamService() {
     }
 }
 
-bool MaydayAdapter::Impl::ResolveGame() {
-    if (game_resolved) return true;
-    if (domain_get == nullptr || class_from_name == nullptr) return false;
-    domain = domain_get();
-    if (domain == nullptr) return false;
-    // 找 Assembly-CSharp image
+bool MaydayAdapter::Impl::EnsureGameImage() {
+    if (image != nullptr) return true;
+    if (domain_get == nullptr || domain_get_assemblies == nullptr ||
+        assembly_get_image == nullptr || image_get_name == nullptr) {
+        return false;
+    }
+    if (domain == nullptr) {
+        domain = domain_get();
+        if (domain == nullptr) return false;
+    }
     std::size_t count{};
-    void** assemblies = domain_get_assemblies(domain, &count);
+    void** const assemblies = domain_get_assemblies(domain, &count);
     if (assemblies == nullptr) return false;
     for (std::size_t i = 0; i < count; ++i) {
         void* const candidate_image = assembly_get_image(assemblies[i]);
@@ -510,7 +553,13 @@ bool MaydayAdapter::Impl::ResolveGame() {
             break;
         }
     }
-    if (image == nullptr) return false;
+    return image != nullptr;
+}
+
+bool MaydayAdapter::Impl::ResolveGame() {
+    if (game_resolved) return true;
+    if (class_from_name == nullptr) return false;
+    if (!EnsureGameImage()) return false;
     game_state_class = class_from_name(image, "Mayday", "GameState");
     if (game_state_class == nullptr) return false;
     get_instance = class_get_method(game_state_class, "get_Instance", 0);
@@ -1142,6 +1191,18 @@ bool MaydayAdapter::Impl::ResolveInputBlock() {
     return true;
 }
 
+void* MaydayAdapter::Impl::FindMethodInfo(
+    void* klass, const char* name, int args) const {
+    for (int depth = 0; klass != nullptr && depth < 8; ++depth) {
+        if (class_get_method != nullptr) {
+            void* const method = class_get_method(klass, name, args);
+            if (method != nullptr) return method;
+        }
+        klass = class_get_parent != nullptr ? class_get_parent(klass) : nullptr;
+    }
+    return nullptr;
+}
+
 void* MaydayAdapter::Impl::FindMethodTarget(
     void* klass, const char* name, int args) const {
     for (int depth = 0; klass != nullptr && depth < 8; ++depth) {
@@ -1373,6 +1434,313 @@ void MaydayAdapter::Impl::TeardownInputBlockHook() noexcept {
     input_hook_installed.store(false, std::memory_order_release);
 }
 
+// ---------------------------------------------------------------------------
+// 暂停菜单入口：用游戏自己的 UIF 插入按钮，点击等价于按下 Insert
+// ---------------------------------------------------------------------------
+std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::pause_menu_owner{nullptr};
+
+bool MaydayAdapter::Impl::ResolvePauseMenu() {
+    if (pause_menu_resolved) return true;
+    if (runtime_invoke == nullptr || string_new == nullptr ||
+        object_unbox == nullptr || class_from_name == nullptr ||
+        class_get_method == nullptr || domain_get_assemblies == nullptr) {
+        return false;
+    }
+    if (!EnsureGameImage()) return false;
+    pause_screen_class = class_from_name(image, "Mayday.UI", "PauseScreen");
+    void* const uif_class = class_from_name(image, "Mayday.UI", "UIF");
+    void* const ui_button_class = class_from_name(image, "Mayday.UI", "UIButton");
+    if (pause_screen_class == nullptr || uif_class == nullptr || ui_button_class == nullptr) {
+        return false;
+    }
+    void* const build_info = FindMethodInfo(pause_screen_class, "Build", 0);
+    pause_get_invite_btn = FindMethodInfo(pause_screen_class, "get_inviteBtn", 0);
+    pause_get_resume_btn = FindMethodInfo(pause_screen_class, "get_resumeBtn", 0);
+    uif_button_method = FindMethodInfo(uif_class, "Button", 10);
+    void* const theme_class = class_from_name(image, "Mayday.UI", "UITheme");
+    if (theme_class != nullptr) {
+        ui_theme_button_height = FindMethodInfo(theme_class, "get_ButtonHeight", 0);
+    }
+    button_click_target = FindMethodTarget(ui_button_class, "OnPointerClick", 1);
+    button_submit_target = FindMethodTarget(ui_button_class, "OnSubmit", 1);
+    if (build_info == nullptr || uif_button_method == nullptr ||
+        button_click_target == nullptr ||
+        (pause_get_invite_btn == nullptr && pause_get_resume_btn == nullptr)) {
+        return false;
+    }
+    pause_build_target = *reinterpret_cast<void**>(build_info);
+    if (pause_build_target == nullptr) return false;
+    void* const open_info = FindMethodInfo(pause_screen_class, "OnOpen", 0);
+    if (open_info != nullptr) pause_open_target = *reinterpret_cast<void**>(open_info);
+
+    // UnityEngine.CoreModule：按钮与锚点按钮的 Transform 层级操作。
+    std::size_t count{};
+    void** const assemblies = domain_get_assemblies(domain, &count);
+    void* core_image{};
+    for (std::size_t i = 0; assemblies != nullptr && i < count; ++i) {
+        void* const candidate = assembly_get_image(assemblies[i]);
+        if (candidate == nullptr) continue;
+        const char* const name = image_get_name(candidate);
+        if (name != nullptr && std::strcmp(name, "UnityEngine.CoreModule.dll") == 0) {
+            core_image = candidate;
+            break;
+        }
+    }
+    if (core_image == nullptr) return false;
+    void* const transform_class = class_from_name(core_image, "UnityEngine", "Transform");
+    void* const component_class = class_from_name(core_image, "UnityEngine", "Component");
+    if (transform_class == nullptr || component_class == nullptr) return false;
+    if (component_get_transform == nullptr) {
+        component_get_transform = class_get_method(component_class, "get_transform", 0);
+    }
+    transform_get_parent = class_get_method(transform_class, "get_parent", 0);
+    transform_get_sibling_index = class_get_method(transform_class, "GetSiblingIndex", 0);
+    transform_set_sibling_index = class_get_method(transform_class, "SetSiblingIndex", 1);
+    if (component_get_transform == nullptr || transform_get_parent == nullptr ||
+        transform_get_sibling_index == nullptr ||
+        transform_set_sibling_index == nullptr) {
+        return false;
+    }
+    pause_menu_resolved = true;
+    return true;
+}
+
+void MaydayAdapter::Impl::InstallPauseMenuButton(void* screen) {
+    if (screen == nullptr || uif_button_method == nullptr ||
+        component_get_transform == nullptr || transform_get_parent == nullptr) {
+        return;
+    }
+    if (pause_screen == screen && pause_button.load(std::memory_order_acquire) != nullptr) {
+        return;
+    }
+    if (AttachedThread() == nullptr) return;
+    void* exception{};
+    void* anchor{};
+    if (pause_get_invite_btn != nullptr) {
+        anchor = runtime_invoke(pause_get_invite_btn, screen, nullptr, &exception);
+        if (exception != nullptr) {
+            exception = nullptr;
+            anchor = nullptr;
+        }
+    }
+    if (anchor == nullptr && pause_get_resume_btn != nullptr) {
+        anchor = runtime_invoke(pause_get_resume_btn, screen, nullptr, &exception);
+        if (exception != nullptr) {
+            exception = nullptr;
+            anchor = nullptr;
+        }
+    }
+    if (anchor == nullptr) return;
+    void* const anchor_transform =
+        runtime_invoke(component_get_transform, anchor, nullptr, &exception);
+    if (exception != nullptr || anchor_transform == nullptr) return;
+    exception = nullptr;
+    void* const parent =
+        runtime_invoke(transform_get_parent, anchor_transform, nullptr, &exception);
+    if (exception != nullptr || parent == nullptr) return;
+    exception = nullptr;
+
+    float height = 54.0f;
+    if (ui_theme_button_height != nullptr) {
+        void* const boxed =
+            runtime_invoke(ui_theme_button_height, nullptr, nullptr, &exception);
+        if (exception == nullptr && boxed != nullptr) {
+            height = *reinterpret_cast<const float*>(object_unbox(boxed));
+        }
+        exception = nullptr;
+    }
+
+    void* const button_name = string_new("AnomalyMenuButton");
+    void* const button_label = string_new("Anomaly");
+    if (button_name == nullptr || button_label == nullptr) return;
+    std::int32_t style = 1;  // ButtonStyle.Secondary
+    float width = 0.0f;
+    float font_size = -1.0f;
+    float radius = -1.0f;
+    // 空 Nullable<GlyphId>：全零即可，hasValue=false 时不读取 value。
+    std::array<std::uint8_t, 16> glyph{};
+    void* params[10] = {
+        parent, button_name, button_label, nullptr, &style,
+        &width, &height, static_cast<void*>(glyph.data()),
+        &font_size, &radius};
+    void* const button = runtime_invoke(uif_button_method, nullptr, params, &exception);
+    if (exception != nullptr || button == nullptr) return;
+    exception = nullptr;
+
+    void* const button_transform =
+        runtime_invoke(component_get_transform, button, nullptr, &exception);
+    if (exception == nullptr && button_transform != nullptr) {
+        std::int32_t index = 0;
+        if (InvokeInt(transform_get_sibling_index, anchor_transform, &index)) {
+            std::int32_t next = index + 1;
+            static_cast<void>(InvokeVoidArg(
+                transform_set_sibling_index, button_transform, &next));
+        }
+    }
+    pause_screen = screen;
+    pause_button.store(button, std::memory_order_release);
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::PauseBuildThunk(void* self, void* method) {
+    Impl* const impl = pause_menu_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->pause_menu_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(void*, void*)>(
+        impl->pause_build_original);
+    if (original != nullptr) original(self, method);
+    impl->InstallPauseMenuButton(self);
+    impl->pause_menu_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::PauseOpenThunk(void* self, void* method) {
+    Impl* const impl = pause_menu_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->pause_menu_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(void*, void*)>(
+        impl->pause_open_original);
+    if (original != nullptr) original(self, method);
+    impl->InstallPauseMenuButton(self);
+    impl->pause_menu_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::ButtonClickThunk(
+    void* self, void* event_data, void* method) {
+    Impl* const impl = pause_menu_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->pause_menu_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    if (self == impl->pause_button.load(std::memory_order_acquire)) {
+        // 与 Insert 展开路径一致：请求宿主展示并展开管理界面。
+        RequestHostUiManagementExpansion();
+    } else {
+        auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(void*, void*, void*)>(
+            impl->button_click_original);
+        if (original != nullptr) original(self, event_data, method);
+    }
+    impl->pause_menu_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::ButtonSubmitThunk(
+    void* self, void* event_data, void* method) {
+    Impl* const impl = pause_menu_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->pause_menu_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    if (self == impl->pause_button.load(std::memory_order_acquire)) {
+        RequestHostUiManagementExpansion();
+    } else {
+        auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(void*, void*, void*)>(
+            impl->button_submit_original);
+        if (original != nullptr) original(self, event_data, method);
+    }
+    impl->pause_menu_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+bool MaydayAdapter::Impl::EnsurePauseMenuHook() {
+    std::scoped_lock lock(resolve_mutex);
+    if (pause_menu_hooks_installed) return true;
+    if (pause_menu_hook_shutdown) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < pause_menu_retry_after) return false;
+    if (!ResolvePauseMenu()) {
+        pause_menu_retry_after = now + std::chrono::seconds(1);
+        return false;
+    }
+    if (pause_menu_hook_backend == nullptr) {
+        pause_menu_hook_backend = CreateMinHookBackend();
+        if (pause_menu_hook_backend == nullptr || !pause_menu_hook_backend->Initialize()) {
+            pause_menu_hook_backend.reset();
+            pause_menu_retry_after = now + std::chrono::seconds(1);
+            return false;
+        }
+    }
+    struct Entry final {
+        void* target;
+        void* detour;
+        void** original;
+        bool required;
+    };
+    const Entry entries[] = {
+        {pause_build_target, reinterpret_cast<void*>(&Impl::PauseBuildThunk),
+         &pause_build_original, true},
+        {pause_open_target, reinterpret_cast<void*>(&Impl::PauseOpenThunk),
+         &pause_open_original, false},
+        {button_click_target, reinterpret_cast<void*>(&Impl::ButtonClickThunk),
+         &button_click_original, true},
+        {button_submit_target, reinterpret_cast<void*>(&Impl::ButtonSubmitThunk),
+         &button_submit_original, false},
+    };
+    pause_menu_owner.store(this, std::memory_order_release);
+    std::array<bool, std::size(entries)> created{};
+    bool ok = true;
+    for (std::size_t i = 0; i < std::size(entries); ++i) {
+        if (entries[i].target == nullptr) {
+            if (entries[i].required) {
+                ok = false;
+                break;
+            }
+            continue;
+        }
+        if (!pause_menu_hook_backend->Create(
+                entries[i].target, entries[i].detour, entries[i].original)) {
+            if (entries[i].required) {
+                ok = false;
+                break;
+            }
+            continue;
+        }
+        created[i] = true;
+    }
+    if (ok) {
+        for (std::size_t i = 0; i < std::size(entries); ++i) {
+            if (!created[i]) continue;
+            if (!pause_menu_hook_backend->Enable(entries[i].target) &&
+                entries[i].required) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    if (!ok) {
+        for (std::size_t i = 0; i < std::size(entries); ++i) {
+            if (created[i]) {
+                static_cast<void>(pause_menu_hook_backend->Remove(entries[i].target));
+            }
+        }
+        pause_menu_owner.store(nullptr, std::memory_order_release);
+        static_cast<void>(pause_menu_hook_backend->Uninitialize());
+        pause_menu_hook_backend.reset();
+        pause_menu_retry_after = now + std::chrono::seconds(1);
+        return false;
+    }
+    pause_menu_hooks_installed = true;
+    return true;
+}
+
+void MaydayAdapter::Impl::TeardownPauseMenuHook() noexcept {
+    void* const targets[] = {
+        pause_build_target, pause_open_target,
+        button_click_target, button_submit_target};
+    if (pause_menu_hook_backend != nullptr && pause_menu_hooks_installed) {
+        for (void* const target : targets) {
+            if (target != nullptr) static_cast<void>(pause_menu_hook_backend->Disable(target));
+        }
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (pause_menu_in_callback.load(std::memory_order_acquire) != 0 &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        for (void* const target : targets) {
+            if (target != nullptr) static_cast<void>(pause_menu_hook_backend->Remove(target));
+        }
+    }
+    pause_menu_owner.store(nullptr, std::memory_order_release);
+    if (pause_menu_hook_backend != nullptr) {
+        static_cast<void>(pause_menu_hook_backend->Uninitialize());
+        pause_menu_hook_backend.reset();
+    }
+    pause_menu_hooks_installed = false;
+}
+
 void MaydayAdapter::Impl::RevokePublished() {
     void* const previous = table_published.exchange(nullptr, std::memory_order_acq_rel);
     if (previous != nullptr) {
@@ -1405,11 +1773,13 @@ bool MaydayAdapter::Stop(std::chrono::milliseconds timeout) noexcept {
     if (!impl_->started.exchange(false, std::memory_order_acq_rel)) return true;
     impl_->stopping.store(true, std::memory_order_release);
     {
-        // 输入阻断在渲染线程可能仍尝试安装；先与安装路径串行化再拆除，
-        // 关闭后不得再重装。
+        // 输入阻断与暂停菜单 hook 在渲染线程可能仍尝试安装；先与安装路径
+        // 串行化再拆除，关闭后不得再重装。
         std::scoped_lock lock(impl_->resolve_mutex);
         impl_->input_hook_shutdown = true;
         impl_->TeardownInputBlockHook();
+        impl_->pause_menu_hook_shutdown = true;
+        impl_->TeardownPauseMenuHook();
     }
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (impl_->probe_worker.joinable() && std::chrono::steady_clock::now() < deadline) {
@@ -1465,8 +1835,9 @@ bool MaydayAdapter::ClearTickCallback(std::chrono::seconds timeout) noexcept {
 }
 
 void MaydayAdapter::OnFrame(double delta_seconds) {
-    // 覆盖层输入阻断只安装一次；hook 内部实时读取菜单状态，无需逐帧同步。
+    // 覆盖层输入阻断与暂停菜单入口只安装一次；hook 内部实时读取菜单状态。
     static_cast<void>(impl_->EnsureInputBlockHook());
+    static_cast<void>(impl_->EnsurePauseMenuHook());
     TickCallback callback;
     {
         std::scoped_lock lock(impl_->tick_mutex);
