@@ -91,8 +91,8 @@ constexpr std::wstring_view kSponsorUrl{L"https://afdian.com/a/bananachicken"};
 constexpr std::wstring_view kKofiUrl{L"https://ko-fi.com/bananachicken"};
 // Where the project itself answers. The about section at the foot of the settings page offers these
 // two, so the addresses live here with the other links rather than inside the drawing code.
-constexpr std::string_view kRepositoryUrl{"https://github.com/AnomalyNTE/Anomaly"};
-constexpr std::string_view kDiscordUrl{"https://discord.gg/tfeh8QQ9Vy"};
+constexpr std::string_view kRepositoryUrl{"https://github.com/xiaotian2333/Mayday-Airways-Anomaly"};
+constexpr std::string_view kDiscordUrl{"https://discord.gg/0000"};
 // The capsule both support buttons are drawn in, in canvas pixels before the DPI scale. The two
 // pictures are re-cut onto exactly this shape -- one canvas, one radius, one content height -- so the
 // pair lines up and neither label is stretched. The artwork files carry their own rounded capsule at
