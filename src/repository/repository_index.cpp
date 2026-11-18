@@ -75,7 +75,6 @@ bool ParseDecimal(std::string_view value, int& parsed) noexcept {
 std::string_view RepositoryArtifactKindName(RepositoryArtifactKind kind) noexcept {
     switch (kind) {
     case RepositoryArtifactKind::Plugin: return "plugin";
-    case RepositoryArtifactKind::NteProfile: return "nte-profile";
     }
     return "plugin";
 }
@@ -131,8 +130,12 @@ RepositoryIndexParseResult ParseRepositoryIndex(std::string_view json) {
         for (const Json& item : document.at("artifacts")) {
             RepositoryArtifact artifact;
             const std::string kind = item.at("kind").get<std::string>();
-            artifact.kind = kind == "plugin" ? RepositoryArtifactKind::Plugin
-                                               : RepositoryArtifactKind::NteProfile;
+            if (kind != "plugin") {
+                result.diagnostics.push_back(
+                    {"/artifacts/kind", "unsupported repository artifact kind"});
+                return result;
+            }
+            artifact.kind = RepositoryArtifactKind::Plugin;
             artifact.id = item.at("id").get<std::string>();
             SemVerParseError version_error;
             auto version = ParseSemanticVersion(item.at("version").get<std::string>(), &version_error);

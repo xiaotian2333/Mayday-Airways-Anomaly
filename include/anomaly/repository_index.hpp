@@ -17,7 +17,7 @@ namespace anomaly {
 inline constexpr std::uint32_t kRepositoryIndexSchemaVersion = 1;
 inline constexpr std::size_t kMaximumRepositoryIndexBytes = 4U * 1024U * 1024U;
 
-enum class RepositoryArtifactKind : std::uint8_t { Plugin, NteProfile };
+enum class RepositoryArtifactKind : std::uint8_t { Plugin };
 enum class RepositoryChannel : std::uint8_t { Stable, Preview, Nightly };
 
 struct RepositorySignature {

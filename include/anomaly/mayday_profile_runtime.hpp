@@ -10,9 +10,8 @@ namespace anomaly {
 class MaydayAdapter;
 
 // Mayday Airways (Unity IL2CPP) 的 Profile 运行时。
-// 上游 NteProfileRuntime 的 Mayday 对应物：供 core_main 的服务图注册与
-// 诊断快照使用；引擎侧不再做 UE5 特征码 Profile，而是等待 GameAssembly.dll
-// 并解析 il2cpp 导出（见 MaydayAdapter）。
+// 供 core_main 的服务图注册与诊断快照使用；引擎侧不做 UE5 特征码 Profile，
+// 而是等待 GameAssembly.dll 并解析 il2cpp 导出（见 MaydayAdapter）。
 class MaydayProfileRuntime final {
 public:
     MaydayProfileRuntime();

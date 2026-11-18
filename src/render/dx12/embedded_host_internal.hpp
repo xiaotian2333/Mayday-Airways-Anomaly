@@ -169,7 +169,6 @@ enum class EmbeddedPerformanceStage : std::uint8_t {
     PlatformUiRepositorySnapshot,
     PlatformUiServiceGraphSnapshot,
     PlatformUiAdapterServicesSnapshot,
-    PlatformUiNteCompatibilitySnapshot,
     PlatformUiModelPublish,
     PlatformUiSettingsRefresh,
     PlatformUiRefreshTotal,

@@ -39,7 +39,6 @@ enum class PlatformUiPerformanceStage : std::uint8_t {
     RepositorySnapshot,
     ServiceGraphSnapshot,
     AdapterServicesSnapshot,
-    NteCompatibilitySnapshot,
     ModelPublish,
     SettingsRefresh,
     RefreshTotal,
@@ -57,7 +56,6 @@ struct PlatformDiagnostics {
     std::filesystem::path log_file;
     std::function<anomaly::ServiceGraphSnapshot()> service_graph;
     std::function<std::string()> profile_json;
-    std::function<anomaly::NteCompatibilitySnapshot()> nte_compatibility;
     std::function<std::vector<anomaly::HookRecordView>()> hooks;
     // Driven by the platform worker: retries a game tick hook that failed during runtime
     // startup and republishes the framework services once it comes up. Returns true when the

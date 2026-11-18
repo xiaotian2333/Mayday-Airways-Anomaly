@@ -2249,7 +2249,7 @@ private:
         Services,
         Hooks,
         Memory,
-        NteProfile,
+        Adapter,
     };
 
     enum class DeveloperPluginTab : std::uint8_t {
@@ -2379,8 +2379,6 @@ private:
     const char* RouteLabel(Route route) const noexcept {
         switch (route) {
         case Route::Plugins: return Text(anomaly::MessageId::ShellRoutePlugins);
-        case Route::NteCompatibility:
-            return Text(anomaly::MessageId::ShellRouteNteCompatibility);
         case Route::Diagnostics: return Text(anomaly::MessageId::ShellRouteDiagnostics);
         case Route::Settings: return Text(anomaly::MessageId::ShellRouteSettings);
         }
@@ -2441,20 +2439,6 @@ private:
         case anomaly::ServiceState::Stopping:
             return Text(anomaly::MessageId::ServiceStateStopping);
         case anomaly::ServiceState::Stopped: return Text(anomaly::MessageId::ServiceStateStopped);
-        }
-        return Text(anomaly::MessageId::CommonUnknown);
-    }
-
-    const char* NteLevelName(anomaly::NteCompatibilityLevel level) const noexcept {
-        switch (level) {
-        case anomaly::NteCompatibilityLevel::Unknown:
-            return Text(anomaly::MessageId::CommonUnknown);
-        case anomaly::NteCompatibilityLevel::CoreOnly:
-            return Text(anomaly::MessageId::NteLevelCoreOnly);
-        case anomaly::NteCompatibilityLevel::Partial:
-            return Text(anomaly::MessageId::NteLevelPartial);
-        case anomaly::NteCompatibilityLevel::Supported:
-            return Text(anomaly::MessageId::NteLevelSupported);
         }
         return Text(anomaly::MessageId::CommonUnknown);
     }
@@ -2723,25 +2707,6 @@ private:
         }
         phase_started = measure ? std::chrono::steady_clock::now()
                                 : std::chrono::steady_clock::time_point{};
-        std::vector<anomaly::AvailableServiceVersion> services;
-        for (const auto& service : anomaly::ProcessAdapterServices().Snapshot()) {
-            services.push_back({service.id, service.version});
-        }
-        RecordPerformance(PlatformUiPerformanceStage::AdapterServicesSnapshot, phase_started);
-        phase_started = measure ? std::chrono::steady_clock::now()
-                                : std::chrono::steady_clock::time_point{};
-        if (diagnostics_.nte_compatibility) {
-            snapshot.nte_compatibility = diagnostics_.nte_compatibility();
-            snapshot.nte_compatibility.services = std::move(services);
-        } else {
-            snapshot.nte_compatibility = anomaly::BuildNteCompatibilitySnapshot(
-                {}, {}, {}, std::move(services));
-            snapshot.nte_compatibility.reason =
-                "NTE compatibility provider is not published by this host";
-        }
-        RecordPerformance(PlatformUiPerformanceStage::NteCompatibilitySnapshot, phase_started);
-        phase_started = measure ? std::chrono::steady_clock::now()
-                                : std::chrono::steady_clock::time_point{};
         snapshot.operation_results = model_.Snapshot().operation_results;
         snapshot.operation_plans = model_.Snapshot().operation_plans;
         ResolveAwaitingBatch(snapshot);
@@ -2990,7 +2955,6 @@ private:
     [[nodiscard]] static ShellGlyph RouteGlyph(const Route route) noexcept {
         switch (route) {
         case Route::Plugins: return ShellGlyph::Package;
-        case Route::NteCompatibility: return ShellGlyph::Shield;
         case Route::Diagnostics: return ShellGlyph::Terminal;
         case Route::Settings: return ShellGlyph::Settings;
         }
@@ -3574,7 +3538,6 @@ private:
     }
 
     void DrawManagementShell() {
-        RedirectHiddenNteCompatibilityRoute();
         page_header_actions_ = nullptr;
         // The route is drawn first so the header can carry the route's actions
         // in the same row as the window controls.
@@ -4060,10 +4023,6 @@ private:
     void DrawShellRoute() {
         switch (model_.State().route) {
         case Route::Plugins: DrawPluginsShell(); break;
-        case Route::NteCompatibility:
-            RedirectHiddenNteCompatibilityRoute();
-            DrawDiagnosticsShell();
-            break;
         case Route::Diagnostics: DrawDiagnosticsShell(); break;
         case Route::Settings: DrawSettingsShell(); break;
         }
@@ -5090,81 +5049,6 @@ private:
         compact_plugin_detail_pending_id_.clear();
     }
 
-    void DrawNteFeatureMatrix() {
-        const auto& compatibility = model_.Snapshot().nte_compatibility;
-        ImGui::TextUnformatted(Text(anomaly::MessageId::PluginsFeatureMatrix));
-        if (compatibility.features.empty()) {
-            ImGui::TextDisabled("%s", Text(anomaly::MessageId::PluginsFeatureProviderMissing));
-        } else {
-            const int columns = IsCompact() ? 3 : 4;
-            if (ImGui::BeginTable("PlatformNteFeatures", columns,
-                    ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-                ImGui::TableSetupColumn(Text(anomaly::MessageId::CommonFeature),
-                    ImGuiTableColumnFlags_WidthStretch, 1.0f);
-                ImGui::TableSetupColumn(Text(anomaly::MessageId::CommonAvailability),
-                    ImGuiTableColumnFlags_WidthFixed, 96.0f);
-                ImGui::TableSetupColumn(Text(anomaly::MessageId::CommonValidation),
-                    ImGuiTableColumnFlags_WidthFixed, 88.0f);
-                if (!IsCompact()) {
-                    ImGui::TableSetupColumn(Text(anomaly::MessageId::CommonReason),
-                        ImGuiTableColumnFlags_WidthStretch, 1.2f);
-                }
-                ImGui::TableHeadersRow();
-                for (const auto& feature : compatibility.features) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(feature.id.c_str());
-                    ImGui::TableNextColumn();
-                    ImGui::TextColored(feature.available ? SuccessColor() : WarningColor(),
-                        "%s", Text(feature.available ? anomaly::MessageId::PluginsTabAvailable
-                                                     : anomaly::MessageId::CommonUnavailable));
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(Text(feature.validated
-                        ? anomaly::MessageId::PluginsValidated
-                        : anomaly::MessageId::PluginsMissing));
-                    if (!IsCompact()) {
-                        ImGui::TableNextColumn();
-                        ImGui::TextWrapped("%s", feature.reason.empty() ? "-" : feature.reason.c_str());
-                    }
-                }
-                ImGui::EndTable();
-            }
-        }
-        ImGui::Spacing();
-        ImGui::TextUnformatted(Text(anomaly::MessageId::PluginsPublishedServices));
-        if (compatibility.services.empty()) {
-            ImGui::TextDisabled("%s", Text(anomaly::MessageId::PluginsNoPublishedServices));
-        } else {
-            for (const auto& service : compatibility.services) {
-                ImGui::Separator();
-                ImGui::TextUnformatted(service.id.c_str());
-                ImGui::SameLine();
-                ImGui::TextDisabled("v%u", service.version);
-            }
-        }
-    }
-
-    void DrawNteBuildPanel() {
-        const auto& compatibility = model_.Snapshot().nte_compatibility;
-        ImGui::TextUnformatted(Text(anomaly::MessageId::PluginsBuildDetails));
-        if (ImGui::BeginTable("PlatformNteBuild", 2,
-                ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-            const auto row = [this](const char* label, const std::string& value) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::TextDisabled("%s", label);
-                ImGui::TableNextColumn();
-                ImGui::TextWrapped("%s", value.empty()
-                    ? Text(anomaly::MessageId::CommonUnavailable) : value.c_str());
-            };
-            row(Text(anomaly::MessageId::PluginsBuildId), compatibility.build_id);
-            row(Text(anomaly::MessageId::PluginsProfileSource), compatibility.profile_source);
-            row(Text(anomaly::MessageId::PluginsProfileHash), compatibility.profile_hash);
-            row(Text(anomaly::MessageId::PluginsResolverReason), compatibility.reason);
-            ImGui::EndTable();
-        }
-    }
-
     void DrawDiagnosticsShell() {
         if (!developer_mode_ && model_.State().diagnostics_tab == DiagnosticTab::Developer) {
             model_.State().diagnostics_tab = DiagnosticTab::Overview;
@@ -5564,8 +5448,8 @@ private:
         case DeveloperPanel::Services: return Text(anomaly::MessageId::DeveloperPanelServices);
         case DeveloperPanel::Hooks: return Text(anomaly::MessageId::DeveloperPanelHooks);
         case DeveloperPanel::Memory: return Text(anomaly::MessageId::DeveloperPanelMemory);
-        case DeveloperPanel::NteProfile:
-            return Text(anomaly::MessageId::DeveloperPanelNteProfile);
+        case DeveloperPanel::Adapter:
+            return Text(anomaly::MessageId::DeveloperPanelAdapter);
         }
         return Text(anomaly::MessageId::DeveloperPanelPlugins);
     }
@@ -5577,7 +5461,7 @@ private:
             case DeveloperPanel::Services: DrawServices(); break;
             case DeveloperPanel::Hooks: DrawHooks(); break;
             case DeveloperPanel::Memory: DrawMemory(); break;
-            case DeveloperPanel::NteProfile: DrawDeveloperNteCompatibility(); break;
+            case DeveloperPanel::Adapter: DrawDeveloperAdapter(); break;
             }
         };
         const auto draw_content_panel = [this, &draw_content] {
@@ -5598,7 +5482,7 @@ private:
             if (anomaly::glass::BeginCombo("##developer-panel", DeveloperPanelLabel(developer_panel_))) {
                 constexpr std::array<DeveloperPanel, 5> panels{
                     DeveloperPanel::Plugins, DeveloperPanel::Services, DeveloperPanel::Hooks,
-                    DeveloperPanel::Memory, DeveloperPanel::NteProfile};
+                    DeveloperPanel::Memory, DeveloperPanel::Adapter};
                 for (const DeveloperPanel panel : panels) {
                     ImGui::PushID(static_cast<int>(panel));
                     if (ImGui::Selectable(DeveloperPanelLabel(panel), developer_panel_ == panel)) {
@@ -5615,7 +5499,7 @@ private:
 
         constexpr std::array<DeveloperPanel, 5> panels{
             DeveloperPanel::Plugins, DeveloperPanel::Services, DeveloperPanel::Hooks,
-            DeveloperPanel::Memory, DeveloperPanel::NteProfile};
+            DeveloperPanel::Memory, DeveloperPanel::Adapter};
         BeginCardChild("PlatformDeveloperRail", ImVec2(Scaled(168.0f), 0.0f), 8.0f);
         std::size_t panel_index = static_cast<std::size_t>(
             std::ranges::find(panels, developer_panel_) - panels.begin());
@@ -5927,48 +5811,18 @@ private:
         if (ImGui::Button(open_logs.c_str())) OpenPluginLogs(plugin.id);
     }
 
-    void DrawDeveloperNteCompatibility() {
-        const auto& compatibility = model_.Snapshot().nte_compatibility;
-        ImGui::TextUnformatted(Text(anomaly::MessageId::ShellRouteNteCompatibility));
-        ImGui::TextDisabled("%s", Text(anomaly::MessageId::DeveloperExactBuildHint));
+    void DrawDeveloperAdapter() {
+        ImGui::TextUnformatted(Text(anomaly::MessageId::DeveloperPanelAdapter));
+        ImGui::TextDisabled("%s", Text(anomaly::MessageId::DeveloperAdapterHint));
         ImGui::Separator();
-        const std::array<std::string_view, 1> level_arguments{
-            NteLevelName(compatibility.level)};
-        const std::string level = Format(anomaly::MessageId::DeveloperLevel, level_arguments);
-        ImGui::TextUnformatted(level.c_str());
-        const std::string_view reason = compatibility.reason.empty()
-            ? Text(anomaly::MessageId::DeveloperNoCompatibilityProvider)
-            : std::string_view{compatibility.reason};
-        const std::array<std::string_view, 1> reason_arguments{reason};
-        const std::string reason_text =
-            Format(anomaly::MessageId::DeveloperReason, reason_arguments);
-        ImGui::TextWrapped("%s", reason_text.c_str());
-        ImGui::Spacing();
-        if (IsCompact()) {
-            DrawNteFeatureMatrix();
-            DrawNteBuildPanel();
-        } else if (ImGui::BeginTable("PlatformDeveloperNteColumns", 2,
-                       ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn(Text(anomaly::MessageId::DeveloperMatrix),
-                ImGuiTableColumnFlags_WidthStretch, 2.0f);
-            ImGui::TableSetupColumn(Text(anomaly::MessageId::DeveloperBuild),
-                ImGuiTableColumnFlags_WidthStretch, 1.0f);
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            DrawNteFeatureMatrix();
-            ImGui::TableNextColumn();
-            DrawNteBuildPanel();
-            ImGui::EndTable();
-        }
-        ImGui::Separator();
-        ImGui::TextUnformatted(Text(anomaly::MessageId::DeveloperRawProfileJson));
+        ImGui::TextUnformatted(Text(anomaly::MessageId::DeveloperRawAdapterJson));
         if (!diagnostics_.profile_json) {
-            ImGui::TextDisabled("%s", Text(anomaly::MessageId::DeveloperProfileUnavailable));
+            ImGui::TextDisabled("%s", Text(anomaly::MessageId::DeveloperAdapterUnavailable));
             return;
         }
         const std::string profile = diagnostics_.profile_json();
         if (profile.empty()) {
-            ImGui::TextDisabled("%s", Text(anomaly::MessageId::DeveloperProfileUnavailable));
+            ImGui::TextDisabled("%s", Text(anomaly::MessageId::DeveloperAdapterUnavailable));
             return;
         }
         ImGui::TextWrapped("%s", profile.c_str());
@@ -7577,15 +7431,6 @@ private:
             settings_leave_popup_requested_ = true;
             return;
         }
-        if (route == Route::NteCompatibility) {
-            route = Route::Diagnostics;
-            if (developer_mode_) {
-                model_.State().diagnostics_tab = DiagnosticTab::Developer;
-                developer_panel_ = DeveloperPanel::NteProfile;
-            } else {
-                model_.State().diagnostics_tab = DiagnosticTab::Overview;
-            }
-        }
         model_.State().route = route;
         if (diagnostics_.settings_record_route) {
             settings_route_to_record_ = std::string(anomaly::ToString(route));
@@ -7593,11 +7438,6 @@ private:
         if (route != Route::Plugins) compact_plugin_detail_pending_id_.clear();
         status_.clear();
         status_failure_ = false;
-    }
-
-    void RedirectHiddenNteCompatibilityRoute() {
-        if (model_.State().route != Route::NteCompatibility) return;
-        Navigate(Route::NteCompatibility);
     }
 
     void OpenPluginLogs(std::string_view plugin_id) {

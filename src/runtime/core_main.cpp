@@ -883,10 +883,6 @@ DWORD RunPlatform(const std::shared_ptr<CoreContext>& context, std::stop_token s
         const auto runtime = weak.lock();
         return runtime ? runtime->DiagnosticsJson() : std::string{"{\"state\":\"unavailable\"}"};
     };
-    // Mayday：无 NTE 兼容性矩阵与特征码 hook 记录，提供恒空快照
-    diagnostics.nte_compatibility = [] {
-        return anomaly::BuildNteCompatibilitySnapshot({}, {}, {});
-    };
     diagnostics.hooks = [] {
         return std::vector<anomaly::HookRecordView>{};
     };

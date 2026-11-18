@@ -11,18 +11,6 @@
 namespace anomaly {
 namespace {
 
-constexpr std::array<std::string_view, 7> kRequiredNteCompatibilityFeatures{
-    "ue5.framework", "ue5.world", "ue5.names", "ue5.objects",
-    "nte.session", "nte.player", "nte.entities"};
-
-bool HasCompleteNteCompatibilityFeatureSet(
-    const std::vector<NteFeatureSnapshot>& features) noexcept {
-    return std::ranges::all_of(kRequiredNteCompatibilityFeatures, [&](std::string_view id) {
-        const auto found = std::ranges::find(features, id, &NteFeatureSnapshot::id);
-        return found != features.end() && found->available && found->validated;
-    });
-}
-
 std::string Lower(std::string_view value) {
     std::string result;
     result.reserve(value.size());
@@ -290,31 +278,6 @@ RepositoryPluginInstallState ResolveRepositoryPluginInstallState(
     return state;
 }
 
-void NteCompatibilitySnapshot::NormalizeLevel() noexcept {
-    bool any_available = false;
-    bool all_validated = true;
-    for (const auto& feature : features) {
-        any_available = any_available || feature.available;
-        all_validated = all_validated && feature.available && feature.validated;
-    }
-    const bool required_features_complete =
-        HasCompleteNteCompatibilityFeatureSet(features);
-    if (level == NteCompatibilityLevel::Supported &&
-        (!all_validated || !required_features_complete)) {
-        level = any_available ? NteCompatibilityLevel::Partial : NteCompatibilityLevel::CoreOnly;
-    }
-    if (level == NteCompatibilityLevel::Partial && !any_available) {
-        level = NteCompatibilityLevel::CoreOnly;
-    }
-}
-
-const NteFeatureSnapshot* NteCompatibilitySnapshot::FindFeature(std::string_view id) const noexcept {
-    const auto found = std::find_if(features.begin(), features.end(), [&](const auto& feature) {
-        return feature.id == id;
-    });
-    return found == features.end() ? nullptr : &*found;
-}
-
 const InstalledPluginView* PlatformUiSnapshot::FindPlugin(std::string_view id) const noexcept {
     const auto found = std::find_if(installed_plugins.begin(), installed_plugins.end(),
         [&](const auto& plugin) { return plugin.id == id; });
@@ -324,7 +287,6 @@ const InstalledPluginView* PlatformUiSnapshot::FindPlugin(std::string_view id) c
 std::string_view ToString(PlatformUiRoute route) noexcept {
     switch (route) {
     case PlatformUiRoute::Plugins: return "plugins";
-    case PlatformUiRoute::NteCompatibility: return "nte-compatibility";
     case PlatformUiRoute::Diagnostics: return "diagnostics";
     case PlatformUiRoute::Settings: return "settings";
     }
@@ -609,81 +571,6 @@ PlatformUiSnapshot BuildPlatformUiSnapshot(
         [](const auto& left, const auto& right) { return Lower(left.id) < Lower(right.id); });
     ComputeSummary(snapshot);
     return snapshot;
-}
-
-NteCompatibilitySnapshot BuildNteCompatibilitySnapshot(
-    std::optional<BuildFingerprint> fingerprint,
-    std::optional<BuildProfile> profile,
-    std::optional<ProfileResolutionSnapshot> resolution,
-    std::vector<AvailableServiceVersion> services) {
-    NteCompatibilitySnapshot result;
-    result.services = std::move(services);
-    if (fingerprint) {
-        result.game_id = fingerprint->game;
-        result.build_id = fingerprint->id;
-    }
-    if (profile) {
-        result.profile_source = profile->source.empty()
-            ? profile->source_channel
-            : profile->source.string();
-        result.profile_hash = profile->source_hash;
-        if (result.game_id.empty()) result.game_id = profile->game;
-    }
-    if (!resolution) {
-        result.level = profile ? NteCompatibilityLevel::CoreOnly : NteCompatibilityLevel::Unknown;
-        result.reason = profile ? "profile has not been resolved" : "no build profile is available";
-        return result;
-    }
-
-    result.features.reserve(resolution->features.size());
-    bool any_available = false;
-    bool all_available = true;
-    for (const auto& [id, feature] : resolution->features) {
-        if (profile && profile->optional_features.contains(id)) continue;
-        NteFeatureSnapshot item;
-        item.id = id;
-        item.available = feature.available;
-        item.validated = feature.available;
-        item.reason = feature.available ? "resolved" :
-            (feature.missing_symbols.empty()
-                ? "required symbols are unavailable"
-                : "missing symbols: " + Join(feature.missing_symbols, ", "));
-        any_available = any_available || item.available;
-        all_available = all_available && item.available;
-        result.features.push_back(std::move(item));
-    }
-    switch (resolution->state) {
-    case ProfileResolutionState::Ready: {
-        const bool required_features_complete =
-            HasCompleteNteCompatibilityFeatureSet(result.features);
-        if (all_available && required_features_complete) {
-            result.level = NteCompatibilityLevel::Supported;
-            result.reason = "all published features resolved";
-        } else if (any_available) {
-            result.level = NteCompatibilityLevel::Partial;
-            result.reason = !required_features_complete
-                ? "the required Phase 10 feature set is incomplete"
-                : "some published features are unavailable";
-        } else {
-            result.level = NteCompatibilityLevel::CoreOnly;
-            result.reason = "profile resolved without an available feature";
-        }
-        break;
-    }
-    case ProfileResolutionState::ProfileLoaded:
-    case ProfileResolutionState::Degraded:
-        result.level = any_available ? NteCompatibilityLevel::Partial : NteCompatibilityLevel::CoreOnly;
-        result.reason = resolution->state == ProfileResolutionState::Degraded
-            ? "profile resolution is degraded"
-            : "profile matched but full readiness is not established";
-        break;
-    case ProfileResolutionState::NoProfile:
-        result.level = NteCompatibilityLevel::CoreOnly;
-        result.reason = "the running build is not known";
-        break;
-    }
-    result.NormalizeLevel();
-    return result;
 }
 
 PlatformUiAffectedSetPreflight PreflightPluginMutation(

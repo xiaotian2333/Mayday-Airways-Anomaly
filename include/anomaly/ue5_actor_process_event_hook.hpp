@@ -11,7 +11,7 @@
 namespace anomaly {
 
 // AHUD-only ingress. It is kept separate from the shared UObject ProcessEvent
-// detour because NTE dispatches AHUD frames through AActor::ProcessEvent; the
+// detour because some UE games dispatch AHUD frames through AActor::ProcessEvent; the
 // generic UObject detour remains the single SDK fan-out point.
 class Ue5ActorProcessEventHook final {
 public:

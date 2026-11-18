@@ -44,7 +44,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["kind", "id", "version", "channel", "uri", "size", "sha256", "manifestSha256", "publishedAt", "withdrawn", "signature"],
       "properties": {
-        "kind": { "enum": ["plugin", "nte-profile"] },
+        "kind": { "enum": ["plugin"] },
         "id": { "$ref": "#/definitions/artifactId" },
         "version": { "type": "string", "minLength": 5, "maxLength": 128 },
         "channel": { "enum": ["stable", "preview", "nightly"] },

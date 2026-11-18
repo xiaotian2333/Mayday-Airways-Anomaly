@@ -2,7 +2,6 @@
 
 #include "anomaly/artifact_bundle.hpp"
 #include "anomaly/artifact_crypto.hpp"
-#include "anomaly/build_profile.hpp"
 #include "anomaly/plugin_manifest.hpp"
 #include "anomaly/plugin_package.hpp"
 
@@ -272,7 +271,6 @@ RepositoryUpdateTransaction::RepositoryUpdateTransaction(
     : options_(std::move(options)), trust_(trust) {
     options_.runtime_root = std::filesystem::absolute(options_.runtime_root);
     options_.plugin_directory = Resolve(options_.runtime_root, options_.plugin_directory);
-    options_.managed_profile_directory = Resolve(options_.runtime_root, options_.managed_profile_directory);
     options_.staging_directory = Resolve(options_.runtime_root, options_.staging_directory);
     options_.rollback_directory = Resolve(options_.runtime_root, options_.rollback_directory);
     options_.journal_file = Resolve(options_.runtime_root, options_.journal_file);
@@ -377,59 +375,12 @@ UpdateTransactionResult RepositoryUpdateTransaction::InstallPlugin(
         options_.rollback_directory / L"plugins" / Utf8Path(artifact.id));
 }
 
-UpdateTransactionResult RepositoryUpdateTransaction::InstallNteProfile(
-    const RepositoryArtifact& artifact,
-    const std::filesystem::path& downloaded_profile_json) {
-    if (artifact.kind != RepositoryArtifactKind::NteProfile) {
-        return Failure(UpdateTransactionError::InvalidArtifact, "NTE Profile artifact identity is invalid");
-    }
-    if (!PathsBelowRoot(options_.runtime_root,
-            {options_.managed_profile_directory, options_.staging_directory,
-                options_.rollback_directory, options_.journal_file})) {
-        return Failure(UpdateTransactionError::StagingFailure,
-            "NTE Profile update path escapes runtime root");
-    }
-    UpdateTransactionResult verification;
-    if (!VerifyDownloaded(artifact, downloaded_profile_json, trust_, verification)) return verification;
-    if (!ConstantTimeHexEqual(artifact.manifest_sha256, artifact.sha256)) {
-        return Failure(UpdateTransactionError::ManifestRejected, "NTE Profile manifest hash mismatch");
-    }
-    const auto text = ReadText(downloaded_profile_json, kMaximumBuildProfileBytes);
-    auto parsed = text ? ParseBuildProfile(*text, downloaded_profile_json) : BuildProfileParseResult{};
-    if (!parsed.Ok() || parsed.profile->game != "nte") {
-        return Failure(UpdateTransactionError::ManifestRejected, "NTE Profile game identity mismatch");
-    }
-    std::error_code error;
-    std::filesystem::create_directories(options_.staging_directory, error);
-    const auto staging = options_.staging_directory /
-        (L"profile-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-         std::to_wstring(GetTickCount64()) + L".json");
-    std::filesystem::copy_file(downloaded_profile_json, staging,
-        std::filesystem::copy_options::overwrite_existing, error);
-    if (error) return Failure(UpdateTransactionError::StagingFailure, "NTE Profile staging failed");
-    return CommitPath(options_.runtime_root, options_.journal_file, staging,
-        options_.managed_profile_directory / L"nte" / L"active.json",
-        options_.rollback_directory / L"profiles" / L"nte" / L"active.json");
-}
-
 UpdateTransactionResult RepositoryUpdateTransaction::RollbackPlugin(std::string_view plugin_id) {
     if (!SimpleId(plugin_id)) return Failure(UpdateTransactionError::InvalidArtifact, "plugin id is invalid");
     const auto id = Utf8Path(plugin_id);
     return SwapRollback(options_.runtime_root, options_.plugin_directory / id,
         options_.rollback_directory / L"plugins" / id,
         options_.staging_directory / L"rollback-plugin");
-}
-
-UpdateTransactionResult RepositoryUpdateTransaction::RollbackNteProfile(
-    std::string_view game_id) {
-    if (!SimpleId(game_id)) {
-        return Failure(UpdateTransactionError::InvalidArtifact, "profile identity is invalid");
-    }
-    const auto game = Utf8Path(game_id);
-    return SwapRollback(options_.runtime_root,
-        options_.managed_profile_directory / game / L"active.json",
-        options_.rollback_directory / L"profiles" / game / L"active.json",
-        options_.staging_directory / L"rollback-profile.json");
 }
 
 }  // namespace anomaly

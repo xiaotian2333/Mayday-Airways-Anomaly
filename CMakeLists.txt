@@ -323,7 +323,6 @@ set(PROXY_CPP "${GENERATED_DIR}/proxy_exports.cpp")
 # This prefiltered 32px derivative keeps the one-level header texture close
 # to its display size without imposing mip generation on generic UI assets.
 file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/logo-header.png" ANOMALY_PLATFORM_LOGO_PATH)
-file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/logo.png" ANOMALY_ESC_MENU_LOGO_PATH)
 file(TO_CMAKE_PATH
     "${CMAKE_SOURCE_DIR}/apps/launcher/AnomalyLauncher.ico"
     ANOMALY_LAUNCHER_ICON_PATH)
@@ -332,21 +331,16 @@ set(PLATFORM_UI_RESOURCES_RC "${GENERATED_DIR}/platform_ui_resources.rc")
 # loader cannot read its own resource directory once its headers are hidden. Generating it here keeps one
 # source of truth: the PNGs above.
 file(READ "${ANOMALY_PLATFORM_LOGO_PATH}" ANOMALY_PLATFORM_LOGO_HEX HEX)
-file(READ "${ANOMALY_ESC_MENU_LOGO_PATH}" ANOMALY_ESC_MENU_LOGO_HEX HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1,"
     ANOMALY_PLATFORM_LOGO_BYTES "${ANOMALY_PLATFORM_LOGO_HEX}")
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1,"
-    ANOMALY_ESC_MENU_LOGO_BYTES "${ANOMALY_ESC_MENU_LOGO_HEX}")
 string(LENGTH "${ANOMALY_PLATFORM_LOGO_HEX}" ANOMALY_PLATFORM_LOGO_HEX_LENGTH)
-string(LENGTH "${ANOMALY_ESC_MENU_LOGO_HEX}" ANOMALY_ESC_MENU_LOGO_HEX_LENGTH)
 math(EXPR ANOMALY_PLATFORM_LOGO_COUNT "${ANOMALY_PLATFORM_LOGO_HEX_LENGTH} / 2")
-math(EXPR ANOMALY_ESC_MENU_LOGO_COUNT "${ANOMALY_ESC_MENU_LOGO_HEX_LENGTH} / 2")
 file(MAKE_DIRECTORY "${GENERATED_DIR}/anomaly")
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/embedded_artwork.hpp.in"
     "${GENERATED_DIR}/anomaly/embedded_artwork.hpp" @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${ANOMALY_PLATFORM_LOGO_PATH}" "${ANOMALY_ESC_MENU_LOGO_PATH}")
+    "${ANOMALY_PLATFORM_LOGO_PATH}")
 set(LAUNCHER_RESOURCES_RC "${GENERATED_DIR}/AnomalyLauncher.rc")
 
 file(MAKE_DIRECTORY "${GENERATED_DIR}")

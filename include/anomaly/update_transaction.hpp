@@ -35,7 +35,6 @@ struct UpdateTransactionResult {
 struct UpdateTransactionOptions {
     std::filesystem::path runtime_root;
     std::filesystem::path plugin_directory{L"plugins"};
-    std::filesystem::path managed_profile_directory{L"state/profiles/managed"};
     std::filesystem::path staging_directory{L"state/update-staging"};
     std::filesystem::path rollback_directory{L"state/update-rollback"};
     std::filesystem::path journal_file{L"state/update-transaction.json"};
@@ -50,11 +49,7 @@ public:
     [[nodiscard]] UpdateTransactionResult InstallPlugin(
         const RepositoryArtifact& artifact,
         const std::filesystem::path& downloaded_bundle);
-    [[nodiscard]] UpdateTransactionResult InstallNteProfile(
-        const RepositoryArtifact& artifact,
-        const std::filesystem::path& downloaded_profile_json);
     [[nodiscard]] UpdateTransactionResult RollbackPlugin(std::string_view plugin_id);
-    [[nodiscard]] UpdateTransactionResult RollbackNteProfile(std::string_view game_id);
 
 private:
     UpdateTransactionOptions options_;

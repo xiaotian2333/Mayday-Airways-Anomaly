@@ -217,7 +217,7 @@ void EmbeddedPerformanceProbe::Publish(
         "platform_ui_refresh_catalog", "platform_ui_runtime_plugins",
         "platform_ui_build_snapshot", "platform_ui_repository_snapshot",
         "platform_ui_service_graph_snapshot", "platform_ui_adapter_services_snapshot",
-        "platform_ui_nte_compatibility_snapshot", "platform_ui_model_publish",
+        "platform_ui_model_publish",
         "platform_ui_settings_refresh", "platform_ui_refresh_total",
         "platform_ui_frame_setup", "platform_ui_management_shell", "platform_ui_popups",
         "platform_ui_window_persist"};
@@ -958,7 +958,6 @@ void RunEmbeddedPlatform(
             EmbeddedPerformanceStage::PlatformUiRepositorySnapshot,
             EmbeddedPerformanceStage::PlatformUiServiceGraphSnapshot,
             EmbeddedPerformanceStage::PlatformUiAdapterServicesSnapshot,
-            EmbeddedPerformanceStage::PlatformUiNteCompatibilitySnapshot,
             EmbeddedPerformanceStage::PlatformUiModelPublish,
             EmbeddedPerformanceStage::PlatformUiSettingsRefresh,
             EmbeddedPerformanceStage::PlatformUiRefreshTotal,

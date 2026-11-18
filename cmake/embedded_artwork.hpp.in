@@ -11,7 +11,5 @@ namespace anomaly::artwork {
 // mapped, and reading it costs a pointer and a copy instead of a file open.
 inline constexpr std::array<std::uint8_t, @ANOMALY_PLATFORM_LOGO_COUNT@> kPlatformLogo{
     @ANOMALY_PLATFORM_LOGO_BYTES@};
-inline constexpr std::array<std::uint8_t, @ANOMALY_ESC_MENU_LOGO_COUNT@> kEscMenuLogo{
-    @ANOMALY_ESC_MENU_LOGO_BYTES@};
 
 }  // namespace anomaly::artwork

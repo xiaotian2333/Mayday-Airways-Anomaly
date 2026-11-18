@@ -4,7 +4,6 @@
 #include "anomaly/plugin_dependency_resolver.hpp"
 #include "anomaly/plugin_enablement.hpp"
 #include "anomaly/repository_coordinator.hpp"
-#include "anomaly/symbol_resolver.hpp"
 #include "plugin_manager.hpp"
 
 #include <array>
@@ -23,7 +22,6 @@ namespace anomaly {
 // These values are stable route keys. Display labels belong to the renderer.
 enum class PlatformUiRoute : std::uint8_t {
     Plugins,
-    NteCompatibility,
     Diagnostics,
     Settings,
 };
@@ -127,37 +125,8 @@ struct PlatformDiagnosticsSummary {
     std::vector<std::string> recent_faults;
 };
 
-enum class NteCompatibilityLevel : std::uint8_t {
-    Unknown,
-    CoreOnly,
-    Partial,
-    Supported,
-};
-
-struct NteFeatureSnapshot {
-    std::string id;
-    bool available{};
-    bool validated{};
-    std::string reason;
-};
-
 using PluginDisplayNameMap = std::map<std::string, std::string, std::less<>>;
 using PluginDescriptionMap = std::map<std::string, std::string, std::less<>>;
-
-struct NteCompatibilitySnapshot {
-    std::string game_id;
-    std::string build_id;
-    std::string profile_source;
-    std::string profile_hash;
-    NteCompatibilityLevel level{NteCompatibilityLevel::Unknown};
-    std::string reason;
-    std::vector<NteFeatureSnapshot> features;
-    std::vector<AvailableServiceVersion> services;
-
-    // Keeps Supported tied to the resolved, required feature set.
-    void NormalizeLevel() noexcept;
-    [[nodiscard]] const NteFeatureSnapshot* FindFeature(std::string_view id) const noexcept;
-};
 
 enum class PlatformUiIntentKind : std::uint8_t {
     PlanPluginMutation,
@@ -319,7 +288,6 @@ struct PlatformUiSnapshot final {
     std::uint64_t revision{};
     PlatformRuntimeSummary runtime_summary;
     std::vector<InstalledPluginView> installed_plugins;
-    NteCompatibilitySnapshot nte_compatibility;
     PlatformDiagnosticsSummary diagnostics;
     RepositoryCoordinatorSnapshot repository;
     std::vector<PlatformUiAffectedSetPreflight> operation_plans;
@@ -409,12 +377,6 @@ void ReconcileUiStateSelection(
     const std::map<std::string, PluginEnablementDecision, std::less<>>& enablement,
     const PluginDisplayNameMap& display_names,
     const PluginDescriptionMap& descriptions);
-
-[[nodiscard]] NteCompatibilitySnapshot BuildNteCompatibilitySnapshot(
-    std::optional<BuildFingerprint> fingerprint,
-    std::optional<BuildProfile> profile,
-    std::optional<ProfileResolutionSnapshot> resolution,
-    std::vector<AvailableServiceVersion> services = {});
 
 [[nodiscard]] PlatformUiAffectedSetPreflight PreflightPluginMutation(
     const PlatformUiSnapshot& snapshot, const PlatformUiIntent& intent);
