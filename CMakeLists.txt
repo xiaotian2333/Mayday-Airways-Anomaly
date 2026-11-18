@@ -783,7 +783,7 @@ add_library(anomaly_repository_network STATIC src/repository/repository_network.
 target_include_directories(anomaly_repository_network PUBLIC include)
 target_compile_definitions(
     anomaly_repository_network PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_repository_network PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_repository_network PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_repository_network PUBLIC winhttp Shlwapi)
 
 add_library(anomaly_repository_coordinator STATIC

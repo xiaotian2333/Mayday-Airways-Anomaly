@@ -891,7 +891,7 @@ AnomalyStatusV1 IpcRegistry::Publish(
     // 不投递并返回原错误，避免事件只送达部分订阅者。
     std::vector<std::shared_ptr<Impl::QueueReservation>> reservations;
     reservations.reserve(subscribers.size());
-    for (const auto& subscriber : subscribers) {
+    for (std::size_t index = 0; index < subscribers.size(); ++index) {
         auto reservation = impl_->ReserveQueue(endpoint);
         if (!reservation) {
             return Status(ANOMALY_STATUS_V1_UNAVAILABLE,

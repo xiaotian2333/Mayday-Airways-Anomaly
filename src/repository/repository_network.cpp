@@ -136,7 +136,7 @@ RepositoryNetworkResult DownloadHttps(
     // 显式固定重定向策略为「禁止 HTTPS 降级到 HTTP」：无签名的 plugin-list 渠道
     // 不得被降级替换成明文来源；HTTPS→HTTPS 跨主机重定向由索引哈希校验兜底。
     // WinHTTP 默认值与此一致，这里显式设置以避免依赖默认行为。
-    const DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+    DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
     if (response.get() == nullptr || !WinHttpSetOption(response.get(),
             WINHTTP_OPTION_REDIRECT_POLICY, &redirect_policy, sizeof(redirect_policy)) ||
         !WinHttpSendRequest(response.get(),

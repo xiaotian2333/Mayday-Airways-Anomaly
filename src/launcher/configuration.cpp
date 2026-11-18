@@ -47,7 +47,7 @@ anomaly::PlatformUiColor ReadHexColor(const nlohmann::json& object, const char* 
     if (value.size() == 7 && value.front() == '#') value.erase(value.begin());
     if (value.size() != 6) return fallback;
     unsigned red{}, green{}, blue{};
-    if (std::sscanf(value.c_str(), "%2x%2x%2x", &red, &green, &blue) != 3) return fallback;
+    if (std::sscanf_s(value.c_str(), "%2x%2x%2x", &red, &green, &blue) != 3) return fallback;
     return {red / 255.0f, green / 255.0f, blue / 255.0f, 1.0f};
 }
 
