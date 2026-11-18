@@ -11,7 +11,8 @@ function(anomaly_add_launcher_archive)
     set(ZLIB_BUILD_STATIC ON)
     set(ZLIB_INSTALL OFF)
     FetchContent_Declare(anomaly_zlib
-        URL https://zlib.net/zlib-1.4.tar.gz
+        URL https://github.com/madler/zlib/releases/download/v1.4/zlib-1.4.tar.gz
+            https://zlib.net/zlib-1.4.tar.gz
         URL_HASH SHA256=02dd159783677a749c04adbdd02b55b8a2bcc7e054f51b76b549199a916ad584
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         SOURCE_SUBDIR anomaly-no-cmake)
