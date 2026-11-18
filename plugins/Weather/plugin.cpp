@@ -428,6 +428,10 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
             static_cast<int>(draft_severity * 1000.0f + 0.5f),
             std::memory_order_relaxed);
         MarkSettingsDirty();
+        // 锁定中拖动强度立即重申，无需再点种类按钮。
+        if (state_ok && state.override_active != 0) {
+            ApplyWeatherOverride(true);
+        }
     }
     // 种类按钮 3 + 3 两行；点击即选中，若锁定中立即重新应用。
     for (int index = 0; index < kWeatherKindCount; ++index) {
