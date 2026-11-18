@@ -1286,6 +1286,35 @@ std::string BuildSnapshot() {
          {"set_active", offsetof(AnomalyMaydayFreecamServiceV1, set_active)},
          {"get_state", offsetof(AnomalyMaydayFreecamServiceV1, get_state)},
          {"set_input", offsetof(AnomalyMaydayFreecamServiceV1, set_input)}},
+        false);
+    AppendStruct(
+        output,
+        "AnomalyMaydayWeatherStateV1",
+        sizeof(AnomalyMaydayWeatherStateV1),
+        alignof(AnomalyMaydayWeatherStateV1),
+        {{"struct_size", offsetof(AnomalyMaydayWeatherStateV1, struct_size)},
+         {"hours", offsetof(AnomalyMaydayWeatherStateV1, hours)},
+         {"rate", offsetof(AnomalyMaydayWeatherStateV1, rate)},
+         {"time_locked", offsetof(AnomalyMaydayWeatherStateV1, time_locked)},
+         {"kind_value", offsetof(AnomalyMaydayWeatherStateV1, kind_value)},
+         {"severity", offsetof(AnomalyMaydayWeatherStateV1, severity)},
+         {"override_active", offsetof(AnomalyMaydayWeatherStateV1, override_active)},
+         {"override_kind_value", offsetof(AnomalyMaydayWeatherStateV1, override_kind_value)},
+         {"override_severity", offsetof(AnomalyMaydayWeatherStateV1, override_severity)}},
+        false);
+    AppendStruct(
+        output,
+        "AnomalyMaydayWeatherServiceV1",
+        sizeof(AnomalyMaydayWeatherServiceV1),
+        alignof(AnomalyMaydayWeatherServiceV1),
+        {{"struct_size", offsetof(AnomalyMaydayWeatherServiceV1, struct_size)},
+         {"service_version", offsetof(AnomalyMaydayWeatherServiceV1, service_version)},
+         {"user", offsetof(AnomalyMaydayWeatherServiceV1, user)},
+         {"get_state", offsetof(AnomalyMaydayWeatherServiceV1, get_state)},
+         {"set_time", offsetof(AnomalyMaydayWeatherServiceV1, set_time)},
+         {"set_time_locked", offsetof(AnomalyMaydayWeatherServiceV1, set_time_locked)},
+         {"set_weather_override", offsetof(AnomalyMaydayWeatherServiceV1, set_weather_override)},
+         {"get_kind_value", offsetof(AnomalyMaydayWeatherServiceV1, get_kind_value)}},
         true);
     output.append("  },\n");
 
@@ -1342,7 +1371,9 @@ std::string BuildSnapshot() {
     AppendService(output, ANOMALY_MAYDAY_MONEY_SERVICE_V1_ID,
         ANOMALY_MAYDAY_MONEY_SERVICE_V1_VERSION, "AnomalyMaydayMoneyServiceV1", false);
     AppendService(output, ANOMALY_MAYDAY_FREECAM_SERVICE_V1_ID,
-        ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION, "AnomalyMaydayFreecamServiceV1", true);
+        ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION, "AnomalyMaydayFreecamServiceV1", false);
+    AppendService(output, ANOMALY_MAYDAY_WEATHER_SERVICE_V1_ID,
+        ANOMALY_MAYDAY_WEATHER_SERVICE_V1_VERSION, "AnomalyMaydayWeatherServiceV1", true);
     output.append("  ]\n");
     output.append("}\n");
     return output;

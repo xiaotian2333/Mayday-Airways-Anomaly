@@ -1097,6 +1097,35 @@
         "get_state": 24,
         "set_input": 32
       }
+    },
+    "AnomalyMaydayWeatherStateV1": {
+      "size": 36,
+      "alignment": 4,
+      "offsets": {
+        "struct_size": 0,
+        "hours": 4,
+        "rate": 8,
+        "time_locked": 12,
+        "kind_value": 16,
+        "severity": 20,
+        "override_active": 24,
+        "override_kind_value": 28,
+        "override_severity": 32
+      }
+    },
+    "AnomalyMaydayWeatherServiceV1": {
+      "size": 56,
+      "alignment": 8,
+      "offsets": {
+        "struct_size": 0,
+        "service_version": 4,
+        "user": 8,
+        "get_state": 16,
+        "set_time": 24,
+        "set_time_locked": 32,
+        "set_weather_override": 40,
+        "get_kind_value": 48
+      }
     }
   },
   "services": [
@@ -1126,6 +1155,7 @@
     { "id": "anomaly.localization", "version": 1, "table": "AnomalyLocalizationServiceV1" },
     { "id": "anomaly.mods", "version": 1, "table": "AnomalyModsServiceV1" },
     { "id": "mayday.money", "version": 1, "table": "AnomalyMaydayMoneyServiceV1" },
-    { "id": "mayday.freecam", "version": 1, "table": "AnomalyMaydayFreecamServiceV1" }
+    { "id": "mayday.freecam", "version": 1, "table": "AnomalyMaydayFreecamServiceV1" },
+    { "id": "mayday.weather", "version": 1, "table": "AnomalyMaydayWeatherServiceV1" }
   ]
 }

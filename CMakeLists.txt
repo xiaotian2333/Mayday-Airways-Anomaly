@@ -1283,6 +1283,15 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Freecam")
     target_compile_options(anomaly_builtin_freecam PRIVATE /utf-8)
 
+    # Mayday 内建插件：气象调节。时间/天气调节与锁定，il2cpp 细节由宿主
+    # mayday.weather 服务封装。
+    anomaly_add_plugin(anomaly_builtin_weather
+        SOURCES plugins/weather/plugin.cpp
+        MANIFEST plugins/weather/manifest.json
+        PACKAGE_NAME Weather
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Weather")
+    target_compile_options(anomaly_builtin_weather PRIVATE /utf-8)
+
     if(ANOMALY_BUILD_TEST_FIXTURES)
         add_executable(anomaly_ui_overlay_fixture
             apps/test_host/ui_overlay_fixture.cpp src/plugin/plugin_manager.cpp)
@@ -1301,7 +1310,8 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
     # reaches their targets is built from the targets that actually exist.
     set(ANOMALY_BUILTIN_PLUGIN_TARGETS
         anomaly_builtin_money
-        anomaly_builtin_freecam)
+        anomaly_builtin_freecam
+        anomaly_builtin_weather)
 endif()
 
 if(TARGET anomaly-platform-preview)

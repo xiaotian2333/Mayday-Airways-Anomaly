@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "messages": {
+    "window.title": "气象调节",
+    "plugin.description": "调节游戏内时间与天气，支持锁定时间与天气。",
+    "status.unavailable": "游戏尚未就绪，进入一局后可调节时间与天气。",
+    "status.attach_failed": "无法附加到游戏运行时。",
+    "status.not_in_flight": "请先进入一局，再调节时间与天气。",
+    "status.failed": "气象调节操作失败。",
+    "state.time": "时间：{0}",
+    "state.kind": "天气：{0}",
+    "state.severity": "强度：{0}%",
+    "state.rate": "时间流速：{0}x",
+    "state.unknown": "未知",
+    "time.slider": "时刻（小时）",
+    "time.set": "设为该时刻",
+    "time.lock": "锁定时间（冻结时钟）",
+    "weather.lock": "锁定天气（覆盖自然天气）",
+    "weather.severity": "天气强度",
+    "weather.calm": "平静",
+    "weather.cloudy": "多云",
+    "weather.rain": "降雨",
+    "weather.storm": "风暴",
+    "weather.fog": "浓雾",
+    "weather.snow": "降雪",
+    "help.controls": "锁定时间会冻结游戏时钟；锁定天气使用游戏自带的覆盖机制，持续生效直到解除。"
+  }
+}
