@@ -10,11 +10,6 @@ AnomalyRemoteBootstrapBegin:
     sub rsp, 28h
     mov rbx, rcx
 
-    mov dword ptr [rbx + 72], 0
-    mov dword ptr [rbx + 76], 0
-    mov dword ptr [rbx + 80], 0
-    mov dword ptr [rbx + 84], 0
-
     ; One owner only. Several threads parked in stubs may be redirected at the same context, so this
     ; code can be entered more than once at a time; a second run would register the unwind tables twice and
     ; start the runtime twice. The claim is taken before anything else happens.
@@ -26,6 +21,13 @@ AnomalyRemoteBootstrapBegin:
     jmp bootstrap_return
 
 bootstrap_claim:
+    ; 状态字段只在 claim 成功后清零：若在 claim 之前清零，多候选线程交付时
+    ; 候补线程会抹掉胜者已写入的错误码/完成戳，交付轮询因此误报超时。
+    mov dword ptr [rbx + 72], 0
+    mov dword ptr [rbx + 76], 0
+    mov dword ptr [rbx + 80], 0
+    mov dword ptr [rbx + 84], 0
+
     mov edx, dword ptr [rbx + 16]
     test edx, edx
     jz bootstrap_tls

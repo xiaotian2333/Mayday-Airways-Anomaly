@@ -768,7 +768,15 @@ public:
         const auto selected = ResolveAttachRuntime();
         if (!selected.Ok()) {
             PublishRuntimeFailure(selected);
-            return {};
+            // 必须返回真实失败：默认构造的 ManualMapResult 是 error=None
+            // （Ok()==true），调用方会把这次未发生的注入当成成功处理。
+            // DependencyFailure 对应运行时根目录/核心文件解析失败。
+            anomaly::launcher::ManualMapResult failure;
+            failure.error = anomaly::launcher::ManualMapError::DependencyFailure;
+            failure.message = selected.message.empty()
+                ? "runtime core is unavailable"
+                : selected.message;
+            return failure;
         }
         anomaly::launcher::ManualMapOptions options;
         options.process_id = process_id;

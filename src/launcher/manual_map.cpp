@@ -603,6 +603,11 @@ FastTargetCaptureResult CaptureTargetByFastPolling(
     std::vector<DWORD> process_ids;
     process_ids.reserve(4);
     std::set<DWORD> rejected;
+    // 忙轮询退避：进程快照查询本身已是毫秒级，多数迭代 SwitchToThread 保持
+    // 尽快捕获；每 32 次让出一次 1ms 休眠，避免高优先级下最长十分钟的空转
+    // 占满一整核（对捕获延迟的影响以毫秒计）。
+    static constexpr int kBackoffPolls = 32;
+    int polls{};
 
     while (!stop.stop_requested() &&
         std::chrono::steady_clock::now() < deadline) {
@@ -651,7 +656,11 @@ FastTargetCaptureResult CaptureTargetByFastPolling(
             result.error = ERROR_SUCCESS;
             return result;
         }
-        static_cast<void>(SwitchToThread());
+        if (++polls % kBackoffPolls == 0) {
+            Sleep(1);
+        } else {
+            static_cast<void>(SwitchToThread());
+        }
     }
     if (stop.stop_requested()) result.error = ERROR_CANCELLED;
     return result;

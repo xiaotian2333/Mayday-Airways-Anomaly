@@ -587,7 +587,9 @@ ProxyInstallationStatus InstallProxyRuntime(
                             FirstLockedFile(runtime_target).string(),
                     move_error));
         }
-        runtime_backed_up = true;
+        // 如实记录备份状态：in-place 发布路径没有移动过 runtime_target，
+        // 不存在备份；此时 rollback_runtime 对 false 不做任何回滚动作。
+        runtime_backed_up = move_error == ERROR_SUCCESS && !runtime_published_in_place;
     }
     const bool publish_by_move = replace_runtime && !runtime_published_in_place;
     const DWORD publish_runtime_error = publish_by_move

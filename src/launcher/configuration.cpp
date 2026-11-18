@@ -194,15 +194,20 @@ void ReadSteamLibraryPaths(
     if (!input) return;
     std::string line;
     while (std::getline(input, line)) {
-        const auto key = line.find("\"path\"");
-        if (key == std::string::npos) continue;
-        const auto first = line.find('"', key + 6);
-        if (first == std::string::npos) continue;
-        const auto second = line.find('"', first + 1);
-        if (second == std::string::npos) continue;
-        const std::string path = line.substr(first + 1, second - first - 1);
-        if (!path.empty()) {
-            roots.push_back(std::filesystem::path(Utf8Wide(path)) / L"steamapps" / L"common");
+        try {
+            const auto key = line.find("\"path\"");
+            if (key == std::string::npos) continue;
+            const auto first = line.find('"', key + 6);
+            if (first == std::string::npos) continue;
+            const auto second = line.find('"', first + 1);
+            if (second == std::string::npos) continue;
+            const std::string path = line.substr(first + 1, second - first - 1);
+            if (!path.empty()) {
+                roots.push_back(
+                    std::filesystem::path(Utf8Wide(path)) / L"steamapps" / L"common");
+            }
+        } catch (...) {
+            // 遇到坏行（如非 UTF-8 字节）只跳过该行，不中止整个库目录发现。
         }
     }
 }

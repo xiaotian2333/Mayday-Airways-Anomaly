@@ -20,10 +20,6 @@ AnomalyRemoteLoadLibraryBegin:
     sub rsp, 20h
     mov rbx, rcx
 
-    mov qword ptr [rbx + 24], 0
-    mov dword ptr [rbx + 32], 0
-    mov dword ptr [rbx + 40], 0
-
     ; One owner only: an APC is queued to every thread and several threads may be redirected, and the
     ; caller waits for the stamp this path sets.
     mov eax, 1
@@ -33,6 +29,12 @@ AnomalyRemoteLoadLibraryBegin:
     jmp load_library_done
 
 load_library_call:
+    ; 状态字段只在 claim 成功后清零：与 bootstrap 相同的原因——claim 之前
+    ; 清零会让候补线程抹掉胜者已写入的完成戳（+32）与错误码（+40）。
+    mov qword ptr [rbx + 24], 0
+    mov dword ptr [rbx + 32], 0
+    mov dword ptr [rbx + 40], 0
+
     mov rcx, qword ptr [rbx + 0]
     call qword ptr [rbx + 8]
     mov qword ptr [rbx + 24], rax
