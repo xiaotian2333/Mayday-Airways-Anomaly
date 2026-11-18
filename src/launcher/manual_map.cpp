@@ -44,19 +44,9 @@ constexpr DWORD kAttachProcessAccess =
     PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ |
     PROCESS_VM_WRITE | PROCESS_CREATE_THREAD;
 
-// The old official-launcher hook signalled this immediately before asking the launcher to start
-// the game. The Mayday path never installs that hook; the constant stays until the hook launch
-// options are removed.
-constexpr wchar_t kLauncherArmedEventName[] = L"Local\\Anomaly.NteGameHook.Armed";
-
-// How long capture waits for that signal before falling back to the session's own timing. It only has
-// to cover the hook's startup delay plus injection, so it is far shorter than the discovery budget.
-constexpr DWORD kHookArmedTimeoutMilliseconds = 90000;
-
 // How long a freshly created process is given to publish its loader list. This is a one-time startup
 // cost rather than a user-paced wait: the image, ntdll and kernel32 are in the list within
 // milliseconds of creation, so a process still without them is one that never started.
-constexpr DWORD kLoaderReadyTimeoutMilliseconds = 15000;
 
 // How long a dependency load is given in the target. A loader still inside it after this long is stuck on
 // the loader lock rather than slow, and the thread it is running on is not this process' to cancel.
@@ -479,95 +469,6 @@ bool PathIsWithin(
     } catch (...) {
         return false;
     }
-}
-
-std::set<DWORD> SnapshotLauncherProcessIds(
-    const std::filesystem::path& launcher_directory, DWORD& error) noexcept {
-    constexpr std::array<std::wstring_view, 12> launcher_names{
-        L"NTELauncher.exe", L"NTEGame.exe", L"NTEBrowser.exe", L"NTEWebBooster.exe",
-        L"NTEUpdate.exe", L"NTEErrRep.exe",
-        L"NTEGlobalLauncher.exe", L"NTEGlobalGame.exe", L"NTEGlobalBrowser.exe",
-        L"NTEGlobalWebBooster.exe", L"NTEGlobalUpdate.exe", L"NTEGlobalErrRep.exe"};
-    std::set<DWORD> result;
-    Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
-    if (!snapshot) {
-        error = GetLastError();
-        return result;
-    }
-    PROCESSENTRY32W entry{.dwSize = sizeof(entry)};
-    if (Process32FirstW(snapshot.Get(), &entry) == FALSE) {
-        error = GetLastError();
-        if (error == ERROR_NO_MORE_FILES) error = ERROR_SUCCESS;
-        return result;
-    }
-    do {
-        bool known_launcher{};
-        for (const auto name : launcher_names) {
-            if (_wcsicmp(entry.szExeFile, std::wstring(name).c_str()) == 0) {
-                known_launcher = true;
-                break;
-            }
-        }
-        if (known_launcher && entry.th32ProcessID != GetCurrentProcessId()) {
-            DWORD open_error{};
-            Handle process = OpenProcessWithAccess(
-                entry.th32ProcessID, PROCESS_QUERY_LIMITED_INFORMATION, open_error);
-            if (process) {
-                DWORD path_error{};
-                const auto path = ProcessPath(process.Get(), path_error);
-                if (path_error == ERROR_SUCCESS &&
-                    PathIsWithin(path.parent_path(), launcher_directory)) {
-                    result.insert(entry.th32ProcessID);
-                }
-            }
-        }
-        entry.dwSize = sizeof(entry);
-    } while (Process32NextW(snapshot.Get(), &entry) != FALSE);
-    error = GetLastError();
-    if (error == ERROR_NO_MORE_FILES) error = ERROR_SUCCESS;
-    return result;
-}
-
-// Ends one launcher process if it can be ended, and leaves it alone if it cannot.
-//
-// The official client shields its browser helpers: OpenProcess hands back a handle for a pid that the
-// process exists under, with PROCESS_TERMINATE silently stripped, and TerminateProcess then answers
-// ERROR_ACCESS_DENIED while the process keeps running. That refusal is permanent -- the player cannot
-// close those helpers either -- so it is a property of the client, not a fault of this sweep, and
-// failing the launch over it costs the whole action while leaving them up costs nothing.
-//
-// A process that ended while the sweep walked the snapshot is in the same position for the opposite
-// reason: OpenProcess answers ERROR_INVALID_PARAMETER for a pid that no longer resolves, and a launcher
-// that is already gone has met the only thing the sweep was after.
-void StopLauncherProcess(const DWORD process_id) noexcept {
-    DWORD open_error{};
-    Handle process = OpenProcessWithAccess(
-        process_id, PROCESS_TERMINATE | SYNCHRONIZE, open_error);
-    if (!process) return;
-    if (TerminateProcess(process.Get(), ERROR_PROCESS_ABORTED) == FALSE &&
-        WaitForSingleObject(process.Get(), 0) != WAIT_OBJECT_0) {
-        return;
-    }
-    // A process that was terminated is signalled; the wait only gives it time to leave before the
-    // launcher starts a new one. A helper that outlasts the budget keeps its pid, which nothing here reads.
-    static_cast<void>(WaitForSingleObject(process.Get(), 5000));
-}
-
-bool TerminateExistingLauncherProcesses(
-    const std::filesystem::path& launcher_directory, DWORD& error) noexcept {
-    DWORD snapshot_error{};
-    const auto process_ids = SnapshotLauncherProcessIds(launcher_directory, snapshot_error);
-    if (snapshot_error != ERROR_SUCCESS) {
-        error = snapshot_error;
-        return false;
-    }
-    // Best effort, deliberately: what survives the sweep is what the client protects, and the launch
-    // below does not depend on it. A surviving launcher window is handed the session by the single
-    // instance logic of the launcher that starts next, and the capture records the target processes that
-    // exist after this call, so a stale helper can never be mistaken for the game.
-    for (const DWORD process_id : process_ids) StopLauncherProcess(process_id);
-    error = ERROR_SUCCESS;
-    return true;
 }
 
 DWORD NtStatusToWin32(NTSTATUS status) noexcept {
@@ -2867,7 +2768,7 @@ ManualMapLaunchResult LaunchAndManualMapRuntimeCore(
             options.manual_map.core_path.empty()) {
             result.mapping = Failure(
                 ManualMapError::ProcessLaunchFailure, ERROR_INVALID_PARAMETER,
-                "launcher capture options are incomplete");
+                "launch options are incomplete");
             return result;
         }
 
@@ -2881,16 +2782,7 @@ ManualMapLaunchResult LaunchAndManualMapRuntimeCore(
             command_line.append(options.launcher_arguments);
         }
 
-        DWORD launcher_cleanup_error{};
-        if (!TerminateExistingLauncherProcesses(
-                launcher.parent_path(), launcher_cleanup_error)) {
-            result.mapping = Failure(
-                ManualMapError::ProcessControlFailure, launcher_cleanup_error,
-                "existing official launcher processes could not be enumerated before launch");
-            return result;
-        }
-
-        // Debugger and Job membership both alter launcher-visible process state.
+        // Debugger and Job membership both alter target-visible process state.
         DWORD snapshot_error{};
         const auto existing_targets = SnapshotProcessIds(
             options.target_executable_name, snapshot_error);
@@ -2905,22 +2797,6 @@ ManualMapLaunchResult LaunchAndManualMapRuntimeCore(
         const auto discovery_timeout = std::clamp<std::int64_t>(
             options.target_timeout.count(), 1, std::chrono::minutes(10).count() * 60'000LL);
 
-        // The hook signals this immediately before asking the launcher to start the game, so capture
-        // can be held until the seconds that matter. Polling is unavoidable -- the game process is
-        // created by ACE-BASE.sys, which offers nothing to subscribe to -- but a loop that starts with
-        // the launcher would spend most of its life watching a process that is still logging in.
-        // Nothing injects a hook while the launcher's auto-start is off, so nothing has to be waited
-        // for: capture polls from the start for the HTGame.exe the player starts from the launcher.
-        Handle armed;
-        if (!options.hook_path.empty()) {
-            armed.Reset(CreateEventW(nullptr, TRUE, FALSE, kLauncherArmedEventName));
-            if (!armed) {
-                result.mapping = Failure(ManualMapError::ProcessControlFailure, GetLastError(),
-                    "the launcher hook handshake could not be created");
-                return result;
-            }
-        }
-
         STARTUPINFOW startup{.cb = sizeof(startup)};
         PROCESS_INFORMATION created{};
         constexpr DWORD incompatible_flags =
@@ -2933,51 +2809,16 @@ ManualMapLaunchResult LaunchAndManualMapRuntimeCore(
             const DWORD launch_error = GetLastError();
             result.mapping = Failure(
                 ManualMapError::ProcessLaunchFailure, launch_error,
-                "official launcher could not be started for target capture");
+                "game executable could not be started for target capture");
             return result;
         }
 
         Handle launcher_process(created.hProcess);
         Handle launcher_thread(created.hThread);
 
-        // The hook is injected before capture begins, because it is what puts the launcher into a
-        // state where the game can start at all and what reports that the moment has arrived.
-        if (!options.hook_path.empty()) {
-            // Injection resolves LoadLibraryW through the launcher's own module list, which does not
-            // exist the instant CreateProcessW returns. Asking too early reports ERROR_NOT_READY and
-            // leaves the launcher running with nothing in it.
-            const auto loader_deadline = std::chrono::steady_clock::now() +
-                std::chrono::milliseconds(kLoaderReadyTimeoutMilliseconds);
-            DWORD hook_error{};
-            RemoteModuleMap launcher_modules;
-            std::string hook_failure;
-            if (!WaitForLoaderReady(launcher_process.Get(), launcher.filename().wstring(),
-                    loader_deadline, launcher_modules, hook_error, stop)) {
-                if (stop.stop_requested()) return cancelled();
-                result.mapping = Failure(ManualMapError::ProcessControlFailure,
-                    hook_error == ERROR_SUCCESS ? ERROR_TIMEOUT : hook_error,
-                    "the launcher's loader did not initialize before the hook timeout");
-                return result;
-            }
-            if (!RemoteLoadLibrary(
-                    launcher_process.Get(), options.hook_path, launcher_modules,
-                    ManualMapDelivery::RemoteThread, hook_failure)) {
-                result.mapping = Failure(ManualMapError::ProcessControlFailure,
-                    ERROR_DLL_INIT_FAILED, "the game hook could not be injected");
-                return result;
-            }
-        }
-
         // Capture belongs to the controller's worker. A separate jthread that
         // is immediately joined would hide the caller's shutdown request and
         // let a closed launcher attach to a later game process.
-        if (armed) {
-            const auto armed_deadline = std::chrono::steady_clock::now() +
-                std::chrono::milliseconds(kHookArmedTimeoutMilliseconds);
-            while (!stop.stop_requested() && std::chrono::steady_clock::now() < armed_deadline) {
-                if (WaitForSingleObject(armed.Get(), 25) != WAIT_TIMEOUT) break;
-            }
-        }
         if (stop.stop_requested()) return cancelled();
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds(discovery_timeout);
@@ -3000,7 +2841,7 @@ ManualMapLaunchResult LaunchAndManualMapRuntimeCore(
                 captured.error == ERROR_ACCESS_DENIED
                     ? "new target process was detected after mapping access was filtered"
                     : captured.error == ERROR_TIMEOUT
-                        ? "official launcher did not create a new target process before the timeout"
+                        ? "game executable did not create a new target process before the timeout"
                         : "low-latency target capture failed");
             return result;
         }
@@ -3073,7 +2914,7 @@ ManualMapLaunchResult LaunchAndManualMapRuntimeCore(
     } catch (...) {
         result.mapping = Failure(
             ManualMapError::ProcessLaunchFailure, ERROR_UNHANDLED_EXCEPTION,
-            "official launcher target capture raised an unexpected exception");
+            "launch target capture raised an unexpected exception");
         return result;
     }
 }

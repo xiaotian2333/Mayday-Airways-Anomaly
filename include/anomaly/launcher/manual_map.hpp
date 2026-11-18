@@ -84,13 +84,7 @@ struct ManualMapLaunchOptions final {
     std::filesystem::path launcher_path;
     std::wstring launcher_arguments;
     std::filesystem::path working_directory;
-    // Injected into the launcher so the session can be started without the user touching the launcher
-    // UI. It hides the launcher's own window from the inside and signals the armed event below
-    // immediately before asking the launcher to start the game. When empty, nothing is injected and
-    // capture polls from the moment the launcher is started, waiting for the player to start the game
-    // from the launcher's own window.
-    std::filesystem::path hook_path;
-    std::wstring target_executable_name{L"HTGame.exe"};
+    std::wstring target_executable_name{L"MaydayAirways.exe"};
     DWORD creation_flags{};
     std::chrono::milliseconds target_timeout{std::chrono::minutes(2)};
     std::chrono::milliseconds loader_timeout{std::chrono::minutes(2)};
@@ -108,7 +102,7 @@ struct ManualMapLaunchResult final {
 
 [[nodiscard]] AttachableProcess InspectAttachableProcess(DWORD process_id) noexcept;
 [[nodiscard]] std::vector<AttachableProcess> EnumerateAttachableProcesses(
-    std::wstring_view executable_name = L"HTGame.exe") noexcept;
+    std::wstring_view executable_name = L"MaydayAirways.exe") noexcept;
 // Closing the caller cancels discovery/loader waits before mapping starts.
 // Once mapping starts it must finish reporting its result; cancellation does
 // not interrupt remote bootstrap code or terminate the target.

@@ -161,9 +161,9 @@ Options Parse(const std::vector<std::wstring>& arguments) {
 }
 
 void ListAttachable() {
-    const auto processes = anomaly::launcher::EnumerateAttachableProcesses(L"HTGame.exe");
+    const auto processes = anomaly::launcher::EnumerateAttachableProcesses(L"MaydayAirways.exe");
     if (processes.empty()) {
-        std::printf("[i] no HTGame.exe process is running\n");
+        std::printf("[i] no MaydayAirways.exe process is running\n");
         return;
     }
     for (const auto& process : processes) {

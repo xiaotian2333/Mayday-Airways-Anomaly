@@ -26,11 +26,7 @@ bool IsCustomLauncherBackground(PlatformUiPalette palette,
 namespace {
 
 constexpr std::uint64_t kMaximumConfigurationBytes = 64U * 1024U;
-constexpr std::wstring_view kGameExecutableName = L"HTGame.exe";
-constexpr std::wstring_view kMainlandLauncherExecutableName = L"NTELauncher.exe";
-constexpr std::wstring_view kGlobalLauncherExecutableName = L"NTEGlobalLauncher.exe";
-constexpr std::wstring_view kLauncherUpdateConfigFile = L"Config\\Config.ini";
-constexpr std::wstring_view kLauncherUpdateSection = L"UPDATE_CONFIG";
+constexpr std::wstring_view kGameExecutableName = L"MaydayAirways.exe";
 
 // "#rrggbb" is how the theme files spell a colour, so the launcher stores its own colours the same
 // way: a value copied from the settings file drops straight into a theme layout.
@@ -55,11 +51,6 @@ anomaly::PlatformUiColor ReadHexColor(const nlohmann::json& object, const char* 
     return {red / 255.0f, green / 255.0f, blue / 255.0f, 1.0f};
 }
 
-std::wstring_view LauncherExecutableName(const NteClient client) noexcept {
-    return client == NteClient::Global
-        ? kGlobalLauncherExecutableName : kMainlandLauncherExecutableName;
-}
-
 class RegistryKey final {
 public:
     RegistryKey() = default;
@@ -80,7 +71,6 @@ private:
 
 struct SystemLocations final {
     std::vector<std::filesystem::path> roots;
-    std::vector<std::filesystem::path> launcher_executables;
 };
 
 std::wstring Fold(std::wstring value) {
@@ -185,105 +175,6 @@ std::optional<std::wstring> ReadRegistryString(
     return value.empty() ? std::nullopt : std::optional<std::wstring>(std::move(value));
 }
 
-std::filesystem::path ExecutableFromCommand(std::wstring value) {
-    if (value.empty()) return {};
-    if (value.front() == L'"') {
-        const std::size_t closing = value.find(L'"', 1);
-        return closing == std::wstring::npos
-            ? std::filesystem::path{} : std::filesystem::path(value.substr(1, closing - 1));
-    }
-    const std::size_t comma = value.find(L',');
-    if (comma != std::wstring::npos) value.resize(comma);
-    const std::size_t executable = Fold(value).find(L".exe");
-    if (executable != std::wstring::npos) value.resize(executable + 4);
-    return std::filesystem::path(value);
-}
-
-bool LooksLikeNte(const std::wstring_view value) {
-    const std::wstring folded = Fold(std::wstring(value));
-    return folded.find(L"neverness") != std::wstring::npos ||
-        folded == L"\u7570\u74b0" || folded == L"\u5f02\u73af" ||
-        folded.find(L"ntegloballauncher") != std::wstring::npos ||
-        folded.find(L"nte global launcher") != std::wstring::npos ||
-        folded.find(L"ntelauncher") != std::wstring::npos ||
-        folded.find(L"nte launcher") != std::wstring::npos;
-}
-
-void CollectAppPath(
-    SystemLocations& result, const HKEY hive, const REGSAM registry_view,
-    const NteClient client) {
-    RegistryKey key;
-    const std::wstring subkey =
-        L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" +
-        std::wstring(LauncherExecutableName(client));
-    if (RegOpenKeyExW(
-            hive, subkey.c_str(), 0, KEY_READ | registry_view, key.Put()) != ERROR_SUCCESS) {
-        return;
-    }
-    if (const auto executable = ReadRegistryString(key.Get(), nullptr)) {
-        result.launcher_executables.emplace_back(*executable);
-    }
-    if (const auto path = ReadRegistryString(key.Get(), L"Path")) {
-        result.roots.emplace_back(*path);
-    }
-}
-
-void CollectUninstallLocations(
-    SystemLocations& result, const HKEY hive, const REGSAM registry_view,
-    const NteClient client) {
-    RegistryKey uninstall;
-    if (RegOpenKeyExW(
-            hive, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall", 0,
-            KEY_READ | registry_view, uninstall.Put()) != ERROR_SUCCESS) {
-        return;
-    }
-    std::array<wchar_t, 512> name{};
-    for (DWORD index = 0;; ++index) {
-        DWORD length = static_cast<DWORD>(name.size());
-        const LSTATUS enumerated = RegEnumKeyExW(
-            uninstall.Get(), index, name.data(), &length, nullptr, nullptr, nullptr, nullptr);
-        if (enumerated == ERROR_NO_MORE_ITEMS) break;
-        if (enumerated != ERROR_SUCCESS) continue;
-        RegistryKey entry;
-        if (RegOpenKeyExW(
-                uninstall.Get(), std::wstring(name.data(), length).c_str(), 0,
-                KEY_READ | registry_view, entry.Put()) != ERROR_SUCCESS) {
-            continue;
-        }
-        const auto display_name = ReadRegistryString(entry.Get(), L"DisplayName");
-        const auto display_icon = ReadRegistryString(entry.Get(), L"DisplayIcon");
-        if ((!display_name || !LooksLikeNte(*display_name)) &&
-            (!display_icon || !LooksLikeNte(*display_icon))) {
-            continue;
-        }
-        const bool steam_install = std::wstring_view(name.data(), length).starts_with(L"Steam App ");
-        if (steam_install && client != NteClient::Global) continue;
-        if (display_icon && NameEquals(ExecutableFromCommand(*display_icon),
-                LauncherExecutableName(client == NteClient::Global
-                    ? NteClient::MainlandChina : NteClient::Global))) continue;
-        if (const auto location = ReadRegistryString(entry.Get(), L"InstallLocation")) {
-            result.roots.emplace_back(*location);
-            // Some Steam uninstall entries have a garbled installation basename.
-            // The registered title is another candidate, validated by HTGame.exe below.
-            if (steam_install && display_name &&
-                std::filesystem::path(*display_name).filename() == std::filesystem::path(*display_name)) {
-                result.roots.push_back(std::filesystem::path(*location).parent_path() / *display_name);
-            }
-        }
-        if (display_icon) {
-            const auto executable = ExecutableFromCommand(*display_icon);
-            if (NameEquals(executable, LauncherExecutableName(client))) {
-                result.launcher_executables.push_back(executable);
-            } else if (!executable.empty()) {
-                result.roots.push_back(executable.parent_path());
-            }
-        }
-        if (const auto uninstall_command = ReadRegistryString(entry.Get(), L"UninstallString")) {
-            const auto executable = ExecutableFromCommand(*uninstall_command);
-            if (!executable.empty()) result.roots.push_back(executable.parent_path());
-        }
-    }
-}
 
 std::optional<std::filesystem::path> EnvironmentPath(const wchar_t* name) {
     const DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
@@ -296,38 +187,59 @@ std::optional<std::filesystem::path> EnvironmentPath(const wchar_t* name) {
     return std::filesystem::path(std::move(value));
 }
 
-void AddNamedRoots(
-    std::vector<std::filesystem::path>& roots, const std::filesystem::path& parent) {
-    if (parent.empty()) return;
-    constexpr std::array<std::wstring_view, 6> names{
-        L"NevernessToEverness", L"Neverness to Everness", L"NTE",
-        L"Games\\NevernessToEverness", L"Games\\Neverness to Everness",
-        L"Hotta\\NevernessToEverness",
-    };
-    for (const auto name : names) roots.push_back(parent / name);
+void ReadSteamLibraryPaths(
+    const std::filesystem::path& library_file,
+    std::vector<std::filesystem::path>& roots) {
+    std::ifstream input(library_file);
+    if (!input) return;
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto key = line.find("\"path\"");
+        if (key == std::string::npos) continue;
+        const auto first = line.find('"', key + 6);
+        if (first == std::string::npos) continue;
+        const auto second = line.find('"', first + 1);
+        if (second == std::string::npos) continue;
+        const std::string path = line.substr(first + 1, second - first - 1);
+        if (!path.empty()) {
+            roots.push_back(std::filesystem::path(Utf8Wide(path)) / L"steamapps" / L"common");
+        }
+    }
 }
 
-SystemLocations CollectSystemLocations(const NteClient client) {
-    SystemLocations result;
-    for (const HKEY hive : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
-        CollectAppPath(result, hive, KEY_WOW64_64KEY, client);
-        CollectAppPath(result, hive, KEY_WOW64_32KEY, client);
-        CollectUninstallLocations(result, hive, KEY_WOW64_64KEY, client);
-        CollectUninstallLocations(result, hive, KEY_WOW64_32KEY, client);
+std::vector<std::filesystem::path> CollectSystemLocations() {
+    std::vector<std::filesystem::path> roots;
+    RegistryKey steam;
+    if (RegOpenKeyExW(
+            HKEY_CURRENT_USER, L"Software\\Valve\\Steam", 0, KEY_READ, steam.Put()) ==
+        ERROR_SUCCESS) {
+        if (const auto path = ReadRegistryString(steam.Get(), L"SteamPath")) {
+            const std::filesystem::path root(*path);
+            roots.push_back(root / L"steamapps" / L"common");
+            ReadSteamLibraryPaths(root / L"steamapps" / L"libraryfolders.vdf", roots);
+        }
     }
     for (const wchar_t* variable : {L"ProgramFiles", L"ProgramFiles(x86)", L"LOCALAPPDATA"}) {
-        if (const auto parent = EnvironmentPath(variable)) AddNamedRoots(result.roots, *parent);
+        if (const auto parent = EnvironmentPath(variable)) {
+            roots.push_back(*parent / L"Steam" / L"steamapps" / L"common");
+            roots.push_back(*parent / L"SteamLibrary" / L"steamapps" / L"common");
+            roots.push_back(*parent / L"Mayday Airways Demo");
+        }
     }
     const DWORD drives = GetLogicalDrives();
     for (unsigned index = 0; index < 26; ++index) {
         if ((drives & (1UL << index)) == 0) continue;
-        const std::filesystem::path root(
+        const std::filesystem::path drive(
             std::wstring{static_cast<wchar_t>(L'A' + index), L':', L'\\'});
-        if (GetDriveTypeW(root.c_str()) == DRIVE_FIXED) AddNamedRoots(result.roots, root);
+        if (GetDriveTypeW(drive.c_str()) != DRIVE_FIXED) continue;
+        roots.push_back(drive / L"SteamLibrary" / L"steamapps" / L"common");
+        roots.push_back(drive / L"Steam" / L"steamapps" / L"common");
+        roots.push_back(drive / L"Games" / L"SteamLibrary" / L"steamapps" / L"common");
+        roots.push_back(drive / L"Games" / L"Steam" / L"steamapps" / L"common");
+        roots.push_back(drive / L"Mayday Airways Demo");
     }
-    return result;
+    return roots;
 }
-
 std::wstring PathKey(const std::filesystem::path& path) {
     return Fold(path.lexically_normal().wstring());
 }
@@ -356,40 +268,13 @@ void AddAncestors(
 }
 
 std::optional<std::filesystem::path> FindGameDirectory(
-    const std::vector<std::filesystem::path>& roots,
-    const std::filesystem::path& excluded_directory) {
-    constexpr std::array<std::wstring_view, 9> candidates{
-        L"", L"HTGame\\Binaries\\Win64", L"Game\\HTGame\\Binaries\\Win64",
-        L"Games\\HTGame\\Binaries\\Win64", L"HT\\Binaries\\Win64",
-        L"Client\\WindowsNoEditor\\HT\\Binaries\\Win64",
-        L"NevernessToEverness\\HTGame\\Binaries\\Win64",
-        L"Neverness to Everness\\HTGame\\Binaries\\Win64",
-        L"NTE\\HTGame\\Binaries\\Win64",
-    };
+    const std::vector<std::filesystem::path>& roots) {
+    constexpr std::array<std::wstring_view, 4> candidates{
+        L"", L"Mayday Airways Demo", L"Mayday Airways", L"MaydayAirways"};
     for (const auto& root : roots) {
         for (const auto relative : candidates) {
             const auto directory = relative.empty() ? root : root / relative;
-            if (PathKey(directory) != PathKey(excluded_directory) && IsNteGameDirectory(directory))
-                return directory.lexically_normal();
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::filesystem::path> FindLauncherExecutable(
-    const std::vector<std::filesystem::path>& roots, const NteClient client) {
-    constexpr std::array<std::wstring_view, 7> parents{
-        L"", L"Launcher", L"NevernessToEverness", L"Neverness to Everness",
-        L"NTE", L"Games\\NevernessToEverness", L"Games\\Neverness to Everness",
-    };
-    for (const auto& root : roots) {
-        for (const auto parent : parents) {
-            const auto executable = parent.empty()
-                ? root / LauncherExecutableName(client)
-                : root / parent / LauncherExecutableName(client);
-            if (IsNteLauncherExecutable(executable, client)) {
-                return executable.lexically_normal();
-            }
+            if (IsMaydayGameDirectory(directory)) return directory.lexically_normal();
         }
     }
     return std::nullopt;
@@ -433,82 +318,77 @@ LauncherConfigurationLoadResult LoadLauncherConfiguration(
         if (schema_version == 1 && document.contains("proxy") &&
             document.at("proxy").is_object() && document.contains("attach") &&
             document.at("attach").is_object()) {
-            result.configuration.mainland_china.game_directory = Utf8Wide(
+            result.configuration.game.game_directory = Utf8Wide(
                 document.at("proxy").value("gameDirectory", std::string{}));
-            result.configuration.mainland_china.launcher_executable = Utf8Wide(
-                document.at("attach").value("launcherExecutable", std::string{}));
         } else if (schema_version == 2 && document.contains("clients") &&
                    document.at("clients").is_object()) {
             const auto& clients = document.at("clients");
-            const auto read_client = [&](const char* key, LauncherClientConfiguration& client) {
-                if (!clients.contains(key) || !clients.at(key).is_object()) return;
-                const auto& value = clients.at(key);
-                client.game_directory = Utf8Wide(
-                    value.value("gameDirectory", std::string{}));
-                client.launcher_executable = Utf8Wide(
-                    value.value("launcherExecutable", std::string{}));
+            const auto read_directory = [&](const char* key) -> std::filesystem::path {
+                if (!clients.contains(key) || !clients.at(key).is_object()) return {};
+                return Utf8Wide(clients.at(key).value("gameDirectory", std::string{}));
             };
-            read_client("mainlandChina", result.configuration.mainland_china);
-            read_client("global", result.configuration.global);
-            result.configuration.selected_client =
-                document.value("selectedClient", std::string{}) == "global"
-                    ? NteClient::Global : NteClient::MainlandChina;
-            // A configuration written before the launcher had a theme carries no name
-            // and keeps the default the struct declares.
-            if (document.contains("theme") && document.at("theme").is_string()) {
-                const std::string theme = document.at("theme").get<std::string>();
-                if (!theme.empty()) result.configuration.theme = theme;
-            }
-            if (document.contains("language") && document.at("language").is_string()) {
-                const std::string language = document.at("language").get<std::string>();
-                if (!language.empty()) result.configuration.language = language;
-            }
-            if (document.contains("view") && document.at("view").is_object()) {
-                const auto& view = document.at("view");
-                LauncherViewSettings& settings = result.configuration.view;
-                settings.mods_grid = view.value("modsGrid", settings.mods_grid);
-                settings.mods_by_folder = view.value("modsByFolder", settings.mods_by_folder);
-                settings.mods_pagination =
-                    view.value("modsPagination", settings.mods_pagination);
-                settings.mods_page_size = LauncherNearestPageSize(
-                    view.value("modsPageSize", settings.mods_page_size));
-                settings.browse_sort = view.value("browseSort", settings.browse_sort);
-                settings.browse_category =
-                    view.value("browseCategory", settings.browse_category);
-                settings.browse_hide_mature =
-                    view.value("browseHideMature", settings.browse_hide_mature);
-            }
-            if (document.contains("artwork") && document.at("artwork").is_object()) {
-                const auto& artwork = document.at("artwork");
-                LauncherThemeArtwork& target = result.configuration.artwork;
-                target.background = artwork.value("background", std::string{});
-                target.background_mode = std::clamp(
-                    artwork.value("backgroundMode", target.background_mode), -1, 3);
-                target.surface_opacity = std::clamp(
-                    artwork.value("surfaceOpacity", target.surface_opacity), -1.0f, 1.0f);
-            }
-            if (document.contains("update") && document.at("update").is_object()) {
-                const auto& update = document.at("update");
-                result.configuration.update.auto_check =
-                    update.value("autoCheck", result.configuration.update.auto_check);
-                result.configuration.update.endpoint =
-                    update.value("endpoint", std::string{});
-                result.configuration.update.skipped_version =
-                    update.value("skippedVersion", std::string{});
-            }
-            if (document.contains("customColors") && document.at("customColors").is_object()) {
-                const auto& colors = document.at("customColors");
-                anomaly::PlatformUiCustomColors& target = result.configuration.custom_colors;
-                target.accent = ReadHexColor(colors, "accent", target.accent);
-                target.text = ReadHexColor(colors, "text", target.text);
-                target.window_background =
-                    ReadHexColor(colors, "windowBackground", target.window_background);
-                target.child_background =
-                    ReadHexColor(colors, "childBackground", target.child_background);
-                target.border = ReadHexColor(colors, "border", target.border);
-            }
+            auto directory = read_directory("mainlandChina");
+            if (directory.empty()) directory = read_directory("global");
+            result.configuration.game.game_directory = std::move(directory);
+        } else if (schema_version == 3) {
+            result.configuration.game.game_directory = Utf8Wide(
+                document.value("gameDirectory", std::string{}));
         } else {
             throw std::invalid_argument("unsupported launcher configuration shape");
+        }
+        // A configuration written before the launcher had a theme carries no name
+        // and keeps the default the struct declares.
+        if (document.contains("theme") && document.at("theme").is_string()) {
+            const std::string theme = document.at("theme").get<std::string>();
+            if (!theme.empty()) result.configuration.theme = theme;
+        }
+        if (document.contains("language") && document.at("language").is_string()) {
+            const std::string language = document.at("language").get<std::string>();
+            if (!language.empty()) result.configuration.language = language;
+        }
+        if (document.contains("view") && document.at("view").is_object()) {
+            const auto& view = document.at("view");
+            LauncherViewSettings& settings = result.configuration.view;
+            settings.mods_grid = view.value("modsGrid", settings.mods_grid);
+            settings.mods_by_folder = view.value("modsByFolder", settings.mods_by_folder);
+            settings.mods_pagination =
+                view.value("modsPagination", settings.mods_pagination);
+            settings.mods_page_size = LauncherNearestPageSize(
+                view.value("modsPageSize", settings.mods_page_size));
+            settings.browse_sort = view.value("browseSort", settings.browse_sort);
+            settings.browse_category =
+                view.value("browseCategory", settings.browse_category);
+            settings.browse_hide_mature =
+                view.value("browseHideMature", settings.browse_hide_mature);
+        }
+        if (document.contains("artwork") && document.at("artwork").is_object()) {
+            const auto& artwork = document.at("artwork");
+            LauncherThemeArtwork& target = result.configuration.artwork;
+            target.background = artwork.value("background", std::string{});
+            target.background_mode = std::clamp(
+                artwork.value("backgroundMode", target.background_mode), -1, 3);
+            target.surface_opacity = std::clamp(
+                artwork.value("surfaceOpacity", target.surface_opacity), -1.0f, 1.0f);
+        }
+        if (document.contains("update") && document.at("update").is_object()) {
+            const auto& update = document.at("update");
+            result.configuration.update.auto_check =
+                update.value("autoCheck", result.configuration.update.auto_check);
+            result.configuration.update.endpoint =
+                update.value("endpoint", std::string{});
+            result.configuration.update.skipped_version =
+                update.value("skippedVersion", std::string{});
+        }
+        if (document.contains("customColors") && document.at("customColors").is_object()) {
+            const auto& colors = document.at("customColors");
+            anomaly::PlatformUiCustomColors& target = result.configuration.custom_colors;
+            target.accent = ReadHexColor(colors, "accent", target.accent);
+            target.text = ReadHexColor(colors, "text", target.text);
+            target.window_background =
+                ReadHexColor(colors, "windowBackground", target.window_background);
+            target.child_background =
+                ReadHexColor(colors, "childBackground", target.child_background);
+            target.border = ReadHexColor(colors, "border", target.border);
         }
         result.loaded = true;
         result.message = "launcher configuration loaded";
@@ -542,16 +422,9 @@ LauncherConfigurationSaveResult SaveLauncherConfiguration(
             result.message = "launcher configuration directory could not be created";
             return result;
         }
-        const auto client_document = [](const LauncherClientConfiguration& client) {
-            return nlohmann::json{
-                {"gameDirectory", WideUtf8(client.game_directory.wstring())},
-                {"launcherExecutable", WideUtf8(client.launcher_executable.wstring())},
-            };
-        };
         const nlohmann::json document{
-            {"schemaVersion", 2},
-            {"selectedClient", configuration.selected_client == NteClient::Global
-                ? "global" : "mainlandChina"},
+            {"schemaVersion", 3},
+            {"gameDirectory", WideUtf8(configuration.game.game_directory.wstring())},
             {"theme", configuration.theme},
             {"language", configuration.language},
             {"artwork", {
@@ -574,10 +447,6 @@ LauncherConfigurationSaveResult SaveLauncherConfiguration(
                 {"browseSort", configuration.view.browse_sort},
                 {"browseCategory", configuration.view.browse_category},
                 {"browseHideMature", configuration.view.browse_hide_mature},
-            }},
-            {"clients", {
-                {"mainlandChina", client_document(configuration.mainland_china)},
-                {"global", client_document(configuration.global)},
             }},
             {"update", {
                 {"autoCheck", configuration.update.auto_check},
@@ -627,19 +496,9 @@ LauncherConfigurationSaveResult SaveLauncherConfiguration(
     return result;
 }
 
-bool IsNteGameDirectory(const std::filesystem::path& directory) noexcept {
+bool IsMaydayGameDirectory(const std::filesystem::path& directory) noexcept {
     try {
         return !directory.empty() && IsRegularFile(directory / kGameExecutableName);
-    } catch (...) {
-        return false;
-    }
-}
-
-bool IsNteLauncherExecutable(
-    const std::filesystem::path& executable, const NteClient client) noexcept {
-    try {
-        return NameEquals(executable, LauncherExecutableName(client)) &&
-            IsRegularFile(executable);
     } catch (...) {
         return false;
     }
@@ -649,31 +508,18 @@ LauncherClientConfiguration DiscoverLauncherConfiguration(
     const LauncherClientConfiguration& preferred,
     const LauncherDiscoveryOptions& options) {
     LauncherClientConfiguration result;
-    if (PathKey(preferred.game_directory) != PathKey(options.other_game_directory) &&
-        IsNteGameDirectory(preferred.game_directory)) {
+    if (IsMaydayGameDirectory(preferred.game_directory)) {
         result.game_directory = preferred.game_directory.lexically_normal();
-    }
-    if (IsNteLauncherExecutable(preferred.launcher_executable, options.client)) {
-        result.launcher_executable = preferred.launcher_executable.lexically_normal();
     }
 
     std::vector<std::filesystem::path> roots;
-    std::vector<std::filesystem::path> game_executables = options.running_game_executables;
-    std::vector<std::filesystem::path> launcher_executables =
-        options.running_launcher_executables;
     for (const auto& root : options.search_roots) AddUnique(roots, root);
     AddAncestors(roots, options.payload_root);
-
     if (options.include_system_locations) {
-        SystemLocations system = CollectSystemLocations(options.client);
-        for (auto& root : system.roots) AddUnique(roots, std::move(root));
-        for (auto& executable : system.launcher_executables) {
-            launcher_executables.push_back(std::move(executable));
-        }
+        for (auto root : CollectSystemLocations()) AddUnique(roots, std::move(root));
     }
 
-    for (const auto& executable : game_executables) {
-        if (PathKey(executable.parent_path()) == PathKey(options.other_game_directory)) continue;
+    for (const auto& executable : options.running_game_executables) {
         if (NameEquals(executable, kGameExecutableName) && IsRegularFile(executable)) {
             if (result.game_directory.empty()) {
                 result.game_directory = executable.parent_path().lexically_normal();
@@ -681,96 +527,14 @@ LauncherClientConfiguration DiscoverLauncherConfiguration(
             AddAncestors(roots, executable.parent_path());
         }
     }
-    for (const auto& executable : launcher_executables) {
-        if (IsNteLauncherExecutable(executable, options.client)) {
-            if (result.launcher_executable.empty()) {
-                result.launcher_executable = executable.lexically_normal();
-            }
-            AddAncestors(roots, executable.parent_path());
-        }
-    }
     AddAncestors(roots, result.game_directory);
-    AddAncestors(roots, result.launcher_executable.parent_path());
 
-    if (result.launcher_executable.empty()) {
-        if (const auto discovered = FindLauncherExecutable(roots, options.client)) {
-            result.launcher_executable = *discovered;
-            AddAncestors(roots, result.launcher_executable.parent_path());
-        }
-    }
     if (result.game_directory.empty()) {
-        std::vector<std::filesystem::path> launcher_roots;
-        AddAncestors(launcher_roots, result.launcher_executable.parent_path());
-        if (const auto discovered = FindGameDirectory(launcher_roots, options.other_game_directory)) {
+        if (const auto discovered = FindGameDirectory(roots)) {
             result.game_directory = *discovered;
-            AddAncestors(roots, result.game_directory);
-        } else if (options.allow_unpaired_game_discovery) {
-            if (const auto searched = FindGameDirectory(roots, options.other_game_directory)) {
-                result.game_directory = *searched;
-                AddAncestors(roots, result.game_directory);
-            }
         }
     }
     return result;
-}
-
-NteClientLaunchCommand ResolveClientLaunchCommand(
-    const std::filesystem::path& launcher_executable) {
-    // The bootstrap reads its successor out of an update section instead of a compiled-in name, which
-    // is what lets the launcher replace itself. Reading the same section keeps Anomaly's launch
-    // identical to the shortcut the player uses.
-    NteClientLaunchCommand command;
-    if (launcher_executable.empty()) {
-        command.failure = "no launcher executable was selected";
-        return command;
-    }
-
-    // The profile API resolves a relative file name against the Windows directory rather than the
-    // working directory, so the launcher path is made absolute before it is handed over.
-    const auto launcher = std::filesystem::absolute(launcher_executable);
-    const auto read_value = [](const std::filesystem::path& config_ini, const wchar_t* key) {
-        std::array<wchar_t, MAX_PATH> buffer{};
-        const DWORD length = GetPrivateProfileStringW(
-            kLauncherUpdateSection.data(), key, L"", buffer.data(),
-            static_cast<DWORD>(buffer.size()), config_ini.c_str());
-        return std::wstring(buffer.data(), length);
-    };
-
-    // An install keeps a copy of the bootstrap at its root and the real one, with the update section
-    // that names the client, in the NTELauncher subdirectory. Discovery can land on either, and the
-    // root copy has no Config of its own, so the section is looked for in both places before the
-    // launch is refused. The client is then resolved against whichever directory owns that Config,
-    // because LaunchFilePath is relative to it.
-    const std::array<std::filesystem::path, 2> config_candidates{
-        launcher.parent_path() / kLauncherUpdateConfigFile,
-        launcher.parent_path() / L"NTELauncher" / kLauncherUpdateConfigFile,
-    };
-    for (const auto& config_ini : config_candidates) {
-        const std::wstring name = read_value(config_ini, L"LaunchFilePath");
-        if (name.empty()) continue;
-        const auto client = config_ini.parent_path().parent_path() / name;
-        if (!IsRegularFile(client)) continue;
-        command.executable = client;
-        command.arguments = read_value(config_ini, L"LaunchCmdLine");
-        return command;
-    }
-
-    // Nothing named a client. The bootstrap is the one executable that must never be substituted:
-    // it starts its client and then exits, so anything injected into it -- the hook that hides the
-    // window and asks for the game to start -- dies with it, leaving the client running unmanaged and
-    // the failure silent. A launcher selected directly, which is how a custom install is pointed at,
-    // is still returned as asked.
-    const auto requested = Fold(launcher.filename().wstring());
-    if (requested == Fold(std::wstring(kMainlandLauncherExecutableName)) ||
-        requested == Fold(std::wstring(kGlobalLauncherExecutableName))) {
-        command.failure = "the launcher bootstrap at " + WideUtf8(launcher.wstring()) +
-            " names no client: [UPDATE_CONFIG] LaunchFilePath is empty in " +
-            WideUtf8(config_candidates[0].wstring()) + " and " +
-            WideUtf8(config_candidates[1].wstring());
-        return command;
-    }
-    command.executable = launcher;
-    return command;
 }
 
 }  // namespace anomaly::launcher

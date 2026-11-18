@@ -18,7 +18,7 @@
 namespace anomaly::launcher {
 namespace {
 
-constexpr wchar_t kGameExecutable[] = L"HTGame.exe";
+constexpr wchar_t kGameExecutable[] = L"MaydayAirways.exe";
 constexpr wchar_t kProxyName[] = L"dwmapi.dll";
 constexpr wchar_t kDisabledProxyName[] = L"dwmapi.dll.disabled";
 constexpr wchar_t kRuntimeDirectoryName[] = L"Anomaly";
@@ -130,7 +130,7 @@ bool GameExecutableRunning() noexcept {
     bool running = false;
     if (Process32FirstW(snapshot, &entry) != FALSE) {
         do {
-            if (::_wcsicmp(entry.szExeFile, L"HTGame.exe") == 0) {
+            if (::_wcsicmp(entry.szExeFile, L"MaydayAirways.exe") == 0) {
                 running = true;
                 break;
             }
@@ -363,7 +363,7 @@ ProxyInstallationStatus InspectProxyInstallation(
         return Failure(
             game_directory, ProxyInstallationState::Unavailable,
             ProxyInstallationError::InvalidGameDirectory,
-            "selected directory does not contain HTGame.exe");
+            "selected directory does not contain MaydayAirways.exe");
     }
 
     const auto enabled = game_directory / kProxyName;
@@ -448,7 +448,7 @@ ProxyInstallationStatus InstallProxyRuntime(
         return Failure(
             game_directory, ProxyInstallationState::Unavailable,
             ProxyInstallationError::InvalidGameDirectory,
-            "selected directory does not contain HTGame.exe");
+            "selected directory does not contain MaydayAirways.exe");
     }
     const std::string expected = Digest(source.proxy);
     const std::string expected_core = Digest(source.runtime_directory / kCoreName);
@@ -555,7 +555,7 @@ ProxyInstallationStatus InstallProxyRuntime(
             return Failure(
                 game_directory, ProxyInstallationState::Unavailable,
                 ProxyInstallationError::IoFailure,
-                "the game is still running; close HTGame.exe before updating the runtime");
+                "the game is still running; close MaydayAirways.exe before updating the runtime");
         }
         const DWORD move_error = MovePath(runtime_target, runtime_backup);
         if (move_error == ERROR_ACCESS_DENIED) {
@@ -674,7 +674,7 @@ ProxyInstallationStatus UninstallProxy(
         current.state != ProxyInstallationState::UpdateAvailable) return current;
     if (GameExecutableRunning()) {
         current.error = ProxyInstallationError::IoFailure;
-        current.message = "close HTGame.exe before completely uninstalling Anomaly";
+        current.message = "close MaydayAirways.exe before completely uninstalling Anomaly";
         return current;
     }
     const auto runtime = game_directory / kRuntimeDirectoryName;

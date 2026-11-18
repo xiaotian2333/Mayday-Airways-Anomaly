@@ -284,10 +284,7 @@ enum class MessageScope { Both, Proxy, Attach };
 enum class ProcessAnnounce { Never, Always, OnChange };
 
 struct LauncherSnapshot final {
-    anomaly::launcher::NteClient selected_client{
-        anomaly::launcher::NteClient::MainlandChina};
     std::filesystem::path game_directory;
-    std::filesystem::path launcher_executable;
     anomaly::launcher::ProxyInstallationStatus proxy;
     std::vector<anomaly::launcher::AttachableProcess> processes;
     DWORD attached_process{};
@@ -415,21 +412,6 @@ std::filesystem::path ExecutablePath() {
 std::filesystem::path ExecutableDirectory() {
     return ExecutablePath().parent_path();
 }
-
-// The hook that goes into the official launcher. Its source still lives in this tree
-// (src/launcher/hook/nte_game_hook.cpp) but nothing builds or ships it, so the file is absent from an
-// installed package. The path is absolute because the launcher it is injected into runs from an
-// install location this process does not own.
-std::filesystem::path GameHookLibrary() {
-    return ExecutableDirectory() / L"Anomaly" / L"NTEGameHook.dll";
-}
-
-// Auto-starting the official client is off. The launcher is started the way its own shortcut starts
-// it, and the player presses start game in the window that opens, so capture waits for the HTGame.exe
-// that press produces. Everything auto-starting needs -- resolving the client out of the bootstrap's
-// update section and injecting the hook -- stays compiled behind this switch, but the hook library is
-// no longer built or shipped, so turning it back on also means building it again.
-constexpr bool kAutoStartOfficialClient = false;
 
 struct AdministratorLaunchResult final {
     bool run_current_process{};
@@ -725,15 +707,6 @@ public:
         {
             std::scoped_lock lock(state_mutex_);
             if (state_.busy) return;
-            if (anomaly::launcher::IsNteGameDirectory(directory)) {
-                auto& other_client = configuration_.selected_client ==
-                        anomaly::launcher::NteClient::Global
-                    ? configuration_.mainland_china
-                    : configuration_.global;
-                if (PathsEqual(directory, other_client.game_directory)) {
-                    other_client.game_directory.clear();
-                }
-            }
             state_.game_directory = std::move(directory);
             configuration_.Selected().game_directory = state_.game_directory;
         }
@@ -817,106 +790,80 @@ public:
         queue_changed_.notify_one();
     }
 
-    void SelectLauncherExecutable(std::filesystem::path executable) {
-        {
-            std::scoped_lock lock(state_mutex_);
-            if (state_.busy) return;
-            state_.launcher_executable = std::move(executable);
-            configuration_.Selected().launcher_executable = state_.launcher_executable;
+    [[nodiscard]] anomaly::launcher::ManualMapResult AttachToRunningProcessImpl(
+        const DWORD process_id) {
+        const auto selected = ResolveAttachRuntime();
+        if (!selected.Ok()) {
+            PublishRuntimeFailure(selected);
+            return {};
         }
-        Queue(anomaly::MessageId::LauncherStatusScanningLocal, MessageScope::Attach, [this] {
-            ReconcileRelatedPathsImpl();
-            const auto saved = PersistConfigurationImpl();
-            RefreshHotkeyImpl();
-            RefreshProxyImpl();
-            RefreshProcessesImpl();
-            if (!saved.Ok()) {
-                PublishMessage(anomaly::MessageId::LauncherStatusUnexpectedFailure,
-                    MessageKind::Error, saved.message);
-            }
-        });
-    }
-
-    void SelectClient(const anomaly::launcher::NteClient client) {
-        {
-            std::scoped_lock lock(state_mutex_);
-            if (state_.busy || configuration_.selected_client == client) return;
-            configuration_.selected_client = client;
-            const auto& selected = configuration_.Selected();
-            state_.selected_client = client;
-            state_.game_directory = selected.game_directory;
-            state_.launcher_executable = selected.launcher_executable;
-            state_.proxy = {};
-            state_.attached_process = 0;
-        }
-        Queue(anomaly::MessageId::LauncherStatusScanningLocal, MessageScope::Both, [this] {
-            ReconcileRelatedPathsImpl();
-            const auto saved = PersistConfigurationImpl();
-            RefreshHotkeyImpl();
-            RefreshProxyImpl();
-            RefreshProcessesImpl();
-            if (!saved.Ok()) {
-                PublishMessage(anomaly::MessageId::LauncherStatusUnexpectedFailure,
-                    MessageKind::Error, saved.message);
-            }
-        });
+        anomaly::launcher::ManualMapOptions options;
+        options.process_id = process_id;
+        options.core_path = selected.core_path;
+        options.runtime_root = selected.runtime_root;
+        options.log_directory = options.runtime_root / L"logs";
+        options.delivery = anomaly::launcher::ManualMapDelivery::Automatic;
+        const auto result = anomaly::launcher::AttachToRunningProcess(options);
+        if (result.Ok()) RefreshProcessesImpl(ProcessAnnounce::Never);
+        return result;
     }
 
     void LaunchAndAttach() {
         Queue(anomaly::MessageId::LauncherStatusLaunchingAttach, MessageScope::Attach, [this] {
             StartTelemetryImpl();
-            const auto launcher = LauncherExecutable();
             const auto selected = ResolveAttachRuntime();
             if (!selected.Ok()) {
                 PublishRuntimeFailure(selected);
                 return;
             }
             anomaly::DisableRestrictedPakMods(LauncherModsDirectory(Snapshot()));
-            anomaly::launcher::ManualMapLaunchOptions options;
-            // NTELauncher.exe is what the player's own shortcut starts: it opens the launcher window,
-            // and the press of its start button is what creates HTGame.exe.
-            options.launcher_path = launcher;
-            options.working_directory = launcher.parent_path();
-            if constexpr (kAutoStartOfficialClient) {
-                // NTELauncher.exe is only the self-updating bootstrap. The launcher window and the
-                // platform pipe server live in the client it starts, so that client is started
-                // directly: it is the process that has to stay hidden, and it is the one that spawns
-                // HTGame.exe.
-                const auto command =
-                    anomaly::launcher::ResolveClientLaunchCommand(launcher);
-                if (command.executable.empty()) {
-                    PublishMessage(anomaly::MessageId::LauncherStatusUnexpectedFailure,
-                        MessageKind::Error, command.failure);
-                    return;
-                }
-                options.launcher_path = command.executable;
-                options.launcher_arguments = command.arguments;
-                options.working_directory = command.executable.parent_path();
-                // The launcher is never asked to act by a user, so a hook goes into it: it keeps the
-                // launcher's window hidden from the inside and asks the launcher to start the game,
-                // which is what leaves the platform session -- and with it the login and support
-                // buttons -- exactly as a normal launch produces it.
-                options.hook_path = GameHookLibrary();
+            // The demo is a Steam title; starting it through its Steam URL keeps the Steam client,
+            // DRM and cloud state in the same order the player's own shortcut produces.
+            constexpr wchar_t kSteamUrl[] = L"steam://rungameid/5480890";
+            const auto launch_result = reinterpret_cast<INT_PTR>(ShellExecuteW(
+                nullptr, L"open", kSteamUrl, nullptr, nullptr, SW_SHOWNORMAL));
+            if (launch_result <= 32) {
+                std::scoped_lock lock(state_mutex_);
+                state_.message = MakeLauncherMessage(
+                    anomaly::MessageId::LauncherStatusLaunchAttachFailed,
+                    {std::to_string(launch_result)}, "Steam could not start the game");
+                state_.message_kind = MessageKind::Error;
+                return;
             }
-            options.manual_map.core_path = selected.core_path;
-            options.manual_map.runtime_root = selected.runtime_root;
-            options.manual_map.log_directory = options.manual_map.runtime_root / L"logs";
-            const auto result =
-                anomaly::launcher::LaunchAndManualMapRuntimeCore(options, worker_.get_stop_token());
-            if (result.Ok()) RefreshProcessesImpl();
-
+            DWORD process_id{};
+            const ULONGLONG deadline = GetTickCount64() + 120000;
+            while (!worker_.get_stop_token().stop_requested() &&
+                   GetTickCount64() < deadline) {
+                for (const auto& process :
+                     anomaly::launcher::EnumerateAttachableProcesses(L"MaydayAirways.exe")) {
+                    if (process.Compatible()) {
+                        process_id = process.process_id;
+                        break;
+                    }
+                }
+                if (process_id != 0) break;
+                Sleep(500);
+            }
+            if (process_id == 0) {
+                std::scoped_lock lock(state_mutex_);
+                state_.message = MakeLauncherMessage(
+                    anomaly::MessageId::LauncherStatusLaunchAttachFailed,
+                    {"0"}, "the game process did not appear");
+                state_.message_kind = MessageKind::Error;
+                return;
+            }
+            const auto result = AttachToRunningProcessImpl(process_id);
             std::scoped_lock lock(state_mutex_);
             if (result.Ok()) {
-                state_.attached_process = result.process_id;
-                const std::string process_id = std::to_string(result.process_id);
+                state_.attached_process = process_id;
                 state_.message = MakeLauncherMessage(
-                    anomaly::MessageId::LauncherStatusLaunchAttached, {process_id});
+                    anomaly::MessageId::LauncherStatusLaunchAttached,
+                    {std::to_string(process_id)});
                 state_.message_kind = MessageKind::Success;
             } else {
-                const std::string error = std::to_string(result.mapping.win32_error);
                 state_.message = MakeLauncherMessage(
-                    anomaly::MessageId::LauncherStatusLaunchAttachFailed, {error},
-                    result.mapping.message);
+                    anomaly::MessageId::LauncherStatusLaunchAttachFailed,
+                    {std::to_string(result.win32_error)}, result.message);
                 state_.message_kind = MessageKind::Error;
             }
         });
@@ -930,36 +877,18 @@ public:
         Queue(anomaly::MessageId::LauncherStatusInjectingProcess, MessageScope::Attach,
             [this, process_id] {
             StartTelemetryImpl();
-            const auto selected = ResolveAttachRuntime();
-            if (!selected.Ok()) {
-                PublishRuntimeFailure(selected);
-                return;
-            }
-            anomaly::launcher::ManualMapOptions options;
-            options.process_id = process_id;
-            options.core_path = selected.core_path;
-            options.runtime_root = selected.runtime_root;
-            options.log_directory = options.runtime_root / L"logs";
-            // Which way into a game that is already running can work depends on what that game is doing
-            // at this moment: whether a thread reaches an alertable wait, whether one is parked in a
-            // system call. The mapper tries them in turn rather than making the user guess.
-            options.delivery = anomaly::launcher::ManualMapDelivery::Automatic;
-            const auto result = anomaly::launcher::AttachToRunningProcess(options);
-            // Announce is off: the rescan would report the attachment in the launched wording and
-            // replace the message this action is about to publish.
-            if (result.Ok()) RefreshProcessesImpl(ProcessAnnounce::Never);
-
+            const auto result = AttachToRunningProcessImpl(process_id);
             std::scoped_lock lock(state_mutex_);
             if (result.Ok()) {
                 state_.attached_process = process_id;
-                const std::string target = std::to_string(process_id);
                 state_.message = MakeLauncherMessage(
-                    anomaly::MessageId::LauncherStatusInjected, {target});
+                    anomaly::MessageId::LauncherStatusInjected,
+                    {std::to_string(process_id)});
                 state_.message_kind = MessageKind::Success;
             } else {
-                const std::string error = std::to_string(result.win32_error);
                 state_.message = MakeLauncherMessage(
-                    anomaly::MessageId::LauncherStatusInjectFailed, {error}, result.message);
+                    anomaly::MessageId::LauncherStatusInjectFailed,
+                    {std::to_string(result.win32_error)}, result.message);
                 state_.message_kind = MessageKind::Error;
             }
         });
@@ -1232,11 +1161,6 @@ private:
         return state_.game_directory;
     }
 
-    [[nodiscard]] std::filesystem::path LauncherExecutable() const {
-        std::scoped_lock lock(state_mutex_);
-        return state_.launcher_executable;
-    }
-
     // Which runtime the game ends up loading depends on the mode: a proxy installation keeps its
     // runtime inside the game folder, while the core this launcher maps itself runs from the
     // bundled payload. Both read their own anomaly.ini, so both have to carry the startup hotkey --
@@ -1249,10 +1173,6 @@ private:
         {
             std::scoped_lock lock(state_mutex_);
             game_directories.push_back(state_.game_directory);
-            game_directories.push_back(
-                configuration_.selected_client == anomaly::launcher::NteClient::Global
-                    ? configuration_.mainland_china.game_directory
-                    : configuration_.global.game_directory);
         }
         const auto add = [&roots](const std::filesystem::path& root) {
             std::error_code error;
@@ -1397,46 +1317,14 @@ private:
 
     void InitializePathsImpl() {
         const auto loaded = anomaly::launcher::LoadLauncherConfiguration(configuration_path_);
-        const auto mainland_launcher_processes =
-            anomaly::launcher::EnumerateAttachableProcesses(L"NTELauncher.exe");
-        const auto global_launcher_processes =
-            anomaly::launcher::EnumerateAttachableProcesses(L"NTEGlobalLauncher.exe");
         auto configuration = loaded.configuration;
-        if (!configuration.mainland_china.game_directory.empty() &&
-            PathsEqual(configuration.mainland_china.game_directory, configuration.global.game_directory)) {
-            // Older discovery could save the same running game for both clients.
-            const bool keep_mainland = anomaly::launcher::IsNteLauncherExecutable(
-                configuration.mainland_china.launcher_executable,
-                anomaly::launcher::NteClient::MainlandChina) ||
-                !anomaly::launcher::IsNteLauncherExecutable(configuration.global.launcher_executable,
-                    anomaly::launcher::NteClient::Global);
-            (keep_mainland ? configuration.global : configuration.mainland_china).game_directory.clear();
-        }
-        const auto discover = [this, &configuration](
-                                  const anomaly::launcher::NteClient client,
-                                  const auto& launcher_processes) {
-            anomaly::launcher::LauncherDiscoveryOptions options;
-            options.client = client;
-            options.payload_root = payload_root_;
-            options.other_game_directory = client == anomaly::launcher::NteClient::Global
-                ? configuration.mainland_china.game_directory : configuration.global.game_directory;
-            for (const auto& process : launcher_processes) {
-                if (!process.executable_path.empty()) {
-                    options.running_launcher_executables.push_back(process.executable_path);
-                }
-            }
-            return anomaly::launcher::DiscoverLauncherConfiguration(
-                client == anomaly::launcher::NteClient::Global
-                    ? configuration.global : configuration.mainland_china,
-                options);
-        };
-        configuration.mainland_china = discover(
-            anomaly::launcher::NteClient::MainlandChina, mainland_launcher_processes);
-        configuration.global = discover(
-            anomaly::launcher::NteClient::Global, global_launcher_processes);
+        anomaly::launcher::LauncherDiscoveryOptions options;
+        options.payload_root = payload_root_;
+        configuration.game = anomaly::launcher::DiscoverLauncherConfiguration(
+            configuration.game, options);
         // A launcher that stores no language yet follows the one its runtime ini already names,
         // which is what an installation upgraded from an older build has. From here on the
-        // configuration owns the value and the ini is only the seed.
+        // configuration owns the value and the ini is the only seed.
         if (configuration.language.empty()) {
             const ue5mem::AnalyzerConfig ini =
                 ue5mem::AnalyzerConfig::Load(LauncherSettingsPath());
@@ -1446,10 +1334,7 @@ private:
         {
             std::scoped_lock lock(state_mutex_);
             configuration_ = std::move(configuration);
-            const auto& selected = configuration_.Selected();
-            state_.selected_client = configuration_.selected_client;
-            state_.game_directory = selected.game_directory;
-            state_.launcher_executable = selected.launcher_executable;
+            state_.game_directory = configuration_.game.game_directory;
             state_.language = configuration_.language;
             state_.view = configuration_.view;
             state_.artwork = configuration_.artwork;
@@ -1473,26 +1358,17 @@ private:
 
     void ReconcileRelatedPathsImpl() {
         anomaly::launcher::LauncherClientConfiguration preferred;
-        std::filesystem::path other_game_directory;
-        anomaly::launcher::NteClient client{};
         {
             std::scoped_lock lock(state_mutex_);
             preferred.game_directory = state_.game_directory;
-            preferred.launcher_executable = state_.launcher_executable;
-            client = configuration_.selected_client;
-            other_game_directory = client == anomaly::launcher::NteClient::Global
-                ? configuration_.mainland_china.game_directory : configuration_.global.game_directory;
         }
         anomaly::launcher::LauncherDiscoveryOptions options;
-        options.client = client;
         options.payload_root = payload_root_;
-        options.other_game_directory = std::move(other_game_directory);
         const auto discovered = anomaly::launcher::DiscoverLauncherConfiguration(
             preferred, options);
         std::scoped_lock lock(state_mutex_);
-        configuration_.Selected() = discovered;
+        configuration_.game = discovered;
         state_.game_directory = discovered.game_directory;
-        state_.launcher_executable = discovered.launcher_executable;
     }
 
     [[nodiscard]] anomaly::launcher::LauncherConfigurationSaveResult
@@ -2421,14 +2297,6 @@ std::optional<std::filesystem::path> ChooseGameDirectory(
     return result;
 }
 
-// The file name the selected client's official launcher ships under. The two installs are separate programs
-// with separate launchers, so a label that names one of them has to name the one this client actually starts.
-const char* ClientLauncherFileName(const anomaly::launcher::NteClient client) noexcept {
-    return client == anomaly::launcher::NteClient::Global
-        ? "NTEGlobalLauncher.exe" : "NTELauncher.exe";
-}
-
-
 // File and network helpers run on worker threads and have no translator parameter, but they still
 // produce user-visible text. The UI stores the active translator here each frame; lookups are
 // read-only after start-up, so concurrent reads are safe.
@@ -2476,54 +2344,6 @@ std::string Format(
         arguments.begin(), arguments.size()));
 }
 
-std::optional<std::filesystem::path> ChooseLauncherExecutable(
-    HWND owner, const std::filesystem::path& current,
-    const anomaly::launcher::NteClient client, const anomaly::Translator& translator) {
-    ComPtr<IFileOpenDialog> dialog;
-    if (FAILED(CoCreateInstance(
-            CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
-            IID_PPV_ARGS(&dialog)))) {
-        return std::nullopt;
-    }
-    DWORD options{};
-    if (SUCCEEDED(dialog->GetOptions(&options))) {
-        dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
-            FOS_PATHMUSTEXIST);
-    }
-    const std::wstring executable_filter = Utf8Wide(
-        translator.Text(anomaly::MessageId::LauncherDialogExecutableFilter));
-    const wchar_t* launcher_name = client == anomaly::launcher::NteClient::Global
-        ? L"NTEGlobalLauncher.exe" : L"NTELauncher.exe";
-    const wchar_t* launcher_label = client == anomaly::launcher::NteClient::Global
-        ? L"NTE Global Launcher" : L"NTE Launcher";
-    const COMDLG_FILTERSPEC filters[]{
-        {launcher_label, launcher_name},
-        {executable_filter.c_str(), L"*.exe"},
-    };
-    static_cast<void>(dialog->SetFileTypes(
-        static_cast<UINT>(std::size(filters)), filters));
-    const std::wstring title = Utf8Wide(Format(
-        translator, anomaly::MessageId::LauncherDialogNteLauncher,
-        {ClientLauncherFileName(client)}));
-    dialog->SetTitle(title.c_str());
-    if (!current.empty()) {
-        ComPtr<IShellItem> folder;
-        if (SUCCEEDED(SHCreateItemFromParsingName(
-                current.parent_path().c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
-            dialog->SetFolder(folder.Get());
-        }
-    }
-    if (FAILED(dialog->Show(owner))) return std::nullopt;
-    ComPtr<IShellItem> selected;
-    if (FAILED(dialog->GetResult(&selected))) return std::nullopt;
-    PWSTR raw{};
-    if (FAILED(selected->GetDisplayName(SIGDN_FILESYSPATH, &raw)) || raw == nullptr) {
-        return std::nullopt;
-    }
-    const std::filesystem::path result(raw);
-    CoTaskMemFree(raw);
-    return result;
-}
 
 void Tooltip(const char* text) {
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -2726,23 +2546,6 @@ void DrawModes(
     int selected = static_cast<int>(mode);
     if (anomaly::glass::SegmentedControl("launcher-modes", labels, selected, options)) {
         mode = static_cast<LauncherMode>(selected);
-    }
-    // The client sits right beside the mode, on the same band: it decides which game directory the process
-    // list, the proxy install and the launch all read from, and the two installs live in different
-    // directories -- a game under the client that is not selected is not in the list at all. The labels are
-    // the clients' own names in both locales, so they are not translated.
-    ImGui::SameLine(0.0f, Scale(12.0f));
-    const std::array<const char*, 2> clients{"CN", "Global"};
-    anomaly::glass::SegmentedOptions client_options;
-    client_options.height = 54.0f;
-    client_options.padding_x = 26.0f;
-    client_options.scale = g_launcher_dpi_scale;
-    client_options.disabled_mask = snapshot.busy ? 0b11U : 0U;
-    int client = snapshot.selected_client == anomaly::launcher::NteClient::Global ? 1 : 0;
-    if (anomaly::glass::SegmentedControl("launcher-client", clients, client, client_options)) {
-        controller.SelectClient(client == 1
-            ? anomaly::launcher::NteClient::Global
-            : anomaly::launcher::NteClient::MainlandChina);
     }
     // A release this launcher can install is worth saying on the band, which is the one row that is
     // on screen in every mode. Clicking it asks the same question the automatic check asks -- the
@@ -3225,7 +3028,7 @@ bool LauncherGameRunning() {
     bool running = false;
     if (Process32FirstW(snapshot, &entry) != FALSE) {
         do {
-            if (_wcsicmp(entry.szExeFile, L"HTGame.exe") == 0) {
+            if (_wcsicmp(entry.szExeFile, L"MaydayAirways.exe") == 0) {
                 running = true;
                 break;
             }
@@ -3355,7 +3158,6 @@ nlohmann::json LauncherPakSettings(const LauncherSnapshot& snapshot) {
 
 struct LauncherModSettingsCache final {
     std::filesystem::path game_directory;
-    anomaly::launcher::NteClient client{anomaly::launcher::NteClient::MainlandChina};
     double refreshed_at{};
     bool initialized{};
     bool compatibility{true};
@@ -3369,11 +3171,10 @@ LauncherModSettingsCache& RefreshLauncherModSettings(
     static LauncherModSettingsCache cache;
     const double now = ImGui::GetTime();
     if (!force && cache.initialized && cache.game_directory == snapshot.game_directory &&
-        cache.client == snapshot.selected_client && now - cache.refreshed_at < 2.0) {
+        now - cache.refreshed_at < 2.0) {
         return cache;
     }
     cache.game_directory = snapshot.game_directory;
-    cache.client = snapshot.selected_client;
     cache.refreshed_at = now;
     cache.initialized = true;
     try {
@@ -5021,10 +4822,9 @@ std::string LauncherUrlEncode(const std::string& text) {
     return out;
 }
 
-// NTE on GameBanana is game 23012 and the service forces 15 records per page (391 mods at the
-// time of writing). The launcher loads one page at a time and filters locally, because the API
-// ignores the search parameter on this endpoint.
-constexpr int kNteGameBananaGameId = 23012;
+// GameBanana game id used by the browse page. Zero disables browsing until a Mayday Airways
+// entry is configured; the service forces 15 records per page, so pages are loaded individually.
+constexpr int kGameBananaGameId = 0;
 
 
 std::filesystem::path LauncherThumbCacheDirectory() {
@@ -5250,6 +5050,10 @@ ID3D11ShaderResourceView* LauncherThumbTexture(const std::string& url) {
 
 bool LauncherLoadGbPage(const int page, const std::string& query, const std::string& sort,
     const std::string& category_id, std::vector<LauncherGbItem>& items, bool& exhausted) {
+    if (kGameBananaGameId == 0) {
+        LauncherUpdateLog("browse: no GameBanana game id configured");
+        return false;
+    }
     // Empty query browses the game feed; a query goes through the search endpoint. The game filter
     // is `_idGameRow`; `_idGame` is silently ignored.
     std::string path_text;
@@ -5271,12 +5075,12 @@ bool LauncherLoadGbPage(const int page, const std::string& query, const std::str
             : "&_aFilters%5BGeneric_Category%5D=" + category_id;
         path_text = "/apiv13/Mod/Index?_nPage=" + std::to_string(page) +
             "&_nPerpage=15&_aFilters%5BGeneric_Game%5D=" +
-            std::to_string(kNteGameBananaGameId) + sort_arg + category_arg;
+            std::to_string(kGameBananaGameId) + sort_arg + category_arg;
     } else {
         // apiv13 search sorts by relevance (`_sOrder=best_match`; other values are rejected) and
         // returns like/view counts, which apiv11 omits.
         path_text = "/apiv13/Util/Search/Results?_sOrder=best_match&_idGameRow=" +
-            std::to_string(kNteGameBananaGameId) + "&_sSearchString=" + LauncherUrlEncode(query) +
+            std::to_string(kGameBananaGameId) + "&_sSearchString=" + LauncherUrlEncode(query) +
             "&_csvFields=name&_nPage=" + std::to_string(page);
     }
     const std::wstring path(path_text.begin(), path_text.end());
@@ -5312,7 +5116,7 @@ bool LauncherLoadGbPage(const int page, const std::string& query, const std::str
             }
         }
         // Check the content-rating flag, explicit NSFW flag, and an NSFW
-        // category name (root or sub) — the category is what most NTE mods rely on.
+        // category name (root or sub), which is what most mods rely on.
         {
             const auto contains_nsfw = [](const nlohmann::json& node) {
                 if (!node.is_object()) return false;
@@ -5321,7 +5125,7 @@ bool LauncherLoadGbPage(const int page, const std::string& query, const std::str
                     [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 return name.find("nsfw") != std::string::npos;
             };
-            // `_bHasContentRatings` is the only signal NTE actually populates: the dedicated NSFW
+            // `_bHasContentRatings` is the only content-rating signal this feed populates: the dedicated NSFW
             // flags are empty there, and no mod sits in an "nsfw" category.
             item.mature = record.value("_bHasNsfwContent", false) ||
                 record.value("_bIsNsfw", false) ||
@@ -6403,7 +6207,6 @@ void DrawModsMode(
     static bool check_ready{};
     static double last_refresh{};
     static std::filesystem::path cached_game, directory;
-    static auto cached_client = snapshot.selected_client;
     LauncherModSettingsCache& mod_settings = RefreshLauncherModSettings(snapshot);
     // The view, the pager and its page size are the launcher configuration's, so the settings
     // page and this page always read the same values; nothing is cached in a static here.
@@ -6429,7 +6232,7 @@ void DrawModsMode(
     // decodes a few of them per frame and the covers appear within the first few frames.
     g_decode_budget = view.mods_grid ? 3 : 1;
     const auto refresh_mods = [&] {
-        if (cached_game != snapshot.game_directory || cached_client != snapshot.selected_client) {
+        if (cached_game != snapshot.game_directory) {
             page = 0;
             grid_path.clear();
             selected_names.clear();
@@ -6439,7 +6242,6 @@ void DrawModsMode(
             scroll_to_top = true;
         }
         cached_game = snapshot.game_directory;
-        cached_client = snapshot.selected_client;
         directory = LauncherModsDirectory(snapshot);
         if (directory.empty()) {
             mods.clear();
@@ -6463,7 +6265,7 @@ void DrawModsMode(
     };
     const bool refresh_requested = std::exchange(g_mods_refresh_requested, false);
     if (refresh_requested || !refreshed ||
-        cached_game != snapshot.game_directory || cached_client != snapshot.selected_client ||
+        cached_game != snapshot.game_directory ||
         (ImGui::GetTime() - last_refresh > 2.0 && !check_running)) refresh_mods();
 
     if (directory.empty()) {
@@ -7239,7 +7041,7 @@ void DrawAttachMode(
     const auto& theme = ue5mem::PlatformUiTheme();
     ImGui::TextDisabled("%s", Text(translator, anomaly::MessageId::LauncherSectionProcesses));
     // The status is the controller's own last message, which already carries every
-    // distinction this needs: waiting for HTGame.exe while the launch runs, then the
+    // distinction this needs: waiting for MaydayAirways.exe while the launch runs, then the
     // attached PID or the failure, coloured by its kind. It replaced a static "ready"
     // line that said the same thing no matter what the launcher was doing, and it
     // also restores the reporting the deleted footer used to provide.
@@ -7278,7 +7080,7 @@ void DrawAttachMode(
         ImGui::TextWrapped("%s", Text(translator, anomaly::MessageId::LauncherInjectProxyEnabled));
     }
     const bool can_launch = !snapshot.busy && !snapshot.proxy.proxy_enabled && snapshot.core_available &&
-        !snapshot.launcher_executable.empty() && snapshot.processes.empty();
+        !snapshot.game_directory.empty() && snapshot.processes.empty();
     // A game that is already running is the other half of the same choice: the launch action needs an
     // empty process list, this one needs a target in it.
     DWORD inject_target{};
@@ -7360,17 +7162,6 @@ void DrawLaunchMode(
     const LauncherSnapshot& snapshot, const anomaly::Translator& translator) {
     static int launch_mode = 0;
 
-    ImGui::TextDisabled("%s", Text(translator, anomaly::MessageId::LauncherSectionNteLauncher));
-    DrawReadOnlyPath("##NteLauncherDirectory", snapshot.launcher_executable.parent_path(), 38.0f, translator);
-    ImGui::SameLine();
-    const std::string choose_label = Format(translator, anomaly::MessageId::LauncherChooseNteLauncher,
-        {ClientLauncherFileName(snapshot.selected_client)});
-    if (IconButton("choose-nte-launcher", 0xe838, choose_label.c_str(), !snapshot.busy)) {
-        if (const auto selected = ChooseLauncherExecutable(
-                window, snapshot.launcher_executable, snapshot.selected_client, translator)) {
-            controller.SelectLauncherExecutable(*selected);
-        }
-    }
     ImGui::Spacing();
     ImGui::TextDisabled("%s", Text(translator, anomaly::MessageId::LauncherSectionGameDirectory));
     DrawReadOnlyPath("##GameDirectory", snapshot.game_directory, 38.0f, translator);

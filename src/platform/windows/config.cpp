@@ -80,18 +80,7 @@ AnalyzerConfig AnalyzerConfig::Load(const std::filesystem::path& path) {
         std::max<std::size_t>(1, ReadSize(path, L"Performance", L"UpdateSlowMilliseconds", 2)));
     result.draw_slow_milliseconds = static_cast<double>(
         std::max<std::size_t>(1, ReadSize(path, L"Performance", L"DrawSlowMilliseconds", 4)));
-    result.player_snapshot_tick_interval = std::max<std::size_t>(
-        1, ReadSize(path, L"Performance", L"PlayerSnapshotTickInterval", 1));
-    result.entity_snapshot_tick_interval = std::max<std::size_t>(
-        1, ReadSize(path, L"Performance", L"EntitySnapshotTickInterval", 1));
-    result.actor_snapshot_tick_interval = std::max<std::size_t>(
-        1, ReadSize(path, L"Performance", L"ActorSnapshotTickInterval", 60));
-    result.game_id = NarrowAscii(ReadWide(path, L"Profiles", L"Game", L"nte"));
-    result.profile_directory = ReadWide(path, L"Profiles", L"Directory", L"profiles");
-    result.local_profile_directory =
-        ReadWide(path, L"Profiles", L"LocalDirectory", L"profiles-local");
-    result.managed_profile_directory =
-        ReadWide(path, L"Profiles", L"ManagedDirectory", L"state/profiles/managed");
+    result.game_id = NarrowAscii(ReadWide(path, L"Profiles", L"Game", L"mayday"));
     return result;
 }
 
