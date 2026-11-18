@@ -6,8 +6,11 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
+#include <cmath>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -23,8 +26,24 @@ namespace {
 constexpr const wchar_t* kGameAssemblyModule = L"GameAssembly.dll";
 constexpr const char* kIl2CppServiceId = "mayday.il2cpp";
 constexpr const char* kMoneyServiceId = ANOMALY_MAYDAY_MONEY_SERVICE_V1_ID;
+constexpr const char* kFreecamServiceId = ANOMALY_MAYDAY_FREECAM_SERVICE_V1_ID;
 constexpr std::uint32_t kIl2CppServiceVersion = 1;
 constexpr std::uint32_t kMoneyServiceVersion = ANOMALY_MAYDAY_MONEY_SERVICE_V1_VERSION;
+constexpr std::uint32_t kFreecamServiceVersion = ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION;
+
+// il2cpp 值类型的内存布局（UnityEngine.Vector3 / Quaternion）。
+struct Vec3 {
+    float x;
+    float y;
+    float z;
+};
+
+struct Quat {
+    float x;
+    float y;
+    float z;
+    float w;
+};
 
 std::string JsonEscape(const std::string& value) {
     std::string out;
@@ -50,6 +69,11 @@ using FnImageGetName = const char* (*)(void* image);
 using FnImageGetClass = void* (*)(void* image, int index);
 using FnClassFromName = void* (*)(void* image, const char* ns, const char* name);
 using FnClassGetMethod = void* (*)(void* klass, const char* name, int args);
+using FnClassGetMethods = void* (*)(void* klass, void** iterator);
+using FnMethodGetName = const char* (*)(void* method);
+using FnMethodGetParamCount = int (*)(void* method);
+using FnClassGetField = void* (*)(void* klass, const char* name);
+using FnFieldGetOffset = std::size_t (*)(void* field);
 using FnRuntimeInvoke = void* (*)(void* method, void* obj, void** params, void** exc);
 using FnThreadAttach = void* (*)(void* domain);
 using FnStringNew = void* (*)(const char* text);
@@ -83,6 +107,11 @@ struct MaydayAdapter::Impl {
     FnImageGetName image_get_name{};
     FnClassFromName class_from_name{};
     FnClassGetMethod class_get_method{};
+    FnClassGetMethods class_get_methods{};
+    FnMethodGetName method_get_name{};
+    FnMethodGetParamCount method_get_param_count{};
+    FnClassGetField class_get_field{};
+    FnFieldGetOffset field_get_offset{};
     FnRuntimeInvoke runtime_invoke{};
     FnThreadAttach thread_attach{};
     FnStringNew string_new{};
@@ -98,12 +127,62 @@ struct MaydayAdapter::Impl {
     void* add_debt{};
     AnomalyMaydayMoneyServiceV1 money_service{};
 
+    // ---- 自由镜头（freecam_mutex 保护状态与相机操作） ----
+    std::atomic<void*> freecam_published{nullptr};
+    std::mutex freecam_mutex;
+    bool freecam_resolved{false};
+    bool freecam_applied{false};
+    bool freecam_shutdown{false};
+    void* player_rig_class{};
+    void* get_local_rig{};
+    void* get_camera_rig{};
+    void* get_view_camera{};
+    void* camera_rig_field{};
+    std::size_t camera_rig_offset{};
+    void* view_camera_field{};
+    std::size_t view_camera_offset{};
+    void* camera_get_main{};
+    void* component_get_transform{};
+    void* get_look{};
+    void* get_motor{};
+    void* transform_get_position{};
+    void* transform_set_position{};
+    void* transform_get_euler{};
+    void* transform_set_euler{};
+    void* transform_get_local_position{};
+    void* transform_set_local_position{};
+    void* transform_get_local_rotation{};
+    void* transform_set_local_rotation{};
+    void* behaviour_get_enabled{};
+    void* behaviour_set_enabled{};
+    void* fc_local_rig{};
+    void* fc_camera_rig{};
+    void* fc_look{};
+    void* fc_motor{};
+    bool fc_look_enabled{};
+    bool fc_motor_enabled{};
+    Vec3 fc_saved_local_position{};
+    Quat fc_saved_local_rotation{};
+    Vec3 fc_position{};
+    float fc_yaw{};
+    float fc_pitch{};
+    bool fc_apply_started{false};
+    const char* fc_error_key{};
+    std::string fc_diag_message;
+    std::chrono::steady_clock::time_point fc_last_apply{};
+    AnomalyMaydayFreecamServiceV1 freecam_service{};
+
     // 服务表回调：Impl 是 MaydayAdapter 的私有嵌套类型，只有成员才能访问。
     static AnomalyStatusV1 ANOMALY_CALL MoneyGetMoney(void* user, std::int32_t* out_money);
     static AnomalyStatusV1 ANOMALY_CALL MoneySetMoney(void* user, std::int32_t value);
     static AnomalyStatusV1 ANOMALY_CALL MoneyAddMoney(void* user, std::int32_t delta);
     static AnomalyStatusV1 ANOMALY_CALL MoneyGetDebt(void* user, std::int32_t* out_debt);
     static AnomalyStatusV1 ANOMALY_CALL MoneySetDebt(void* user, std::int32_t value);
+    static AnomalyStatusV1 ANOMALY_CALL FreecamSetActive(void* user, std::int32_t active);
+    static AnomalyStatusV1 ANOMALY_CALL FreecamGetState(void* user, std::int32_t* out_state);
+    static AnomalyStatusV1 ANOMALY_CALL FreecamSetInput(
+        void* user, float forward, float right, float up,
+        float yaw_delta, float pitch_delta, float speed);
 
     // 当前线程的 il2cpp attach 结果；FLS 缓存（Core 禁止 thread_local），
     // 首次调用 attach，之后复用，避免每帧 Draw 重复 attach/detach。
@@ -118,14 +197,30 @@ struct MaydayAdapter::Impl {
     bool ResolveExports(HMODULE game_assembly);
     void PublishIl2CppTable();
     void PublishMoneyService();
+    void PublishFreecamService();
     void RevokePublished();
 
     // 解析 GameState 类与方法；每线程需先 attach。返回 false = 游戏符号不可用。
     bool ResolveGame();
+    bool ResolveFreecam();
     // 拿 GameState.Instance（未开局返回 nullptr）
     void* GameInstance();
     bool InvokeInt(void* method, void* object, std::int32_t* out_value);
     bool InvokeVoid(void* method, void* object, void** params);
+    bool InvokeVec3(void* method, void* object, Vec3* out_value);
+    bool InvokeQuat(void* method, void* object, Quat* out_value);
+    bool InvokeBool(void* method, void* object, bool* out_value);
+    bool InvokeVoidArg(void* method, void* object, void* argument);
+
+    bool ActivateFreecam();
+    bool DeactivateFreecam();
+    // 玩家对象已失效（换局/重生）时丢弃现场，禁止再触碰旧指针。
+    void AbandonFreecam() noexcept;
+    // 方法名失配时列出 PlayerRig 上关心的候选方法（诊断用）。
+    std::string DescribeRigMethods();
+    void ApplyFreecamInput(
+        float forward, float right, float up,
+        float yaw_delta, float pitch_delta, float speed);
 };
 
 void MaydayAdapter::Impl::ProbeWorker() {
@@ -138,6 +233,7 @@ void MaydayAdapter::Impl::ProbeWorker() {
             if (ResolveExports(game_assembly)) {
                 PublishIl2CppTable();
                 PublishMoneyService();
+                PublishFreecamService();
             }
             break;
         }
@@ -163,6 +259,11 @@ bool MaydayAdapter::Impl::ResolveExports(const HMODULE game_assembly) {
         {reinterpret_cast<void**>(&image_get_name), "il2cpp_image_get_name"},
         {reinterpret_cast<void**>(&class_from_name), "il2cpp_class_from_name"},
         {reinterpret_cast<void**>(&class_get_method), "il2cpp_class_get_method_from_name"},
+        {reinterpret_cast<void**>(&class_get_methods), "il2cpp_class_get_methods"},
+        {reinterpret_cast<void**>(&method_get_name), "il2cpp_method_get_name"},
+        {reinterpret_cast<void**>(&method_get_param_count), "il2cpp_method_get_param_count"},
+        {reinterpret_cast<void**>(&class_get_field), "il2cpp_class_get_field_from_name"},
+        {reinterpret_cast<void**>(&field_get_offset), "il2cpp_field_get_offset"},
         {reinterpret_cast<void**>(&runtime_invoke), "il2cpp_runtime_invoke"},
         {reinterpret_cast<void**>(&thread_attach), "il2cpp_thread_attach"},
         {reinterpret_cast<void**>(&string_new), "il2cpp_string_new"},
@@ -310,6 +411,16 @@ void MaydayAdapter::Impl::PublishMoneyService() {
     }
 }
 
+void MaydayAdapter::Impl::PublishFreecamService() {
+    freecam_service = {
+        sizeof(AnomalyMaydayFreecamServiceV1), kFreecamServiceVersion, this,
+        FreecamSetActive, FreecamGetState, FreecamSetInput};
+    if (ProcessAdapterServices().Publish(
+            kFreecamServiceId, kFreecamServiceVersion, &freecam_service)) {
+        freecam_published.store(&freecam_service, std::memory_order_release);
+    }
+}
+
 bool MaydayAdapter::Impl::ResolveGame() {
     if (game_resolved) return true;
     if (domain_get == nullptr || class_from_name == nullptr) return false;
@@ -347,6 +458,145 @@ bool MaydayAdapter::Impl::ResolveGame() {
     return true;
 }
 
+bool MaydayAdapter::Impl::ResolveFreecam() {
+    if (freecam_resolved) return true;
+    const auto fail = [this](const char* key) {
+        fc_error_key = key;
+        return false;
+    };
+    if (!ResolveGame()) return fail("status.freecam_no_game_state");
+    player_rig_class = class_from_name(image, "Mayday.Players", "PlayerRig");
+    if (player_rig_class == nullptr) return fail("status.freecam_no_rig_class");
+    get_local_rig = class_get_method(player_rig_class, "get_Local", 0);
+    if (get_local_rig == nullptr) return fail("status.freecam_no_local_rig");
+    get_camera_rig = class_get_method(player_rig_class, "get_CameraRig", 0);
+    if (get_camera_rig == nullptr) {
+        get_camera_rig = class_get_method(player_rig_class, "get_cameraRig", 0);
+    }
+    get_view_camera = class_get_method(player_rig_class, "get_ViewCamera", 0);
+    if (get_view_camera == nullptr) {
+        get_view_camera = class_get_method(player_rig_class, "get_viewCamera", 0);
+    }
+    if (class_get_field != nullptr && field_get_offset != nullptr) {
+        camera_rig_field = class_get_field(player_rig_class, "cameraRig");
+        if (camera_rig_field != nullptr) {
+            camera_rig_offset = field_get_offset(camera_rig_field);
+        }
+        view_camera_field = class_get_field(player_rig_class, "viewCamera");
+        if (view_camera_field != nullptr) {
+            view_camera_offset = field_get_offset(view_camera_field);
+        }
+    }
+    get_look = class_get_method(player_rig_class, "get_Look", 0);
+    if (get_look == nullptr) get_look = class_get_method(player_rig_class, "get_look", 0);
+    if (get_look == nullptr) {
+        const std::string candidates = DescribeRigMethods();
+        if (!candidates.empty()) {
+            fc_diag_message = "rig: " + candidates;
+            return fail(fc_diag_message.c_str());
+        }
+        return fail("status.freecam_no_look_getter");
+    }
+    get_motor = class_get_method(player_rig_class, "get_Motor", 0);
+    if (get_motor == nullptr) get_motor = class_get_method(player_rig_class, "get_motor", 0);
+    if (get_motor == nullptr) {
+        const std::string candidates = DescribeRigMethods();
+        if (!candidates.empty()) {
+            fc_diag_message = "rig: " + candidates;
+            return fail(fc_diag_message.c_str());
+        }
+        return fail("status.freecam_no_motor_getter");
+    }
+
+    // UnityEngine.CoreModule 承载 Transform / Behaviour。
+    std::size_t count{};
+    void** const assemblies = domain_get_assemblies(domain, &count);
+    void* core_image{};
+    for (std::size_t i = 0; assemblies != nullptr && i < count; ++i) {
+        void* const candidate = assembly_get_image(assemblies[i]);
+        if (candidate == nullptr) continue;
+        const char* const name = image_get_name(candidate);
+        if (name != nullptr && std::strcmp(name, "UnityEngine.CoreModule.dll") == 0) {
+            core_image = candidate;
+            break;
+        }
+    }
+    if (core_image == nullptr) return fail("status.freecam_no_core_image");
+    void* const transform_class = class_from_name(core_image, "UnityEngine", "Transform");
+    void* const behaviour_class = class_from_name(core_image, "UnityEngine", "Behaviour");
+    void* const camera_class = class_from_name(core_image, "UnityEngine", "Camera");
+    void* const component_class = class_from_name(core_image, "UnityEngine", "Component");
+    if (transform_class == nullptr || behaviour_class == nullptr) {
+        return fail("status.freecam_no_unity_classes");
+    }
+    if (camera_class != nullptr) {
+        camera_get_main = class_get_method(camera_class, "get_main", 0);
+    }
+    if (component_class != nullptr) {
+        component_get_transform = class_get_method(component_class, "get_transform", 0);
+    }
+    transform_get_position = class_get_method(transform_class, "get_position", 0);
+    transform_set_position = class_get_method(transform_class, "set_position", 1);
+    transform_get_euler = class_get_method(transform_class, "get_eulerAngles", 0);
+    transform_set_euler = class_get_method(transform_class, "set_eulerAngles", 1);
+    transform_get_local_position = class_get_method(transform_class, "get_localPosition", 0);
+    transform_set_local_position = class_get_method(transform_class, "set_localPosition", 1);
+    transform_get_local_rotation = class_get_method(transform_class, "get_localRotation", 0);
+    transform_set_local_rotation = class_get_method(transform_class, "set_localRotation", 1);
+    behaviour_get_enabled = class_get_method(behaviour_class, "get_enabled", 0);
+    behaviour_set_enabled = class_get_method(behaviour_class, "set_enabled", 1);
+    const bool camera_available = get_camera_rig != nullptr ||
+        camera_rig_field != nullptr || view_camera_field != nullptr ||
+        (get_view_camera != nullptr && component_get_transform != nullptr) ||
+        (camera_get_main != nullptr && component_get_transform != nullptr);
+    if (!camera_available) return fail("status.freecam_no_camera_rig");
+    if (get_local_rig == nullptr || get_look == nullptr ||
+        get_motor == nullptr || transform_get_position == nullptr ||
+        transform_set_position == nullptr || transform_get_euler == nullptr ||
+        transform_set_euler == nullptr || transform_get_local_position == nullptr ||
+        transform_set_local_position == nullptr ||
+        transform_get_local_rotation == nullptr ||
+        transform_set_local_rotation == nullptr || behaviour_get_enabled == nullptr ||
+        behaviour_set_enabled == nullptr) {
+        return fail("status.freecam_no_unity_methods");
+    }
+    freecam_resolved = true;
+    return true;
+}
+
+std::string MaydayAdapter::Impl::DescribeRigMethods() {
+    std::string out;
+    if (player_rig_class == nullptr || class_get_methods == nullptr ||
+        method_get_name == nullptr) {
+        return out;
+    }
+    void* iterator{};
+    int total = 0;
+    while (void* const method = class_get_methods(player_rig_class, &iterator)) {
+        ++total;
+        const char* const name = method_get_name(method);
+        if (name == nullptr) continue;
+        std::string lower(name);
+        for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (lower.find("look") == std::string::npos &&
+            lower.find("motor") == std::string::npos &&
+            lower.find("cam") == std::string::npos &&
+            lower.find("rig") == std::string::npos &&
+            lower.find("local") == std::string::npos) {
+            continue;
+        }
+        if (out.size() > 480) break;
+        if (!out.empty()) out += ',';
+        out += name;
+        out += '/';
+        out += std::to_string(method_get_param_count != nullptr
+            ? method_get_param_count(method) : -1);
+    }
+    out += " n=";
+    out += std::to_string(total);
+    return out;
+}
+
 void* MaydayAdapter::Impl::GameInstance() {
     void* exception{};
     return runtime_invoke(get_instance, nullptr, nullptr, &exception);
@@ -369,6 +619,278 @@ bool MaydayAdapter::Impl::InvokeVoid(void* method, void* object, void** params) 
     return exception == nullptr;
 }
 
+bool MaydayAdapter::Impl::InvokeVec3(void* method, void* object, Vec3* out_value) {
+    if (method == nullptr || out_value == nullptr) return false;
+    void* exception{};
+    void* const boxed = runtime_invoke(method, object, nullptr, &exception);
+    if (exception != nullptr || boxed == nullptr || object_unbox == nullptr) return false;
+    *out_value = *static_cast<Vec3*>(object_unbox(boxed));
+    return true;
+}
+
+bool MaydayAdapter::Impl::InvokeQuat(void* method, void* object, Quat* out_value) {
+    if (method == nullptr || out_value == nullptr) return false;
+    void* exception{};
+    void* const boxed = runtime_invoke(method, object, nullptr, &exception);
+    if (exception != nullptr || boxed == nullptr || object_unbox == nullptr) return false;
+    *out_value = *static_cast<Quat*>(object_unbox(boxed));
+    return true;
+}
+
+bool MaydayAdapter::Impl::InvokeBool(void* method, void* object, bool* out_value) {
+    if (method == nullptr || out_value == nullptr) return false;
+    void* exception{};
+    void* const boxed = runtime_invoke(method, object, nullptr, &exception);
+    if (exception != nullptr || boxed == nullptr || object_unbox == nullptr) return false;
+    *out_value = *static_cast<std::uint8_t*>(object_unbox(boxed)) != 0;
+    return true;
+}
+
+bool MaydayAdapter::Impl::InvokeVoidArg(void* method, void* object, void* argument) {
+    if (method == nullptr) return false;
+    void* exception{};
+    void* params[] = {argument};
+    runtime_invoke(method, object, params, &exception);
+    return exception == nullptr;
+}
+
+bool MaydayAdapter::Impl::ActivateFreecam() {
+    if (freecam_applied) return true;
+    fc_error_key = nullptr;
+    void* exception{};
+    void* const local = runtime_invoke(get_local_rig, nullptr, nullptr, &exception);
+    if (exception != nullptr || local == nullptr) {
+        fc_error_key = "status.not_in_flight";
+        return false;
+    }
+    void* camera_rig{};
+    if (camera_rig_field != nullptr && camera_rig_offset > 0 && camera_rig_offset < 0x1000) {
+        camera_rig = *reinterpret_cast<void**>(
+            reinterpret_cast<std::uint8_t*>(local) + camera_rig_offset);
+    }
+    if (camera_rig == nullptr && view_camera_field != nullptr &&
+        view_camera_offset > 0 && view_camera_offset < 0x1000 &&
+        component_get_transform != nullptr) {
+        void* const camera = *reinterpret_cast<void**>(
+            reinterpret_cast<std::uint8_t*>(local) + view_camera_offset);
+        if (camera != nullptr) {
+            camera_rig = runtime_invoke(component_get_transform, camera, nullptr, &exception);
+            if (exception != nullptr) exception = nullptr;
+        }
+    }
+    if (camera_rig == nullptr && get_camera_rig != nullptr) {
+        camera_rig = runtime_invoke(get_camera_rig, local, nullptr, &exception);
+        if (exception != nullptr) exception = nullptr;
+    }
+    if (camera_rig == nullptr && get_view_camera != nullptr &&
+        component_get_transform != nullptr) {
+        void* const camera = runtime_invoke(get_view_camera, local, nullptr, &exception);
+        if (exception != nullptr) exception = nullptr;
+        if (camera != nullptr) {
+            camera_rig = runtime_invoke(component_get_transform, camera, nullptr, &exception);
+            if (exception != nullptr) exception = nullptr;
+        }
+    }
+    if (camera_rig == nullptr && camera_get_main != nullptr &&
+        component_get_transform != nullptr) {
+        void* const camera = runtime_invoke(camera_get_main, nullptr, nullptr, &exception);
+        if (exception != nullptr) exception = nullptr;
+        if (camera != nullptr) {
+            camera_rig = runtime_invoke(component_get_transform, camera, nullptr, &exception);
+            if (exception != nullptr) exception = nullptr;
+        }
+    }
+    if (camera_rig == nullptr) {
+        fc_error_key = "status.freecam_no_camera";
+        return false;
+    }
+    void* const look = runtime_invoke(get_look, local, nullptr, &exception);
+    if (exception != nullptr) {
+        fc_error_key = "status.freecam_no_look";
+        return false;
+    }
+    void* motor = runtime_invoke(get_motor, local, nullptr, &exception);
+    if (exception != nullptr) motor = nullptr;  // 座位等状态可能没有 motor，相机仍可接管
+
+    Vec3 local_position{};
+    Quat local_rotation{};
+    Vec3 world_position{};
+    Vec3 euler{};
+    if (!InvokeVec3(transform_get_local_position, camera_rig, &local_position) ||
+        !InvokeQuat(transform_get_local_rotation, camera_rig, &local_rotation) ||
+        !InvokeVec3(transform_get_position, camera_rig, &world_position) ||
+        !InvokeVec3(transform_get_euler, camera_rig, &euler)) {
+        fc_error_key = "status.freecam_transform";
+        return false;
+    }
+
+    bool look_enabled = false;
+    bool motor_enabled = false;
+    if (look != nullptr) {
+        static_cast<void>(InvokeBool(behaviour_get_enabled, look, &look_enabled));
+        bool disabled = false;
+        if (!InvokeVoidArg(behaviour_set_enabled, look, &disabled)) {
+            fc_error_key = "status.freecam_components";
+            return false;
+        }
+    }
+    if (motor != nullptr) {
+        static_cast<void>(InvokeBool(behaviour_get_enabled, motor, &motor_enabled));
+        bool disabled = false;
+        static_cast<void>(InvokeVoidArg(behaviour_set_enabled, motor, &disabled));
+    }
+
+    fc_camera_rig = camera_rig;
+    fc_local_rig = local;
+    fc_look = look;
+    fc_motor = motor;
+    fc_look_enabled = look_enabled;
+    fc_motor_enabled = motor_enabled;
+    fc_saved_local_position = local_position;
+    fc_saved_local_rotation = local_rotation;
+    fc_position = world_position;
+    fc_yaw = euler.y;
+    fc_pitch = euler.x;
+    fc_apply_started = false;
+    freecam_applied = true;
+    return true;
+}
+
+bool MaydayAdapter::Impl::DeactivateFreecam() {
+    if (!freecam_applied) return true;
+    // 玩家对象可能已随换局/重生被销毁；此时旧指针不可再触碰。
+    void* exception{};
+    void* const local = runtime_invoke(get_local_rig, nullptr, nullptr, &exception);
+    if (exception != nullptr || local == nullptr || local != fc_local_rig) {
+        AbandonFreecam();
+        return true;
+    }
+    bool ok = true;
+    // 先恢复相机局部变换，再恢复组件；下一游戏帧 PlayerLook 会按正常逻辑摆放相机。
+    if (fc_camera_rig != nullptr) {
+        ok = InvokeVoidArg(transform_set_local_position, fc_camera_rig,
+                           &fc_saved_local_position) && ok;
+        ok = InvokeVoidArg(transform_set_local_rotation, fc_camera_rig,
+                           &fc_saved_local_rotation) && ok;
+    }
+    if (fc_look != nullptr) {
+        ok = InvokeVoidArg(behaviour_set_enabled, fc_look, &fc_look_enabled) && ok;
+    }
+    if (fc_motor != nullptr) {
+        ok = InvokeVoidArg(behaviour_set_enabled, fc_motor, &fc_motor_enabled) && ok;
+    }
+    AbandonFreecam();
+    return ok;
+}
+
+void MaydayAdapter::Impl::AbandonFreecam() noexcept {
+    fc_local_rig = nullptr;
+    fc_camera_rig = nullptr;
+    fc_look = nullptr;
+    fc_motor = nullptr;
+    fc_apply_started = false;
+    freecam_applied = false;
+}
+
+void MaydayAdapter::Impl::ApplyFreecamInput(
+    float forward, float right, float up,
+    float yaw_delta, float pitch_delta, float speed) {
+    if (!freecam_applied || fc_camera_rig == nullptr) return;
+    constexpr float kPi = 3.14159265358979323846f;
+    const auto now = std::chrono::steady_clock::now();
+    double dt = 0.0;
+    if (fc_apply_started) {
+        dt = std::chrono::duration<double>(now - fc_last_apply).count();
+        dt = std::clamp(dt, 0.0, 0.1);
+    }
+    fc_apply_started = true;
+    fc_last_apply = now;
+
+    fc_yaw += yaw_delta;
+    if (fc_yaw > 180.0f) fc_yaw -= 360.0f;
+    if (fc_yaw < -180.0f) fc_yaw += 360.0f;
+    fc_pitch = std::clamp(fc_pitch + pitch_delta, -89.0f, 89.0f);
+
+    const float yaw_rad = fc_yaw * kPi / 180.0f;
+    const float pitch_rad = fc_pitch * kPi / 180.0f;
+    const float cos_yaw = std::cos(yaw_rad);
+    const float sin_yaw = std::sin(yaw_rad);
+    const float cos_pitch = std::cos(pitch_rad);
+    const float sin_pitch = std::sin(pitch_rad);
+    // Unity 欧拉角：x 为正 = 俯视，y 为正 = 右转；forward 自动包含俯仰。
+    const Vec3 direction{
+        std::clamp(forward, -1.0f, 1.0f) * sin_yaw * cos_pitch +
+            std::clamp(right, -1.0f, 1.0f) * cos_yaw,
+        -std::clamp(forward, -1.0f, 1.0f) * sin_pitch + std::clamp(up, -1.0f, 1.0f),
+        std::clamp(forward, -1.0f, 1.0f) * cos_yaw * cos_pitch -
+            std::clamp(right, -1.0f, 1.0f) * sin_yaw};
+    const float scale = (std::max)(speed, 0.0f) * static_cast<float>(dt);
+    fc_position.x += direction.x * scale;
+    fc_position.y += direction.y * scale;
+    fc_position.z += direction.z * scale;
+
+    Vec3 euler{fc_pitch, fc_yaw, 0.0f};
+    if (dt > 0.0) {
+        static_cast<void>(InvokeVoidArg(transform_set_position, fc_camera_rig, &fc_position));
+    }
+    static_cast<void>(InvokeVoidArg(transform_set_euler, fc_camera_rig, &euler));
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetActive(
+    void* user, std::int32_t active) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    std::scoped_lock lock(impl->resolve_mutex, impl->freecam_mutex);
+    if (impl->freecam_shutdown) return MoneyStatus("status.unavailable");
+    if (active != 0) {
+        if (!impl->ResolveFreecam()) {
+            return MoneyStatus(impl->fc_error_key != nullptr
+                ? impl->fc_error_key : "status.freecam_symbols");
+        }
+        if (impl->AttachedThread() == nullptr) return MoneyStatus("status.attach_failed");
+        if (!impl->ActivateFreecam()) {
+            return MoneyStatus(impl->fc_error_key != nullptr
+                ? impl->fc_error_key : "status.freecam_failed");
+        }
+        return {ANOMALY_STATUS_V1_OK, 0, {}};
+    }
+    if (!impl->DeactivateFreecam()) return MoneyStatus("status.failed");
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamGetState(
+    void* user, std::int32_t* out_state) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr || out_state == nullptr) {
+        return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    }
+    std::scoped_lock lock(impl->freecam_mutex);
+    *out_state = impl->freecam_applied ? 1 : 0;
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetInput(
+    void* user, float forward, float right, float up,
+    float yaw_delta, float pitch_delta, float speed) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    std::scoped_lock lock(impl->freecam_mutex);
+    if (!impl->freecam_applied) return {ANOMALY_STATUS_V1_OK, 0, {}};
+    if (impl->AttachedThread() == nullptr) return MoneyStatus("status.attach_failed");
+    // 换局/重生会替换本地 PlayerRig；旧指针不可再用，直接按新对象重新接管。
+    void* exception{};
+    void* const local = impl->runtime_invoke(impl->get_local_rig, nullptr, nullptr, &exception);
+    if (exception != nullptr || local == nullptr || local != impl->fc_local_rig) {
+        impl->AbandonFreecam();
+        if (local == nullptr || !impl->ActivateFreecam()) {
+            return MoneyStatus(impl->fc_error_key != nullptr
+                ? impl->fc_error_key : "status.freecam_failed");
+        }
+    }
+    impl->ApplyFreecamInput(forward, right, up, yaw_delta, pitch_delta, speed);
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
 void MaydayAdapter::Impl::RevokePublished() {
     void* const previous = table_published.exchange(nullptr, std::memory_order_acq_rel);
     if (previous != nullptr) {
@@ -377,6 +899,10 @@ void MaydayAdapter::Impl::RevokePublished() {
     void* const money = money_published.exchange(nullptr, std::memory_order_acq_rel);
     if (money != nullptr) {
         static_cast<void>(ProcessAdapterServices().Revoke(kMoneyServiceId, money));
+    }
+    void* const freecam = freecam_published.exchange(nullptr, std::memory_order_acq_rel);
+    if (freecam != nullptr) {
+        static_cast<void>(ProcessAdapterServices().Revoke(kFreecamServiceId, freecam));
     }
 }
 
@@ -400,6 +926,13 @@ bool MaydayAdapter::Stop(std::chrono::milliseconds timeout) noexcept {
     while (impl_->probe_worker.joinable() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         break;  // 轮询线程 500ms 一醒；析构兜底 join
+    }
+    {
+        std::scoped_lock lock(impl_->resolve_mutex, impl_->freecam_mutex);
+        impl_->freecam_shutdown = true;
+        if (impl_->freecam_applied && impl_->AttachedThread() != nullptr) {
+            static_cast<void>(impl_->DeactivateFreecam());
+        }
     }
     impl_->RevokePublished();
     static_cast<void>(ClearTickCallback(std::chrono::seconds(2)));
@@ -454,6 +987,8 @@ std::string MaydayAdapter::DiagnosticsJson() const {
          << (impl_->table_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
          << ",\"moneyServicePublished\":"
          << (impl_->money_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
+         << ",\"freecamServicePublished\":"
+         << (impl_->freecam_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
          << "}";
     return json.str();
 }

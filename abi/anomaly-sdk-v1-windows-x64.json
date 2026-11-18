@@ -1272,7 +1272,7 @@
       }
     },
     "AnomalyInputServiceV1": {
-      "size": 56,
+      "size": 64,
       "alignment": 8,
       "offsets": {
         "struct_size": 0,
@@ -1282,7 +1282,8 @@
         "was_pressed": 24,
         "register_hotkey": 32,
         "release_hotkey": 40,
-        "capture_state": 48
+        "capture_state": 48,
+        "mouse_delta": 56
       }
     },
     "AnomalyLocalizationServiceV1": {

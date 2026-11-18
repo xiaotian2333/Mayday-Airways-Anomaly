@@ -1226,6 +1226,47 @@ void ANOMALY_CALL ProxySetNextItemWidth(void* user, const float width) {
     }
 }
 
+void ANOMALY_CALL ProxyTextWrapped(void* user, AnomalyStringViewV1 text) {
+    const auto* context = UiProxyContext(user);
+    auto callback = AcquireUiCallback(context);
+    if (context != nullptr && context->scope != nullptr && !callback) return;
+    if (context != nullptr && context->service != nullptr &&
+        HasUiField<decltype(AnomalyUiServiceV1::text_wrapped)>(
+            context->service, offsetof(AnomalyUiServiceV1, text_wrapped)) &&
+        context->service->text_wrapped != nullptr) {
+        context->service->text_wrapped(context->service->user, text);
+    }
+}
+
+int ANOMALY_CALL ProxyBeginChildAutoFitY(
+    void* user, AnomalyStringViewV1 id, const float width, const float max_height) {
+    const auto* context = UiProxyContext(user);
+    auto callback = AcquireUiCallback(context);
+    if (context != nullptr && context->scope != nullptr && !callback) return 0;
+    return context != nullptr && context->service != nullptr &&
+            HasUiField<decltype(AnomalyUiServiceV1::begin_child_auto_fit_y)>(
+                context->service, offsetof(AnomalyUiServiceV1, begin_child_auto_fit_y)) &&
+            context->service->begin_child_auto_fit_y != nullptr
+        ? context->service->begin_child_auto_fit_y(
+              context->service->user, id, width, max_height)
+        : 0;
+}
+
+int ANOMALY_CALL ProxySliderFloatEnabled(
+    void* user, AnomalyStringViewV1 label, float* value,
+    const float minimum, const float maximum, const int enabled) {
+    const auto* context = UiProxyContext(user);
+    auto callback = AcquireUiCallback(context);
+    if (context != nullptr && context->scope != nullptr && !callback) return 0;
+    return context != nullptr && context->service != nullptr &&
+            HasUiField<decltype(AnomalyUiServiceV1::slider_float_enabled)>(
+                context->service, offsetof(AnomalyUiServiceV1, slider_float_enabled)) &&
+            context->service->slider_float_enabled != nullptr
+        ? context->service->slider_float_enabled(
+              context->service->user, label, value, minimum, maximum, enabled)
+        : 0;
+}
+
 // The overlay tail is published only when the host table carries all of it.
 const AnomalyUiServiceV1* OverlayService(const PluginUiProxyContext* context) noexcept {
     const AnomalyUiServiceV1* const service =
@@ -1364,7 +1405,8 @@ AnomalyUiServiceV1 MakeUiProxy(PluginUiProxyContext* context) noexcept {
         ProxySetNextWindowSizeConstraints, ProxyGetWindowSize, ProxyInputUInt32, ProxyInputDouble,
         ProxyDeveloperModeEnabled, ProxyInputText, ProxyButtonEnabled,
         ProxySameLine, ProxySetCursorPosX, ProxyTextLink,
-        ProxyBeginTabBar, ProxyBeginTabItem, ProxyEndTabItem, ProxyEndTabBar};
+        ProxyBeginTabBar, ProxyBeginTabItem, ProxyEndTabItem, ProxyEndTabBar,
+        ProxyTextWrapped, ProxyBeginChildAutoFitY, ProxySliderFloatEnabled};
     proxy.set_next_item_width = ProxySetNextItemWidth;
     proxy.overlay_viewport_size = ProxyOverlayViewportSize;
     proxy.overlay_glass = ProxyOverlayGlass;
@@ -3257,6 +3299,22 @@ AnomalyStatusV1 ANOMALY_CALL InputCaptureStateV1(void* user, std::uint32_t* flag
     });
 }
 
+AnomalyStatusV1 ANOMALY_CALL InputMouseDeltaV1(
+    void* user, float* delta_x, float* delta_y) {
+    if (delta_x == nullptr || delta_y == nullptr) {
+        return StatusV1(ANOMALY_STATUS_V1_INVALID_ARGUMENT, "mouse delta is null");
+    }
+    *delta_x = 0.0F;
+    *delta_y = 0.0F;
+    return InvokeUiResourceService(user, [&](PluginServiceContext& context) {
+        if (context.input == nullptr) return StatusV1(ANOMALY_STATUS_V1_UNAVAILABLE, "input is not ready");
+        const anomaly::InputSnapshot snapshot = context.input->Snapshot();
+        *delta_x = snapshot.mouse_delta_x;
+        *delta_y = snapshot.mouse_delta_y;
+        return StatusV1(ANOMALY_STATUS_V1_OK);
+    });
+}
+
 AnomalyStatusV1 JsonCopyString(
     const std::string_view source, char* destination, std::size_t* inout_size) noexcept {
     if (inout_size == nullptr) {
@@ -4646,7 +4704,8 @@ bool PluginManager::Activate(LoadedPlugin& plugin) {
     plugin.service_context.input_service = {
         sizeof(AnomalyInputServiceV1), ANOMALY_INPUT_SERVICE_V1_VERSION,
         &plugin.service_context,
-        InputSnapshotV1, WasPressedV1, RegisterHotkeyV1, ReleaseHotkeyV1, InputCaptureStateV1};
+        InputSnapshotV1, WasPressedV1, RegisterHotkeyV1, ReleaseHotkeyV1, InputCaptureStateV1,
+        InputMouseDeltaV1};
     if (plugin.service_context.ahud_state == nullptr) {
         plugin.service_context.ahud_state = std::make_shared<AhudProxyState>();
     }

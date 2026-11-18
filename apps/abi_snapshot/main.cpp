@@ -1563,7 +1563,8 @@ std::string BuildSnapshot() {
          {"was_pressed", offsetof(AnomalyInputServiceV1, was_pressed)},
          {"register_hotkey", offsetof(AnomalyInputServiceV1, register_hotkey)},
          {"release_hotkey", offsetof(AnomalyInputServiceV1, release_hotkey)},
-         {"capture_state", offsetof(AnomalyInputServiceV1, capture_state)}},
+         {"capture_state", offsetof(AnomalyInputServiceV1, capture_state)},
+         {"mouse_delta", offsetof(AnomalyInputServiceV1, mouse_delta)}},
         false);
     AppendStruct(
         output,

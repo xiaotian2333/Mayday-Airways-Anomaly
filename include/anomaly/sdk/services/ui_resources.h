@@ -236,6 +236,10 @@ typedef struct AnomalyInputServiceV1 {
     AnomalyStatusV1 (ANOMALY_CALL *release_hotkey)(
         void* user, AnomalyGenerationHandleV1 handle);
     AnomalyStatusV1 (ANOMALY_CALL *capture_state)(void* user, uint32_t* capture_flags);
+    // Append-only: accumulated mouse movement in pixels since the previous input
+    // frame (right/down positive). Check struct_size before using this field.
+    AnomalyStatusV1 (ANOMALY_CALL *mouse_delta)(
+        void* user, float* delta_x, float* delta_y);
 } AnomalyInputServiceV1;
 
 #ifdef __cplusplus

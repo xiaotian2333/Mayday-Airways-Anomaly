@@ -11,7 +11,7 @@ struct ServiceCapabilityMapping {
     std::string_view capability;
 };
 
-constexpr std::array<std::string_view, 48> kKnownCapabilities{
+constexpr std::array<std::string_view, 49> kKnownCapabilities{
     "mods",
     "commands",
     "configuration",
@@ -22,6 +22,7 @@ constexpr std::array<std::string_view, 48> kKnownCapabilities{
     "interop-hook",
     "interop-patch",
     "interop-signature",
+    "mayday-freecam",
     "mayday-money",
     "memory-read",
     "memory-write",
@@ -62,7 +63,7 @@ constexpr std::array<std::string_view, 48> kKnownCapabilities{
     "websocket",
 };
 
-constexpr std::array<ServiceCapabilityMapping, 48> kServiceCapabilities{{
+constexpr std::array<ServiceCapabilityMapping, 49> kServiceCapabilities{{
     {"anomaly.mods", "mods"},
     {"anomaly.plugin-state", "configuration"},
     {"anomaly.config", "configuration"},
@@ -78,6 +79,7 @@ constexpr std::array<ServiceCapabilityMapping, 48> kServiceCapabilities{{
     {"anomaly.interop.hook", "interop-hook"},
     {"anomaly.interop.patch", "interop-patch"},
     {"mayday.money", "mayday-money"},
+    {"mayday.freecam", "mayday-freecam"},
     {"anomaly.ui", "ui"},
     {"anomaly.localization", "ui"},
     {"anomaly.window", "ui-window"},
