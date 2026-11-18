@@ -155,6 +155,10 @@ unset(JSON_VALIDATOR_INSTALL)
 unset(JSON_VALIDATOR_BUILD_TESTS)
 unset(JSON_VALIDATOR_BUILD_EXAMPLES)
 unset(JSON_VALIDATOR_SHARED_LIBS)
+# validator 链接进手工映射的 Core，其函数级静态守卫同样要禁用 TLS 托管。
+if(TARGET nlohmann_json_schema_validator)
+    target_compile_options(nlohmann_json_schema_validator PRIVATE /Zc:threadSafeInit-)
+endif()
 
 # miniz provides the ZIP inflate used to install Dalamud-style plugin packages.
 FetchContent_Declare(
@@ -996,6 +1000,51 @@ target_link_libraries(
 # The Core is manually mapped and cannot use MSVC's loader-managed TLS slot for
 # function-local static guards. These targets initialize their process-scoped
 # local statics on the lifecycle thread before publishing concurrent services.
+# 名单必须覆盖最终链接进 anomaly_core 的全部本地静态库闭包（新 target 登记）。
+set(ANOMALY_MANUAL_MAP_TLS_FREE_TARGETS
+    anomaly_core
+    anomaly_telemetry
+    ue5mem_core
+    anomaly_config
+    anomaly_i18n
+    anomaly_internal_memory_services
+    ue5mem_memory
+    anomaly_runtime_kernel
+    anomaly_service_graph
+    anomaly_runtime_dispatchers
+    anomaly_dispatcher
+    anomaly_imgui
+    anomaly_minhook_backend
+    anomaly_hook_manager
+    anomaly_plugin_runtime
+    anomaly_ui_service
+    anomaly_platform_ui_model
+    anomaly_plugin_dependency_resolver
+    anomaly_plugin_catalog
+    anomaly_plugin_compatibility
+    anomaly_plugin_manifest
+    anomaly_semver
+    anomaly_plugin_package
+    anomaly_plugin_enablement
+    anomaly_repository_coordinator
+    anomaly_repository_network
+    anomaly_miniz
+    anomaly_artifact_crypto
+    anomaly_platform_settings
+    anomaly_reliable_storage
+    anomaly_platform_ui_layout
+    anomaly_platform_notice
+    anomaly_scoped_platform
+    anomaly_signature_updater
+    anomaly_plugin_shadow
+    anomaly_plugin_native_dependency
+    anomaly_pak_mod_runtime
+    anomaly_adapter_services
+    anomaly_websocket_server
+    anomaly_crash_reporter
+    anomaly_structured_logger
+    anomaly_ui_resources
+    anomaly_plugin_profile)
 foreach(target IN LISTS ANOMALY_MANUAL_MAP_TLS_FREE_TARGETS)
     target_compile_options(${target} PRIVATE /Zc:threadSafeInit-)
 endforeach()
