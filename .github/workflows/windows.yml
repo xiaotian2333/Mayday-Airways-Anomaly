@@ -167,9 +167,9 @@ jobs:
           release_html_url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
           color: '11052455'
           username: Anomaly
-          avatar_url: https://raw.githubusercontent.com/AnomalyNTE/Anomaly/main/logo.png
+          avatar_url: https://raw.githubusercontent.com/xiaotian2333/Mayday-Airways-Anomaly/main/logo.png
           footer_title: Anomaly
-          footer_icon_url: https://raw.githubusercontent.com/AnomalyNTE/Anomaly/main/logo.png
+          footer_icon_url: https://raw.githubusercontent.com/xiaotian2333/Mayday-Airways-Anomaly/main/logo.png
           footer_timestamp: true
   discord-test:
     # Manual "Run workflow" check of the Discord webhook: rebuilds the notes of
@@ -213,7 +213,7 @@ jobs:
           content: '`Discord webhook 测试消息，可忽略`'
           color: '11052455'
           username: Anomaly
-          avatar_url: https://raw.githubusercontent.com/AnomalyNTE/Anomaly/main/logo.png
+          avatar_url: https://raw.githubusercontent.com/xiaotian2333/Mayday-Airways-Anomaly/main/logo.png
           footer_title: Anomaly (测试)
-          footer_icon_url: https://raw.githubusercontent.com/AnomalyNTE/Anomaly/main/logo.png
+          footer_icon_url: https://raw.githubusercontent.com/xiaotian2333/Mayday-Airways-Anomaly/main/logo.png
           footer_timestamp: true
