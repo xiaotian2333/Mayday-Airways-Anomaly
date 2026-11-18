@@ -1,11 +1,12 @@
 name: windows
 
+# 分支推送/PR 的常规构建。v* tag 的构建与发版在 windows-release.yml：
+# paths-ignore 对 tag push 同样生效会让仅文档变更的 tag 静默跳过发布，
+# 因此 tag 走独立 workflow（无 paths 过滤）。
 on:
   push:
     branches:
       - '**'
-    tags:
-      - 'v*'
     paths-ignore:
       - '**/*.md'
   pull_request:
@@ -40,16 +41,15 @@ jobs:
       - name: Configure
         shell: pwsh
         env:
-          # Fixtures and test plugin packages are opt-in; a normal run
-          # builds only the Runtime, Tools and SDK targets.
-          ANOMALY_BUILD_OPTIONAL: ${{ inputs.fixtures == true && 'ON' || 'OFF' }}
+          # ctest fixtures 是常规门禁，所有构建都开启；test plugin 包保持按需 opt-in。
+          ANOMALY_BUILD_TEST_PLUGINS: ${{ inputs.fixtures == true && 'ON' || 'OFF' }}
           # Exact source-cache hits can skip both downloading and extracting.
           ANOMALY_DEPENDENCIES_CACHED: ${{ steps.dependency-sources.outputs.cache-hit == 'true' && 'ON' || 'OFF' }}
         run: |
           $arguments = @(
             '--preset', 'windows-vs2022',
-            "-DANOMALY_BUILD_TEST_FIXTURES=$env:ANOMALY_BUILD_OPTIONAL",
-            "-DANOMALY_BUILD_TEST_PLUGINS=$env:ANOMALY_BUILD_OPTIONAL",
+            '-DANOMALY_BUILD_TEST_FIXTURES=ON',
+            "-DANOMALY_BUILD_TEST_PLUGINS=$env:ANOMALY_BUILD_TEST_PLUGINS",
             "-DFETCHCONTENT_FULLY_DISCONNECTED=$env:ANOMALY_DEPENDENCIES_CACHED"
           )
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
@@ -64,6 +64,11 @@ jobs:
           key: ${{ steps.dependency-sources.outputs.cache-primary-key }}
       - name: Build
         run: cmake --build --preset windows-relwithdebinfo --parallel
+      - name: Plugin i18n gate
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/check_plugin_i18n.ps1
+      - name: Run ctest fixtures
+        run: ctest --test-dir .build/windows-vs2022 -C RelWithDebInfo --output-on-failure
       - name: Stage CI runtime and tools
         if: github.ref_type != 'tag'
         shell: pwsh
@@ -104,6 +109,8 @@ jobs:
             .build/release/Anomaly-*-sdk.zip
           if-no-files-found: error
   release:
+    # v* tag 的发版已由 windows-release.yml 接管（tag push 不再触发本
+    # workflow）；以下条件保留为防御，仅在异常路径下生效。
     if: github.ref_type == 'tag'
     needs: build
     permissions:

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "messages": {
+    "window.title": "游戏 Tick 计数器",
+    "plugin.description": "统计并展示已验证的游戏线程 tick 数量。",
+    "state.ticks": "已验证的游戏线程 tick 数：{0}"
+  }
+}

@@ -3,6 +3,7 @@
   "locale": "zh-CN",
   "messages": {
     "greeting": "来自纯 C Anomaly SDK 示例的问候。",
-    "window.title": "你好 UI"
+    "window.title": "你好 UI",
+    "plugin.description": "纯 C SDK 最小示例：绘制一个本地化窗口与贴图。"
   }
 }

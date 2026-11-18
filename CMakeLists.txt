@@ -117,14 +117,16 @@ FetchContent_Declare(
     URL_HASH SHA256=7a417e3571cde3199cb709d4f732709172ceb35f1ff740e4564faf72a79330c4
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
-FetchContent_MakeAvailable(blake3)
-add_library(anomaly_blake3 STATIC
-    "${blake3_SOURCE_DIR}/c/blake3.c"
-    "${blake3_SOURCE_DIR}/c/blake3_dispatch.c"
-    "${blake3_SOURCE_DIR}/c/blake3_portable.c")
-target_include_directories(anomaly_blake3 PUBLIC "${blake3_SOURCE_DIR}/c")
-target_compile_definitions(anomaly_blake3 PRIVATE
-    BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_USE_NEON=0)
+if(ANOMALY_BUILD_OPTIONAL_LIBS)
+    FetchContent_MakeAvailable(blake3)
+    add_library(anomaly_blake3 STATIC
+        "${blake3_SOURCE_DIR}/c/blake3.c"
+        "${blake3_SOURCE_DIR}/c/blake3_dispatch.c"
+        "${blake3_SOURCE_DIR}/c/blake3_portable.c")
+    target_include_directories(anomaly_blake3 PUBLIC "${blake3_SOURCE_DIR}/c")
+    target_compile_definitions(anomaly_blake3 PRIVATE
+        BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_USE_NEON=0)
+endif()
 
 set(JSON_BuildTests OFF)
 set(JSON_Install OFF)
@@ -190,72 +192,78 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     SOURCE_SUBDIR anomaly-no-cmake
 )
-FetchContent_MakeAvailable(miniaudio rtaudio)
-add_library(anomaly_miniaudio STATIC "${miniaudio_SOURCE_DIR}/miniaudio.c")
-target_include_directories(anomaly_miniaudio PUBLIC "${miniaudio_SOURCE_DIR}")
-add_library(anomaly_rtaudio_asio STATIC
-    "${rtaudio_SOURCE_DIR}/RtAudio.cpp"
-    "${rtaudio_SOURCE_DIR}/include/asio.cpp"
-    "${rtaudio_SOURCE_DIR}/include/asiodrivers.cpp"
-    "${rtaudio_SOURCE_DIR}/include/asiolist.cpp"
-    "${rtaudio_SOURCE_DIR}/include/iasiothiscallresolver.cpp")
-target_include_directories(anomaly_rtaudio_asio PUBLIC
-    "${rtaudio_SOURCE_DIR}" "${rtaudio_SOURCE_DIR}/include")
-target_compile_definitions(anomaly_rtaudio_asio PUBLIC __WINDOWS_ASIO__)
-target_link_libraries(anomaly_rtaudio_asio PUBLIC ole32 winmm user32 advapi32)
-if(MSVC)
-    target_compile_options(anomaly_miniaudio PRIVATE /w)
-    target_compile_options(anomaly_rtaudio_asio PRIVATE /w)
+if(ANOMALY_BUILD_OPTIONAL_LIBS)
+    FetchContent_MakeAvailable(miniaudio rtaudio)
+    add_library(anomaly_miniaudio STATIC "${miniaudio_SOURCE_DIR}/miniaudio.c")
+    target_include_directories(anomaly_miniaudio PUBLIC "${miniaudio_SOURCE_DIR}")
+    add_library(anomaly_rtaudio_asio STATIC
+        "${rtaudio_SOURCE_DIR}/RtAudio.cpp"
+        "${rtaudio_SOURCE_DIR}/include/asio.cpp"
+        "${rtaudio_SOURCE_DIR}/include/asiodrivers.cpp"
+        "${rtaudio_SOURCE_DIR}/include/asiolist.cpp"
+        "${rtaudio_SOURCE_DIR}/include/iasiothiscallresolver.cpp")
+    target_include_directories(anomaly_rtaudio_asio PUBLIC
+        "${rtaudio_SOURCE_DIR}" "${rtaudio_SOURCE_DIR}/include")
+    target_compile_definitions(anomaly_rtaudio_asio PUBLIC __WINDOWS_ASIO__)
+    target_link_libraries(anomaly_rtaudio_asio PUBLIC ole32 winmm user32 advapi32)
+    if(MSVC)
+        target_compile_options(anomaly_miniaudio PRIVATE /w)
+        target_compile_options(anomaly_rtaudio_asio PRIVATE /w)
+    endif()
 endif()
-# Monkey's Audio SDK decodes .ape for HiFiVehicleMusic (official SDK archive,
-# built as a static library from its library sources; its CMake project is skipped).
-FetchContent_Declare(
-    monkeys_audio
-    URL https://monkeysaudio.com/files/MAC_1327_SDK.zip
-    URL_HASH SHA256=c47c6b36f6a7bd50d990f2eb36a70915c0074a7b9634be396c94464905e76686
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    SOURCE_SUBDIR anomaly-no-cmake
-)
-FetchContent_MakeAvailable(monkeys_audio)
-set(ANOMALY_MONKEYS_AUDIO_INCLUDE_DIRS
-    "${monkeys_audio_SOURCE_DIR}/Source/Shared" "${monkeys_audio_SOURCE_DIR}/Source/MACLib")
-set(anomaly_monkeys_audio_sources)
-foreach(anomaly_mac_source IN ITEMS
-        Shared/BufferIO Shared/CharacterHelper Shared/CircleBuffer Shared/CPUFeatures Shared/CRC
-        Shared/GlobalFunctions Shared/MemoryIO Shared/Semaphore Shared/Thread Shared/WholeFileIO
-        Shared/WinFileIO
-        MACLib/APECompress MACLib/APECompressCore MACLib/APECompressCreate MACLib/APEDecompress
-        MACLib/APEDecompressCore MACLib/APEHeader MACLib/APEInfo MACLib/APELink MACLib/APETag
-        MACLib/BitArray MACLib/FloatTransform MACLib/MACLib MACLib/MACProgressHelper MACLib/MD5
-        MACLib/NewPredictor MACLib/NNFilter MACLib/NNFilterGeneric MACLib/NNFilterSSE2
-        MACLib/NNFilterSSE4.1 MACLib/NNFilterAVX2 MACLib/NNFilterAVX512 MACLib/Prepare
-        MACLib/UnBitArray MACLib/UnBitArrayBase MACLib/WAVInputSource MACLib/Interim
-        MACLib/Old/NewPredictorOld MACLib/Old/AntiPredictorOld MACLib/Old/AntiPredictorExtraHighOld
-        MACLib/Old/AntiPredictorFastOld MACLib/Old/AntiPredictorHighOld MACLib/Old/AntiPredictorNormalOld
-        MACLib/Old/APEDecompressCoreOld MACLib/Old/APEDecompressOld MACLib/Old/UnBitArrayOld
-        MACLib/Old/UnMACOld)
-    list(APPEND anomaly_monkeys_audio_sources "${monkeys_audio_SOURCE_DIR}/Source/${anomaly_mac_source}.cpp")
-endforeach()
-# dsd2pcm converts DSD to PCM when neither native DSD nor DoP reaches the DAC.
-FetchContent_Declare(
-    dsd2pcm
-    URL https://github.com/GiangLH/dsd2pcm/archive/354fcb539d11920980ecd88249954f883a3d16f4.tar.gz
-    URL_HASH SHA256=bd01b056e8e82ddb6c6859cce4f359925cdee4459c8b2bc11d0ebe8a5599f2ba
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    SOURCE_SUBDIR anomaly-no-cmake
-)
-FetchContent_MakeAvailable(dsd2pcm)
-add_library(anomaly_dsd2pcm STATIC "${dsd2pcm_SOURCE_DIR}/dsd2pcm.c")
-target_include_directories(anomaly_dsd2pcm PUBLIC "${dsd2pcm_SOURCE_DIR}")
-if(MSVC)
-    target_compile_options(anomaly_dsd2pcm PRIVATE /w)
+if(ANOMALY_BUILD_OPTIONAL_LIBS)
+    # Monkey's Audio SDK decodes .ape for HiFiVehicleMusic (official SDK archive,
+    # built as a static library from its library sources; its CMake project is skipped).
+    FetchContent_Declare(
+        monkeys_audio
+        URL https://monkeysaudio.com/files/MAC_1327_SDK.zip
+        URL_HASH SHA256=c47c6b36f6a7bd50d990f2eb36a70915c0074a7b9634be396c94464905e76686
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SOURCE_SUBDIR anomaly-no-cmake
+    )
+    FetchContent_MakeAvailable(monkeys_audio)
+    set(ANOMALY_MONKEYS_AUDIO_INCLUDE_DIRS
+        "${monkeys_audio_SOURCE_DIR}/Source/Shared" "${monkeys_audio_SOURCE_DIR}/Source/MACLib")
+    set(anomaly_monkeys_audio_sources)
+    foreach(anomaly_mac_source IN ITEMS
+            Shared/BufferIO Shared/CharacterHelper Shared/CircleBuffer Shared/CPUFeatures Shared/CRC
+            Shared/GlobalFunctions Shared/MemoryIO Shared/Semaphore Shared/Thread Shared/WholeFileIO
+            Shared/WinFileIO
+            MACLib/APECompress MACLib/APECompressCore MACLib/APECompressCreate MACLib/APEDecompress
+            MACLib/APEDecompressCore MACLib/APEHeader MACLib/APEInfo MACLib/APELink MACLib/APETag
+            MACLib/BitArray MACLib/FloatTransform MACLib/MACLib MACLib/MACProgressHelper MACLib/MD5
+            MACLib/NewPredictor MACLib/NNFilter MACLib/NNFilterGeneric MACLib/NNFilterSSE2
+            MACLib/NNFilterSSE4.1 MACLib/NNFilterAVX2 MACLib/NNFilterAVX512 MACLib/Prepare
+            MACLib/UnBitArray MACLib/UnBitArrayBase MACLib/WAVInputSource MACLib/Interim
+            MACLib/Old/NewPredictorOld MACLib/Old/AntiPredictorOld MACLib/Old/AntiPredictorExtraHighOld
+            MACLib/Old/AntiPredictorFastOld MACLib/Old/AntiPredictorHighOld MACLib/Old/AntiPredictorNormalOld
+            MACLib/Old/APEDecompressCoreOld MACLib/Old/APEDecompressOld MACLib/Old/UnBitArrayOld
+            MACLib/Old/UnMACOld)
+        list(APPEND anomaly_monkeys_audio_sources "${monkeys_audio_SOURCE_DIR}/Source/${anomaly_mac_source}.cpp")
+    endforeach()
+    add_library(anomaly_monkeys_audio STATIC ${anomaly_monkeys_audio_sources})
+    # Kept private: the SDK headers (All.h, Thread.h, Version.h, ...) would shadow others.
+    target_include_directories(anomaly_monkeys_audio PRIVATE ${ANOMALY_MONKEYS_AUDIO_INCLUDE_DIRS})
+    target_compile_definitions(anomaly_monkeys_audio PRIVATE PLATFORM_WINDOWS UNICODE _UNICODE)
+    if(MSVC)
+        target_compile_options(anomaly_monkeys_audio PRIVATE /w)
+    endif()
 endif()
-add_library(anomaly_monkeys_audio STATIC ${anomaly_monkeys_audio_sources})
-# Kept private: the SDK headers (All.h, Thread.h, Version.h, ...) would shadow others.
-target_include_directories(anomaly_monkeys_audio PRIVATE ${ANOMALY_MONKEYS_AUDIO_INCLUDE_DIRS})
-target_compile_definitions(anomaly_monkeys_audio PRIVATE PLATFORM_WINDOWS UNICODE _UNICODE)
-if(MSVC)
-    target_compile_options(anomaly_monkeys_audio PRIVATE /w)
+if(ANOMALY_BUILD_OPTIONAL_LIBS)
+    # dsd2pcm converts DSD to PCM when neither native DSD nor DoP reaches the DAC.
+    FetchContent_Declare(
+        dsd2pcm
+        URL https://github.com/GiangLH/dsd2pcm/archive/354fcb539d11920980ecd88249954f883a3d16f4.tar.gz
+        URL_HASH SHA256=bd01b056e8e82ddb6c6859cce4f359925cdee4459c8b2bc11d0ebe8a5599f2ba
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SOURCE_SUBDIR anomaly-no-cmake
+    )
+    FetchContent_MakeAvailable(dsd2pcm)
+    add_library(anomaly_dsd2pcm STATIC "${dsd2pcm_SOURCE_DIR}/dsd2pcm.c")
+    target_include_directories(anomaly_dsd2pcm PUBLIC "${dsd2pcm_SOURCE_DIR}")
+    if(MSVC)
+        target_compile_options(anomaly_dsd2pcm PRIVATE /w)
+    endif()
 endif()
 
 # Liquid glass shaders live in src/ui/shaders and are compiled at build time into
@@ -479,7 +487,7 @@ add_library(anomaly_memory STATIC
 target_include_directories(anomaly_memory PUBLIC include)
 target_compile_definitions(
     anomaly_memory PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_memory PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_memory PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_memory PUBLIC Psapi)
 
 add_library(anomaly_i18n STATIC src/i18n/i18n.cpp)
@@ -496,7 +504,7 @@ add_library(anomaly_config STATIC src/platform/windows/config.cpp)
 target_include_directories(anomaly_config PUBLIC include)
 target_compile_definitions(
     anomaly_config PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_config PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_config PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_config PUBLIC anomaly_i18n)
 
 add_library(anomaly_telemetry STATIC src/services/telemetry.cpp)
@@ -530,18 +538,20 @@ target_compile_definitions(
 target_compile_options(anomaly_adapter_services PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(anomaly_adapter_services PUBLIC nlohmann_json::nlohmann_json)
 
-add_library(anomaly_udp_packet_parser STATIC src/diagnostics/udp_packet_parser.cpp)
-target_include_directories(anomaly_udp_packet_parser PUBLIC include)
-target_compile_definitions(
-    anomaly_udp_packet_parser PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_udp_packet_parser PRIVATE /W4 /permissive- /EHsc)
+if(ANOMALY_BUILD_OPTIONAL_LIBS)
+    add_library(anomaly_udp_packet_parser STATIC src/diagnostics/udp_packet_parser.cpp)
+    target_include_directories(anomaly_udp_packet_parser PUBLIC include)
+    target_compile_definitions(
+        anomaly_udp_packet_parser PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(anomaly_udp_packet_parser PRIVATE /W4 /permissive- /EHsc)
 
-add_library(anomaly_npcap_capture STATIC src/diagnostics/npcap_capture.cpp)
-target_include_directories(anomaly_npcap_capture PUBLIC include)
-target_compile_definitions(
-    anomaly_npcap_capture PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_npcap_capture PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(anomaly_npcap_capture PUBLIC Ws2_32)
+    add_library(anomaly_npcap_capture STATIC src/diagnostics/npcap_capture.cpp)
+    target_include_directories(anomaly_npcap_capture PUBLIC include)
+    target_compile_definitions(
+        anomaly_npcap_capture PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(anomaly_npcap_capture PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(anomaly_npcap_capture PUBLIC Ws2_32)
+endif()
 
 
 
@@ -563,7 +573,7 @@ add_library(anomaly_websocket_server STATIC src/platform/windows/websocket_serve
 target_include_directories(anomaly_websocket_server PUBLIC include)
 target_compile_definitions(
     anomaly_websocket_server PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_websocket_server PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_websocket_server PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_websocket_server PUBLIC Ws2_32 bcrypt)
 
 
@@ -575,7 +585,7 @@ add_library(anomaly_diagnostics STATIC
     src/runtime/service_graph_diagnostics.cpp)
 target_include_directories(anomaly_diagnostics PUBLIC include)
 target_compile_definitions(anomaly_diagnostics PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_diagnostics PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_diagnostics PRIVATE /W4 /permissive- /EHsc /utf-8)  # 依赖的公共头含中文注释
 target_link_libraries(
     anomaly_diagnostics
     PUBLIC anomaly_config anomaly_internal_memory_services anomaly_memory Advapi32
@@ -585,7 +595,7 @@ add_library(anomaly_runtime_kernel STATIC src/runtime/runtime_session.cpp)
 target_include_directories(anomaly_runtime_kernel PUBLIC include)
 target_compile_definitions(
     anomaly_runtime_kernel PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_runtime_kernel PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_runtime_kernel PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 
 add_library(anomaly_dispatcher STATIC src/runtime/dispatcher.cpp)
 target_include_directories(anomaly_dispatcher PUBLIC include)
@@ -652,7 +662,7 @@ add_library(anomaly_manual_map STATIC
 target_include_directories(anomaly_manual_map PUBLIC include)
 target_compile_definitions(
     anomaly_manual_map PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_manual_map PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /EHsc>)
+target_compile_options(anomaly_manual_map PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /EHsc /utf-8>)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_manual_map PUBLIC Advapi32 Psapi)
 
 # The launcher's own injection and proxy paths are self-contained. The old official-launcher
@@ -738,32 +748,36 @@ target_link_libraries(anomaly_repository_configuration
     PUBLIC anomaly_repository_index
     PRIVATE nlohmann_json::nlohmann_json nlohmann_json_schema_validator::validator)
 
-add_library(anomaly_repository_policy STATIC
-    src/repository/repository_policy.cpp)
-target_include_directories(
-    anomaly_repository_policy PUBLIC include PRIVATE "${GENERATED_DIR}")
-target_compile_definitions(
-    anomaly_repository_policy PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_repository_policy PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(anomaly_repository_policy
-    PUBLIC anomaly_repository_configuration
-    PRIVATE nlohmann_json::nlohmann_json nlohmann_json_schema_validator::validator)
+if(ANOMALY_BUILD_OPTIONAL_LIBS)
+    add_library(anomaly_repository_policy STATIC
+        src/repository/repository_policy.cpp)
+    target_include_directories(
+        anomaly_repository_policy PUBLIC include PRIVATE "${GENERATED_DIR}")
+    target_compile_definitions(
+        anomaly_repository_policy PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(anomaly_repository_policy PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(anomaly_repository_policy
+        PUBLIC anomaly_repository_configuration
+        PRIVATE nlohmann_json::nlohmann_json nlohmann_json_schema_validator::validator)
+endif()
 
 add_library(anomaly_runtime_launch STATIC
     src/repository/runtime_launch.cpp)
 target_include_directories(anomaly_runtime_launch PUBLIC include)
 target_compile_definitions(
     anomaly_runtime_launch PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_runtime_launch PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_runtime_launch PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 
-add_library(anomaly_update_transaction STATIC src/repository/update_transaction.cpp)
-target_include_directories(anomaly_update_transaction PUBLIC include)
-target_compile_definitions(
-    anomaly_update_transaction PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_update_transaction PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(anomaly_update_transaction PUBLIC
-    anomaly_repository_index anomaly_artifact_bundle anomaly_plugin_manifest
-    PRIVATE nlohmann_json::nlohmann_json)
+if(ANOMALY_BUILD_OPTIONAL_LIBS)
+    add_library(anomaly_update_transaction STATIC src/repository/update_transaction.cpp)
+    target_include_directories(anomaly_update_transaction PUBLIC include)
+    target_compile_definitions(
+        anomaly_update_transaction PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(anomaly_update_transaction PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(anomaly_update_transaction PUBLIC
+        anomaly_repository_index anomaly_artifact_bundle anomaly_plugin_manifest
+        PRIVATE nlohmann_json::nlohmann_json)
+endif()
 
 add_library(anomaly_repository_network STATIC src/repository/repository_network.cpp)
 target_include_directories(anomaly_repository_network PUBLIC include)
@@ -798,7 +812,7 @@ add_library(anomaly_plugin_dependency_resolver STATIC src/plugin/plugin_dependen
 target_include_directories(anomaly_plugin_dependency_resolver PUBLIC include)
 target_compile_definitions(
     anomaly_plugin_dependency_resolver PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_plugin_dependency_resolver PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_plugin_dependency_resolver PRIVATE /W4 /permissive- /EHsc /utf-8)  # 依赖的公共头含中文注释
 target_link_libraries(
     anomaly_plugin_dependency_resolver PUBLIC anomaly_plugin_catalog)
 
@@ -806,7 +820,7 @@ add_library(anomaly_plugin_enablement STATIC src/plugin/plugin_enablement.cpp)
 target_include_directories(anomaly_plugin_enablement PUBLIC include)
 target_compile_definitions(
     anomaly_plugin_enablement PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_plugin_enablement PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_plugin_enablement PRIVATE /W4 /permissive- /EHsc /utf-8)  # 依赖的公共头含中文注释
 target_link_libraries(anomaly_plugin_enablement
     PUBLIC anomaly_plugin_catalog PRIVATE nlohmann_json::nlohmann_json)
 
@@ -824,7 +838,7 @@ add_library(anomaly_plugin_shadow STATIC
 target_include_directories(anomaly_plugin_shadow PUBLIC include)
 target_compile_definitions(
     anomaly_plugin_shadow PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_plugin_shadow PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_plugin_shadow PRIVATE /W4 /permissive- /EHsc /utf-8)  # 依赖的公共头含中文注释
 target_link_libraries(
     anomaly_plugin_shadow PUBLIC anomaly_plugin_catalog anomaly_plugin_native_dependency)
 
@@ -835,7 +849,7 @@ add_library(anomaly_plugin_runtime STATIC
 target_include_directories(anomaly_plugin_runtime PUBLIC include)
 target_compile_definitions(
     anomaly_plugin_runtime PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_plugin_runtime PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_plugin_runtime PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 
 add_library(anomaly_ui_resources STATIC
     src/ui/input_service.cpp
@@ -851,7 +865,7 @@ add_library(anomaly_hook_manager STATIC src/hook/hook_manager.cpp)
 target_include_directories(anomaly_hook_manager PUBLIC include)
 target_compile_definitions(
     anomaly_hook_manager PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_hook_manager PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_hook_manager PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(anomaly_hook_manager PUBLIC anomaly_plugin_runtime)
 
 add_library(anomaly_ui_service STATIC src/ui/ui_service_registry.cpp)
@@ -918,7 +932,7 @@ add_library(anomaly_service_graph STATIC src/runtime/service_graph.cpp)
 target_include_directories(anomaly_service_graph PUBLIC include)
 target_compile_definitions(
     anomaly_service_graph PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_service_graph PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_service_graph PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码与公共头含中文注释
 target_link_libraries(
     anomaly_runtime_kernel PUBLIC anomaly_service_graph anomaly_runtime_dispatchers)
 
@@ -1067,7 +1081,7 @@ set_target_properties(dwmapi PROPERTIES
     PREFIX "")
 target_include_directories(dwmapi PRIVATE include "${GENERATED_DIR}")
 target_compile_definitions(dwmapi PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(dwmapi PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /EHsc>)
+target_compile_options(dwmapi PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /EHsc /utf-8>)  # 源码含中文注释
 target_link_libraries(dwmapi PRIVATE anomaly_bootstrap_client anomaly_runtime_launch)
 add_dependencies(dwmapi anomaly_core)
 
@@ -1107,7 +1121,7 @@ add_executable(anomaly_test_host apps/test_host/main.cpp src/plugin/plugin_manag
 set_target_properties(anomaly_test_host PROPERTIES OUTPUT_NAME "anomaly-test-host")
 target_include_directories(anomaly_test_host PRIVATE include)
 target_compile_definitions(anomaly_test_host PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_test_host PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_test_host PRIVATE /W4 /permissive- /EHsc /utf-8)  # 依赖的公共头含中文注释
 target_link_libraries(anomaly_test_host PRIVATE
     anomaly_diagnostics anomaly_plugin_shadow anomaly_plugin_dependency_resolver anomaly_plugin_enablement
     anomaly_adapter_services anomaly_plugin_runtime
@@ -1187,6 +1201,10 @@ add_dependencies(anomaly_launcher dwmapi anomaly_core)
 
 option(ANOMALY_BUILD_SDK_EXAMPLES "Build the Anomaly 1.0 SDK example plugins" ON)
 option(ANOMALY_BUILD_BUILTIN_PLUGINS "Build Anomaly bundled plugins" ON)
+# 暂无发布产物消费者的可选静态库（网络抓包、音频解码等实验组件）。默认关闭
+# 以跳过它们的编译；需要单独验证或接入这些库时置 ON，产物集合不变。
+option(ANOMALY_BUILD_OPTIONAL_LIBS
+    "Build optional static libraries that no shipped target consumes" OFF)
 # Developer test plugin packages are neither built nor installed unless asked for. They
 # install through the TestPlugins component alone, which no release component stages
 # (`tools/package_release.ps1` installs GameRuntime, SDK and Tools), and building them
@@ -1236,9 +1254,6 @@ if(ANOMALY_BUILD_SDK_EXAMPLES)
         MANIFEST examples/reliable_config/manifest.json
         PACKAGE_NAME ReliableConfig
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sdk-examples/ReliableConfig")
-    foreach(example_target IN ITEMS anomaly_example_hello_ui anomaly_example_tick_counter
-            anomaly_example_reliable_config)
-    endforeach()
 endif()
 
 if(ANOMALY_BUILD_BUILTIN_PLUGINS)
@@ -1281,12 +1296,10 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
             anomaly_i18n anomaly_plugin_profile nlohmann_json::nlohmann_json)
     endif()
 
-    # Test packages exist only when ANOMALY_BUILD_TEST_PLUGINS is on, so every list that
-    # reaches their targets is built from the targets that actually exist.
-    set(ANOMALY_BUILTIN_PLUGIN_TARGETS
-        anomaly_builtin_money
-        anomaly_builtin_freecam
-        anomaly_builtin_weather)
+    # Test packages exist only when ANOMALY_BUILD_TEST_PLUGINS is on, so every list
+    # that reaches their targets is built from the targets that actually exist.
+    # 内建插件不再维护额外的 target 列表：anomaly_add_plugin 已在 CMake 层统一
+    # 完成 include/宏/打包/安装注册（ANOMALY_RELEASE_PLUGIN_TARGETS）。
 endif()
 
 if(TARGET anomaly-platform-preview)

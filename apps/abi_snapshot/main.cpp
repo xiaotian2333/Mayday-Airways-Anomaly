@@ -214,6 +214,8 @@ std::string BuildSnapshot() {
     AppendUnsigned(output, ANOMALY_MAYDAY_MONEY_SERVICE_V1_VERSION);
     output.append(",\n    \"ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION\": ");
     AppendUnsigned(output, ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION);
+    output.append(",\n    \"ANOMALY_MAYDAY_WEATHER_SERVICE_V1_VERSION\": ");
+    AppendUnsigned(output, ANOMALY_MAYDAY_WEATHER_SERVICE_V1_VERSION);
     output.append("\n  },\n");
 
     output.append("  \"enums\": {\n");

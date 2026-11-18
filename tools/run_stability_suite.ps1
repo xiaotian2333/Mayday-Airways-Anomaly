@@ -39,6 +39,15 @@ function Find-BuildDirectory([string[]]$RelativeCandidates) {
     throw "build directory not found: $($RelativeCandidates -join ', ')"
 }
 
+function Find-OptionalBuildArtifact([string[]]$RelativeCandidates) {
+    # 可选产物：缺失时返回 $null 而不是中断脚本，由调用方决定是否跳过该 gate。
+    foreach ($relative in $RelativeCandidates) {
+        $candidate = Join-Path $build $relative
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    return $null
+}
+
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 $log = Join-Path $output "stability-$stamp.log"
@@ -61,7 +70,9 @@ function Invoke-Gate([string]$Name, [string]$Executable, [string[]]$Arguments) {
     if ($exitCode -ne 0) { throw "$Name failed with exit code $exitCode" }
 }
 
-$performance = Find-BuildArtifact @(
+# anomaly-performance-tests 目前没有对应的 CMake target：产物存在才执行
+# idle gate，缺失时明确跳过（不中断套件），保留未来恢复 target 的能力。
+$performance = Find-OptionalBuildArtifact @(
     'bin\anomaly-performance-tests.exe',
     'bin\RelWithDebInfo\anomaly-performance-tests.exe')
 $testHost = Find-BuildArtifact @(
@@ -73,7 +84,10 @@ $helloUi = Find-BuildDirectory @(
 
 $idleMilliseconds = if ($Quick) { 1000 } else { [int64]($IdleHours * 60 * 60 * 1000) }
 $idleBudget = if ($Quick) { '2.0' } else { '0.5' }
-if ($idleMilliseconds -gt 0) {
+if ($null -eq $performance) {
+    'SKIPPED idle-runtime-budget: anomaly-performance-tests.exe not found (the performance test target is not built)' |
+        Tee-Object -FilePath $log -Append | Write-Host
+} elseif ($idleMilliseconds -gt 0) {
     Invoke-Gate 'idle-runtime-budget' $performance @(
         '--idle-window-ms', $idleMilliseconds.ToString(),
         '--idle-budget-percent', $idleBudget)

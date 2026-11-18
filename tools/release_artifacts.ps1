@@ -77,8 +77,30 @@ function Get-AnomalySbomDependencies([string]$Component) {
             License = 'MIT'; Source = 'https://github.com/pboettch/json-schema-validator/tree/2.3.0'
         }
     )
+    # 仅进入 Runtime 产物的链接依赖：miniz（repository safe_zip）与 launcher
+    # 归档栈（anomaly_launcher_archive → libarchive + liblzma + zlib）。
+    # blake3/miniaudio/rtaudio_asio/monkeys_audio/dsd2pcm 已由
+    # ANOMALY_BUILD_OPTIONAL_LIBS（默认 OFF）门控，不进默认产物，因此不登记。
+    $runtimeOnly = @(
+        [pscustomobject]@{
+            Id = 'SPDXRef-Dependency-miniz'; Name = 'miniz'; Version = '3.0.2'
+            License = 'MIT'; Source = 'https://github.com/richgel999/miniz/releases/tag/3.0.2'
+        },
+        [pscustomobject]@{
+            Id = 'SPDXRef-Dependency-libarchive'; Name = 'libarchive'; Version = '3.8.11'
+            License = 'BSD-2-Clause'; Source = 'https://github.com/libarchive/libarchive/releases/tag/v3.8.11'
+        },
+        [pscustomobject]@{
+            Id = 'SPDXRef-Dependency-liblzma'; Name = 'liblzma (xz)'; Version = '5.8.4'
+            License = '0BSD'; Source = 'https://github.com/tukaani-project/xz/releases/tag/v5.8.4'
+        },
+        [pscustomobject]@{
+            Id = 'SPDXRef-Dependency-zlib'; Name = 'zlib'; Version = '1.4'
+            License = 'Zlib'; Source = 'https://github.com/madler/zlib/releases/tag/v1.4'
+        }
+    )
     switch ($Component) {
-        'Runtime' { return $all }
+        'Runtime' { return @($all) + $runtimeOnly }
         'Tools' { return @($all | Where-Object { $_.Name -in @(
             'JSON for Modern C++', 'Modern C++ JSON schema validator') }) }
         default { return @() }

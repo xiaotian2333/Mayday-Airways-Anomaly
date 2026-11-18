@@ -213,7 +213,8 @@ static AnomalyStatusV1 ANOMALY_CALL start(void* plugin_context) {
     font.struct_size = sizeof(font);
     font.relative_path = view("assets/hello-ui.ttf");
     font.size_pixels = 16.0F;
-    font.glyph_range = ANOMALY_GLYPH_RANGE_V1_LATIN;
+    /* 本地化激活后 zh-CN 文案含中文，字形集需覆盖 CJK。 */
+    font.glyph_range = ANOMALY_GLYPH_RANGE_V1_CHINESE_FULL;
     result = g_font->request(g_font->user, &font, &context->font);
     if (!succeeded(result)) {
         release_resources(context);

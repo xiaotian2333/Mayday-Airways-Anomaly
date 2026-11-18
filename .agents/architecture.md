@@ -31,7 +31,7 @@ Repository Worker 都是由 Runtime 服务声明的并列所有者，彼此不�
 | `src/game/mayday` | il2cpp 导出解析、GameState/PlayerRig 服务与降级 | 已验证的平台/Runtime 服务 | 生命周期所有权、插件实现 |
 | `src/plugin` | Manifest、依赖、Scope、generation、热重载 | SDK 合同、Runtime 服务 | Renderer 后端内部、固定游戏地址 |
 | `src/render/dx12`、`src/ui` | SwapChain/输入/UI 与绘制服务 | Render Dispatcher、受控 Hook、插件只读快照 | 包 I/O、DLL 加载、同步 Game Update |
-| `src/repository` | 签名 Index、网络 worker、staging、回滚 | Worker/Network、validator | 游戏对象、渲染提交、插件回调 |
+| `src/repository` | 签名 Index、网络 worker、staging、回滚；`ResolveRuntimeLaunch` 的实现也位于此目录（`src/repository/runtime_launch.cpp`，按职责应属 runtime 启动链，模块归属漂移待后续移动修正） | Worker/Network、validator | 游戏对象、渲染提交、插件回调 |
 | `include/anomaly/sdk` | 稳定公开 C ABI 与 C++ wrapper | 版本化公开合同 | 宿主内部类型 |
 
 ## 线程域契约

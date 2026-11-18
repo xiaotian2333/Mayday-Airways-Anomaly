@@ -1,9 +1,11 @@
 #include "anomaly/sdk/cpp.hpp"
+#include "anomaly/sdk/localization.hpp"
 
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -17,6 +19,9 @@ constexpr std::size_t kMaximumSettingsBytes = 1024;
 constexpr std::string_view kSettingsSchema = R"json(
 {"type":"object","additionalProperties":false,"required":["value"],"properties":{"value":{"type":"integer","minimum":0,"maximum":4294967295}}}
 )json";
+
+// 用户可见文案统一经本地化服务解析；语言在进程内固定，Load 时查一次保存。
+anomaly::sdk::Localizer g_localizer;
 
 struct Context {
     const AnomalyUiServiceV1* ui{};
@@ -171,6 +176,7 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
     g_context = {};
     g_context.ui = ui.get();
     g_context.config = config.get();
+    g_localizer = anomaly::sdk::Localizer(host);
     const AnomalyStatusV1 schema_status = g_context.config->register_schema(
         g_context.config->user, anomaly::sdk::StringView(kSettingsSchemaId),
         kSettingsSchemaVersion, Bytes(kSettingsSchema), &g_context.settings_schema);
@@ -193,16 +199,25 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
                           : AnomalyStatusV1{ANOMALY_STATUS_V1_FAILED, 0, {}};
 }
 
-void ANOMALY_CALL Unload(void*) { g_context = {}; }
+void ANOMALY_CALL Unload(void*) {
+    g_localizer = {};
+    g_context = {};
+}
 
 void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     if (ui == nullptr) ui = g_context.ui;
+    const std::string title = g_localizer.Text("window.title", "Reliable Config");
     int open = 1;
-    anomaly::sdk::UiWindow window(ui, "Reliable Config", &open);
+    anomaly::sdk::UiWindow window(ui, title, &open);
     if (!window) return;
-    const std::string text = "Atomic JSON config value: " + std::to_string(g_context.value);
+    const std::string value_text = std::to_string(g_context.value);
+    const std::string_view value_args[]{value_text};
+    const std::string text = g_localizer.Format(
+        "state.value", "Atomic JSON config value: {0}",
+        std::span<const std::string_view>{value_args});
     ui->text(ui->user, anomaly::sdk::StringView(text));
-    if (ui->button(ui->user, anomaly::sdk::StringView("Increment"), 0, 0)) {
+    const std::string increment = g_localizer.Text("button.increment", "Increment");
+    if (ui->button(ui->user, anomaly::sdk::StringView(increment), 0, 0)) {
         ++g_context.value;
         g_context.settings_dirty = true;
     }

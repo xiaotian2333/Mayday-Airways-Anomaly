@@ -8,15 +8,16 @@ param([string[]]$Plugin)
 
 $Plugin = @($Plugin | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-$root = Join-Path (Split-Path $PSScriptRoot -Parent) 'plugins'
+$root = Split-Path $PSScriptRoot -Parent
+# 内建插件与 examples（随包产出的可加载插件）都纳入门禁范围。
+$pluginRoots = @((Join-Path $root 'plugins'), (Join-Path $root 'examples'))
 if ($Plugin.Count -eq 0) {
-    # 省略 -Plugin 时检查 plugins/ 下所有带 manifest 的插件。
-    $Plugin = Get-ChildItem -Path $root -Directory |
+    # 省略 -Plugin 时检查 plugins/ 与 examples/ 下所有带 manifest 的插件。
+    $Plugin = Get-ChildItem -Path $pluginRoots -Directory |
         Where-Object { Test-Path (Join-Path $_.FullName 'manifest.json') } |
         ForEach-Object { $_.Name }
 }
 
-$root = Join-Path (Split-Path $PSScriptRoot -Parent) 'plugins'
 $anyFailed = $false
 $inline = 511  # 栈上快路径；超过会走两段式重试，不算失败
 
@@ -48,14 +49,24 @@ function Test-Format([string]$Text) {
 }
 
 foreach ($name in $Plugin) {
-    $dir = Join-Path $root $name
+    $dir = $null
+    foreach ($pluginRoot in $pluginRoots) {
+        $candidate = Join-Path $pluginRoot $name
+        if (Test-Path $candidate -PathType Container) { $dir = $candidate; break }
+    }
+    if ($null -eq $dir) {
+        # -Plugin 指向不存在的目录时报错退出，而不是静默通过。
+        Write-Host "`n=== $name ==="
+        Write-Host '  插件目录不存在'; $anyFailed = $true
+        continue
+    }
     $ok = $true
     Write-Host "`n=== $name ==="
 
     $catalogPath = Join-Path $dir 'locales\zh-CN.json'
     if (-not (Test-Path $catalogPath)) {
         # 没有目录文件的插件允许是纯英文实现；只要有中文字面量就必须有目录。
-        $cjk = Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp |
+        $cjk = Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp,*.c,*.h |
             Where-Object { $_.Name -notmatch '_tests?\.cpp$|^tests?\.cpp$' } |
             Select-String -Pattern '"[^"]*[\u4e00-\u9fff][^"]*"'
         if ($cjk) { Write-Host "  缺少 locales\zh-CN.json，但源码有中文（$($cjk.Count) 处）"; $anyFailed = $true }
@@ -88,7 +99,7 @@ foreach ($name in $Plugin) {
 
     $used = @{}
     $english = @{}
-    foreach ($file in Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp) {
+    foreach ($file in Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp,*.c,*.h) {
         if ($file.Name -match 'tests') { continue }
         $source = Get-Content -Raw -Encoding UTF8 $file.FullName
         foreach ($match in [regex]::Matches($source, 'localizer\s*\.\s*(?:Text|Format|Label)\(\s*"([^"]+)"\s*,\s*"((?:[^"\\]|\\.)*)"')) {
@@ -96,6 +107,12 @@ foreach ($name in $Plugin) {
             $english[$match.Groups[1].Value] = $match.Groups[2].Value
         }
         foreach ($array in [regex]::Matches($source, '(?s)constexpr\s+std::array<[^>]*>\s+\w*keys\s*\{(.*?)\};')) {
+            foreach ($item in [regex]::Matches($array.Groups[1].Value, '"([^"]+)"')) { $used[$item.Groups[1].Value] = $file.Name }
+        }
+        # Weather 式 C 数组：static constexpr const char* kKeys[...] { ... };（含 = { ... } 变体）。
+        # 名称仍要求以 keys 结尾（(?i) 兼容 kKeys 形式），避免把 kFallbacks
+        # 之类的英文回退表误当 key。
+        foreach ($array in [regex]::Matches($source, '(?si)(?:static\s+)?constexpr\s+const\s+char\s*\*\s*\w*keys\s*\[[^\]]*\]\s*=?\s*\{(.*?)\};')) {
             foreach ($item in [regex]::Matches($array.Groups[1].Value, '"([^"]+)"')) { $used[$item.Groups[1].Value] = $file.Name }
         }
         # Local helper wrappers such as ScopedLabel("key","fallback"),
@@ -137,13 +154,13 @@ foreach ($name in $Plugin) {
     $allowed = @()
     if ($dataOnly.ContainsKey($name)) {
         foreach ($pattern in $dataOnly[$name]) {
-            $allowed += (Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp | Where-Object {
+            $allowed += (Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp,*.c,*.h | Where-Object {
                 $rel = $_.FullName.Substring($dir.Length + 1).Replace('\', '/')
                 $rel -like $pattern })
         }
         if ($allowed.Count -ne 0) { $allowed = $allowed | ForEach-Object { $_.FullName } }
     }
-    $leftover = Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp |
+    $leftover = Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp,*.c,*.h |
         Where-Object { $_.FullName -notin $allowed } |
         Select-String -Pattern '"[^"]*[\u4e00-\u9fff][^"]*"' |
         Where-Object {
@@ -155,7 +172,10 @@ foreach ($name in $Plugin) {
 
     $manifest = Get-Content -Raw -Encoding UTF8 (Join-Path $dir 'manifest.json') | ConvertFrom-Json
     if ("$($manifest.name)$($manifest.description)" -match '[\u4e00-\u9fff]') { Write-Host '  manifest name/description 仍含中文'; $ok = $false }
-    $usesLocalizer = (Select-String -Path (Join-Path $dir '*.cpp'), (Join-Path $dir '*.hpp') -Pattern 'Localizer|localization\.hpp' -ErrorAction SilentlyContinue)
+    # 与主扫描一致按递归收集源码，避免漏掉子目录里的 Localizer 使用。
+    $usesLocalizer = Get-ChildItem $dir -Recurse -File -Include *.cpp,*.hpp,*.c,*.h |
+        Where-Object { $_.Name -notmatch 'tests' } |
+        Select-String -Pattern 'Localizer|localization\.hpp'
     if ($usesLocalizer -and -not ($manifest.services.id -contains 'anomaly.localization')) {
         Write-Host '  代码用 Localizer 但 manifest 未声明 anomaly.localization'; $ok = $false
     }

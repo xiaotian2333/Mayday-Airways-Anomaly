@@ -126,16 +126,19 @@ CMake 文件、构建产物或正在运行的游戏文件来掩盖源码问题�
 插件目录里**不放**自己的 `CMakeLists.txt`——那是 SDK 独立消费者的入口（`find_package(AnomalySDK)`），
 放进 `plugins/<名字>/` 会被误当成独立工程。
 
-新增一个内建插件必须在根 `CMakeLists.txt` 登记**三处**，缺任意一处都会在构建或打包阶段出问题：
+新增一个内建插件必须在根 `CMakeLists.txt` 登记**两处**，缺任意一处都会在构建或打包阶段出问题：
 
 | # | 位置 | 作用 | 漏掉的后果 |
 | --- | --- | --- | --- |
-| 1 | `anomaly_add_plugin(<target> SOURCES … MANIFEST … PACKAGE_NAME … OUTPUT_DIRECTORY …)` | 定义 target、产出 `plugin.dll`、POST_BUILD 镜像 `locales/`/`assets/`/`profile/`、install 进 `Anomaly/plugins/<包名>` | 插件根本不存在 |
+| 1 | `anomaly_add_plugin(<target> SOURCES … MANIFEST … PACKAGE_NAME … OUTPUT_DIRECTORY …)` | 定义 target、产出 `plugin.dll`、POST_BUILD 镜像 `locales/`/`assets/`/`profile/`、install 进 `Anomaly/plugins/<包名>`；源码根 include 与 Win32 宏、release 插件注册（`ANOMALY_RELEASE_PLUGIN_TARGETS`，preview 镜像与安装规则由此消费）都在该函数内统一完成 | 插件根本不存在，或 preview 镜像缺包 |
 | 2 | `target_compile_options(<target> PRIVATE /utf-8)` 等 target 级设置 | 仅在该 target 需要的选项；`UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX` 与源码根 include **不要**在这里写 | 重复定义或缺失编译选项 |
-| 3 | `set(ANOMALY_BUILTIN_PLUGIN_TARGETS …)` 列表 | `foreach` 统一给每个插件加源码根 include 与 Win32 宏；`anomaly_test_host`、`anomaly-platform-preview` 也依赖这份列表 | 缺 include/宏，或 preview 镜像因 target 未构建而 stage 失败 |
+
+历史上还有第 3 处登记 `set(ANOMALY_BUILTIN_PLUGIN_TARGETS …)` 列表，但该列表自始没有
+`foreach` 消费者，preview/test_host 的依赖由 `ANOMALY_RELEASE_PLUGIN_TARGETS` 全局属性
+承担，已在构建图中删除——不要再往根 `CMakeLists.txt` 添加它。
 
 - **测试包**用 `TEST_PLUGIN` 标记：默认不构建，只在 `ANOMALY_BUILD_TEST_PLUGINS=ON` 时构建并装进
-  `TestPlugins` 组件，同时加入第 3 处列表的 `list(APPEND …)` 分支，而不是主 `set(…)`。
+  `TestPlugins` 组件，注册逻辑由 `anomaly_add_plugin`（`cmake/sdk/AnomalyPlugin.cmake`）处理。
 - **只在开发者模式展示**靠 manifest 的 `"audience": "developer"`，与 `TEST_PLUGIN` 无关：前者决定
   管理界面是否列出，后者决定是否随发布包产出。
 

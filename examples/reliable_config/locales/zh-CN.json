@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "messages": {
+    "window.title": "可靠配置",
+    "plugin.description": "演示通过宿主配置服务原子写入 JSON 设置。",
+    "state.value": "原子 JSON 配置值：{0}",
+    "button.increment": "递增"
+  }
+}
