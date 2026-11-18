@@ -12,8 +12,8 @@
     "minMinor": 0,
     "maxMinor": 0
   },
-  "games": ["nte"],
-  "builds": ["nte-*"],
+  "games": ["mayday"],
+  "builds": ["mayday-*"],
   "loadPhase": "game-ready",
   "services": [
     {

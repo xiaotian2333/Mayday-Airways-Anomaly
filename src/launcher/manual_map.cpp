@@ -44,10 +44,9 @@ constexpr DWORD kAttachProcessAccess =
     PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_READ |
     PROCESS_VM_WRITE | PROCESS_CREATE_THREAD;
 
-// The hook injected into the launcher signals this immediately before asking it to start the game.
-// The name is duplicated in src/launcher/hook/nte_game_hook.cpp rather than shared through a header,
-// because that DLL runs inside a process this repository does not own and is deliberately
-// free-standing.
+// The old official-launcher hook signalled this immediately before asking the launcher to start
+// the game. The Mayday path never installs that hook; the constant stays until the hook launch
+// options are removed.
 constexpr wchar_t kLauncherArmedEventName[] = L"Local\\Anomaly.NteGameHook.Armed";
 
 // How long capture waits for that signal before falling back to the session's own timing. It only has

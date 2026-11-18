@@ -3,7 +3,7 @@
 #  - 代码里 localizer.Text/Format/Label("key","English") 与静态 *_keys 表的 key 是否都在目录里；
 #  - 中文消息与英文回退的 {N} 占位符掩码是否完全一致（不一致宿主会静默回退英文）；
 #  - 非测试源码是否还残留中文字符串字面量；manifest 是否已交出英文回退并声明 anomaly.localization。
-# 用法: pwsh -NoProfile -File tools/check_plugin_i18n.ps1 [-Plugin AutoFish,NteVehicle]
+# 用法: pwsh -NoProfile -File tools/check_plugin_i18n.ps1 [-Plugin AutoFish,Freecam]
 param([string[]]$Plugin)
 
 $Plugin = @($Plugin | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
