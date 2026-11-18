@@ -217,6 +217,11 @@ struct MaydayAdapter::Impl {
     std::atomic<void*> weather_published{nullptr};
     bool weather_resolved{false};
     bool weather_time_locked{false};   // 宿主记录的锁定意图（换局后可能失效）
+    // dev 系列属性 getter 被 IL2CPP 裁剪，覆盖状态不可读：由宿主记录设置
+    // 意图供插件 UI 回显（换局后可能失效）。
+    bool weather_override_active{false};
+    std::int32_t weather_override_kind_value{-1};
+    float weather_override_severity{0.0f};
     // 解析失败时的步骤号（诊断 JSON weatherResolveStep）：1 前置 2 环境 3 时钟
     // 4 世界管理 5 天气系统 6 枚举 7 句柄清点；成功后置 8。
     std::atomic<int> weather_resolve_step{0};
@@ -630,7 +635,7 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherGetState(
         return MoneyStatus("status.failed");
     }
     // dev 系列属性 getter 被 IL2CPP 裁剪，覆盖状态不可读：由宿主锁定意图
-    // 记录（weather_time_locked / override 语义）驱动显示，仅作参考。
+    // 记录（weather_time_locked / override 意图）驱动显示，仅作参考。
     state.time_locked = impl->weather_time_locked ? 1 : 0;
     state.rate = impl->weather_time_locked
         ? 0.0f
@@ -640,6 +645,11 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherGetState(
                   ? wanted
                   : -1.0f;
           }();
+    state.override_active = impl->weather_override_active ? 1 : 0;
+    if (impl->weather_override_active) {
+        state.override_kind_value = impl->weather_override_kind_value;
+        state.override_severity = impl->weather_override_severity;
+    }
     std::int32_t kind{};
     if (impl->InvokeInt(impl->ws_get_kind, ws, &kind)) {
         state.kind_value = kind;
@@ -702,6 +712,8 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherSetWeatherOverride(
         if (!impl->InvokeVoid(impl->wm_dev_clear, wm, nullptr)) {
             return MoneyStatus("status.failed");
         }
+        impl->weather_override_active = false;
+        impl->weather_override_kind_value = -1;
         return {ANOMALY_STATUS_V1_OK, 0, {}};
     }
     if (kind_index < 0 ||
@@ -717,6 +729,10 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherSetWeatherOverride(
     if (!impl->InvokeVoid(impl->wm_dev_override, wm, params)) {
         return MoneyStatus("status.failed");
     }
+    // dev getter 被裁剪，覆盖意图由宿主记录供 get_state 回显。
+    impl->weather_override_active = true;
+    impl->weather_override_kind_value = kind_value;
+    impl->weather_override_severity = severity;
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
 

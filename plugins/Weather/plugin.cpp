@@ -462,7 +462,8 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     const std::string help = g_localizer.Text(
         "help.controls",
         "Locking time freezes the game clock; locking weather uses the game's "
-        "override mechanism and holds until cleared.");
+        "override mechanism and holds until cleared. Locks reset when you "
+        "enter a new flight.");
     if (ui->text_wrapped != nullptr) {
         ui->text_wrapped(ui->user, anomaly::sdk::StringView(help));
     } else {
