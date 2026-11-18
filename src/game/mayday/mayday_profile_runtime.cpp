@@ -224,6 +224,19 @@ struct MaydayAdapter::Impl {
     // UGUI 的 StandaloneInputModule 仍走旧版 Input.mouseScrollDelta。
     void* mouse_scroll_delta_target{};
     void* mouse_scroll_delta_original{};
+    // UGUI 的点击由 EventSystem 驱动，绕过 InputControl 的设备状态；
+    // 覆盖层展开时跳过 EventSystem.Update 才能挡住游戏弹窗按钮。
+    void* event_system_update_target{};
+    void* event_system_update_original{};
+    void* event_system_module_field{};
+    std::size_t event_system_module_offset{};
+    void* input_system_ui_module_class{};
+    void* input_module_reset_pointers{};
+    // 覆盖层关闭后的残余点击抑制：关闭动作本身可能在同一/下一帧才被
+    // UGUI 读到，必须等鼠标全部松开并再多压一小段时间。
+    std::atomic<bool> event_system_was_blocked{false};
+    std::atomic<unsigned long long> event_system_resume_after{0};
+    std::atomic<int> event_system_module_kind{0};
     std::atomic<int> input_hook_in_callback{0};
     static std::atomic<Impl*> input_hook_owner;
 
@@ -330,6 +343,7 @@ struct MaydayAdapter::Impl {
     static Vec2 ANOMALY_CALL Vector2ReadValueThunk(void* self, void* method);
     static float ANOMALY_CALL FloatReadValueThunk(void* self, void* method);
     static Vec2 ANOMALY_CALL InputMouseScrollDeltaThunk(void* method);
+    static void ANOMALY_CALL EventSystemUpdateThunk(void* self, void* method);
     [[nodiscard]] bool IsDeltaControlValue(void* control) const noexcept;
     [[nodiscard]] void* FindMethodInfo(void* klass, const char* name, int args) const;
     [[nodiscard]] void* FindMethodTarget(void* klass, const char* name, int args) const;
@@ -1152,6 +1166,7 @@ bool MaydayAdapter::Impl::ResolveInputBlock() {
     if (assemblies == nullptr) return false;
     void* input_image{};
     void* legacy_input_image{};
+    void* ui_image{};
     for (std::size_t i = 0; i < count; ++i) {
         void* const candidate = assembly_get_image(assemblies[i]);
         if (candidate == nullptr) continue;
@@ -1163,6 +1178,9 @@ bool MaydayAdapter::Impl::ResolveInputBlock() {
         } else if (std::strcmp(name, "UnityEngine.InputLegacyModule.dll") == 0 ||
                    std::strcmp(name, "UnityEngine.InputLegacyModule") == 0) {
             legacy_input_image = candidate;
+        } else if (std::strcmp(name, "UnityEngine.UI.dll") == 0 ||
+                   std::strcmp(name, "UnityEngine.UI") == 0) {
+            ui_image = candidate;
         }
     }
     if (input_image == nullptr) return false;
@@ -1202,6 +1220,26 @@ bool MaydayAdapter::Impl::ResolveInputBlock() {
             class_from_name(legacy_input_image, "UnityEngine", "Input");
         mouse_scroll_delta_target =
             FindMethodTarget(legacy_input_class, "get_mouseScrollDelta", 0);
+    }
+    if (ui_image != nullptr) {
+        void* const event_system_class =
+            class_from_name(ui_image, "UnityEngine.EventSystems", "EventSystem");
+        event_system_update_target =
+            FindMethodTarget(event_system_class, "Update", 0);
+        if (class_get_field != nullptr && field_get_offset != nullptr &&
+            event_system_class != nullptr) {
+            event_system_module_field =
+                class_get_field(event_system_class, "m_CurrentInputModule");
+            if (event_system_module_field != nullptr) {
+                event_system_module_offset = field_get_offset(event_system_module_field);
+            }
+        }
+    }
+    input_system_ui_module_class = class_from_name(
+        input_image, "UnityEngine.InputSystem.UI", "InputSystemUIInputModule");
+    if (input_system_ui_module_class != nullptr) {
+        input_module_reset_pointers =
+            FindMethodInfo(input_system_ui_module_class, "ResetPointers", 0);
     }
 
     input_block_resolved = true;
@@ -1337,6 +1375,77 @@ Vec2 ANOMALY_CALL MaydayAdapter::Impl::InputMouseScrollDeltaThunk(void* method) 
     return result;
 }
 
+void ANOMALY_CALL MaydayAdapter::Impl::EventSystemUpdateThunk(void* self, void* method) {
+    Impl* const impl = input_hook_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->input_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    if (impl->event_system_module_offset != 0) {
+        void* const module = *reinterpret_cast<void**>(
+            reinterpret_cast<std::uint8_t*>(self) + impl->event_system_module_offset);
+        if (module != nullptr) {
+            impl->event_system_module_kind.store(
+                *reinterpret_cast<void**>(module) == impl->input_system_ui_module_class
+                    ? 1 : 2,
+                std::memory_order_release);
+        }
+    }
+    // InputSystemUIInputModule 会在自己的指针状态里缓存按下/抬起；仅跳过
+    // EventSystem.Update 不够，恢复时仍会补发一次点击。切换挡板时清空它。
+    const auto reset_pointer_state = [impl, self]() {
+        if (impl->event_system_module_offset == 0 ||
+            impl->input_module_reset_pointers == nullptr ||
+            impl->runtime_invoke == nullptr) {
+            return;
+        }
+        void* const module = *reinterpret_cast<void**>(
+            reinterpret_cast<std::uint8_t*>(self) + impl->event_system_module_offset);
+        if (module == nullptr) return;
+        const bool is_input_system_module =
+            *reinterpret_cast<void**>(module) == impl->input_system_ui_module_class;
+        impl->event_system_module_kind.store(
+            is_input_system_module ? 1 : 2, std::memory_order_release);
+        if (!is_input_system_module) return;
+        void* exception{};
+        static_cast<void>(impl->runtime_invoke(
+            impl->input_module_reset_pointers, module, nullptr, &exception));
+    };
+    bool dispatch = false;
+    if (HostUiMenusCaptureMouse()) {
+        if (!impl->event_system_was_blocked.exchange(true, std::memory_order_acq_rel)) {
+            reset_pointer_state();
+        }
+    } else {
+        const unsigned long long now = GetTickCount64();
+        if (impl->event_system_was_blocked.exchange(false, std::memory_order_acq_rel)) {
+            // 覆盖层刚关闭：清掉缓存，再吞掉关闭动作产生的按下/抬起脉冲。
+            reset_pointer_state();
+            impl->event_system_resume_after.store(
+                now + 250, std::memory_order_release);
+        }
+        constexpr int kMouseButtons[]{
+            VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2};
+        bool any_mouse_down = false;
+        for (const int button : kMouseButtons) {
+            if ((GetAsyncKeyState(button) & 0x8000) != 0) {
+                any_mouse_down = true;
+                break;
+            }
+        }
+        if (any_mouse_down) {
+            impl->event_system_resume_after.store(
+                now + 100, std::memory_order_release);
+        }
+        dispatch = !any_mouse_down &&
+            now >= impl->event_system_resume_after.load(std::memory_order_acquire);
+    }
+    if (dispatch) {
+        auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(void*, void*)>(
+            impl->event_system_update_original);
+        if (original != nullptr) original(self, method);
+    }
+    impl->input_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
 bool MaydayAdapter::Impl::EnsureInputBlockHook() {
     std::scoped_lock lock(resolve_mutex);
     if (input_hook_installed) return true;
@@ -1377,6 +1486,8 @@ bool MaydayAdapter::Impl::EnsureInputBlockHook() {
          &float_read_value_original, false},
         {mouse_scroll_delta_target, reinterpret_cast<void*>(&Impl::InputMouseScrollDeltaThunk),
          &mouse_scroll_delta_original, false},
+        {event_system_update_target, reinterpret_cast<void*>(&Impl::EventSystemUpdateThunk),
+         &event_system_update_original, false},
     };
     input_hook_owner.store(this, std::memory_order_release);
     std::array<bool, std::size(entries)> created{};
@@ -1428,7 +1539,7 @@ void MaydayAdapter::Impl::TeardownInputBlockHook() noexcept {
     void* const targets[] = {
         is_pressed_target, was_pressed_target, was_released_target,
         vector2_read_value_target, float_read_value_target,
-        mouse_scroll_delta_target};
+        mouse_scroll_delta_target, event_system_update_target};
     if (input_hook_backend != nullptr && input_hook_installed) {
         for (void* const target : targets) {
             if (target != nullptr) static_cast<void>(input_hook_backend->Disable(target));
@@ -1992,6 +2103,9 @@ std::string MaydayAdapter::DiagnosticsJson() const {
          << (impl_->freecam_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
          << ",\"inputBlockHooks\":"
          << (impl_->input_hook_installed.load(std::memory_order_acquire) ? "true" : "false")
+         << ",\"eventSystemHook\":"
+         << (impl_->event_system_update_target != nullptr ? "true" : "false")
+         << ",\"uiInputModule\":" << impl_->event_system_module_kind.load(std::memory_order_acquire)
          << ",\"pauseStage\":" << impl_->pause_stage.load(std::memory_order_acquire)
          << ",\"pauseFailure\":" << impl_->pause_failure.load(std::memory_order_acquire)
          << ",\"pauseResolve\":" << impl_->pause_resolve_step.load(std::memory_order_acquire)
