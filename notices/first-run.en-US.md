@@ -1,24 +1,23 @@
 # Before You Start
 
-Welcome to Anomaly. Take a minute to read the notes below; plugin features stay locked until you accept them.
+Welcome to Mayday Loader. Take a minute to read the notes below; plugin features stay locked until you accept them.
 
-Anomaly is free and open source. If you paid for it, congratulations, you got scammed : (
+Mayday Loader is free and open source. If you paid for it, congratulations, you got scammed : (
 
 > [!CAUTION]
 >
-> Per the [NTE Fair Play Statement](https://nte.perfectworld.com/en/article/news/gamebroad/20260206/260828.html):
+> This tool reads and writes game process memory, installs hooks, and modifies runtime state. It may crash the game, corrupt save data, or lead to account penalties.
 >
-> Using any third-party tool to break the game's fair play is strictly prohibited. We will act against cheats, accelerators, cheat software, macro scripts and other illegitimate tools, including but not limited to auto-play, skill acceleration, invincibility, teleporting and modifying game data. Once confirmed, depending on the severity and the number of violations, we may take measures including but not limited to removing illegitimate gains, suspending the game account and permanently banning the game account.
->
-> **You are expected to fully understand and voluntarily accept every risk that using this tool may bring.**
+> Use it only in compliance with the game's terms of service and applicable law, and accept all risks that come with it.
 
-## Community
+## Feedback
 
-- [Discord](https://discord.gg/tfeh8QQ9Vy)
+- If something breaks, report it through the project repository's issues and attach the log exported from the Diagnostics page.
+- Review and redact sensitive information before sharing logs, dumps, or diagnostic bundles.
 
 ## Data and privacy
 
-Anomaly enables basic usage statistics by default, solely for anonymous statistics on daily active users, daily users of each plugin, and usage among Chinese- and English-language users. No log files are uploaded.
+Mayday Loader enables basic usage statistics by default, solely for anonymous statistics on daily active users and daily users of each plugin. No log files are uploaded.
 
 ## When something breaks
 

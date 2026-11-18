@@ -33,8 +33,8 @@ License 1.1 for its shared English and Simplified Chinese UI font atlas.
 The font is installed as Anomaly/assets/fonts/NotoSansCJKsc-Regular.ttf and
 its full license is provided as third_party/licenses/noto-sans-cjk-LICENSE.txt.
 
-Windows, Direct3D, DXGI, Segoe UI, and Neverness to Everness are names or
-products of their respective owners. They are not redistributed as third-party
+Windows, Direct3D, DXGI, and Segoe UI are names or products of their
+respective owners. They are not redistributed as third-party
 source components by this repository.
 
 Launcher mod archive decoders:

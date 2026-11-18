@@ -57,7 +57,7 @@ CMake 文件、构建产物或正在运行的游戏文件来掩盖源码问题�
 
 `RuntimeSession` 是进程级生命周期所有者，`src/runtime/core_main.cpp` 是生产组合根。
 依赖从 Bootstrap 指向 Runtime 抽象，再经由声明接口到平台服务和外部能力。Runtime 内核不能
-包含 NTE 专用头文件，插件不能包含宿主内部头文件，跨线程域工作必须通过 Dispatcher，不能直接
+包含游戏专用头文件，插件不能包含宿主内部头文件，跨线程域工作必须通过 Dispatcher，不能直接
 触碰其他组件的所有者。
 
 以下规则不可突破：
@@ -66,17 +66,17 @@ CMake 文件、构建产物或正在运行的游戏文件来掩盖源码问题�
   配置、Hook、UI、扫描或插件加载。
 - `src/runtime/` 负责 Session 状态、停止传播、服务生命周期和 Dispatcher 所有权。部分启动失败时，
   已启动服务也必须按依赖反序停止。
-- `src/platform/windows/`、`src/services/`、`src/diagnostics/` 保持游戏无关，不能依赖 NTE 布局
+- `src/platform/windows/`、`src/services/`、`src/diagnostics/` 保持游戏无关，不能依赖 Unity/Mayday 布局
   或发布游戏专用策略。
-- `src/game/ue5/` 负责经过验证的通用 UE 符号和快照；`src/game/nte/` 负责按来源优先级选择活动
-  Profile 和 NTE Feature Gate。Profile 不包含或匹配 Build identity；新增偏移或签名必须有 Profile、validator 与降级行为，不能硬编码在插件
-  或 UI 中。
+- `src/game/mayday/` 负责等待 `GameAssembly.dll`、解析 il2cpp 导出并发布 Mayday 服务。
+  il2cpp 类、方法和字段必须在运行时按名称解析并校验；失败时停用对应功能，不能把地址、偏移或
+  版本判断硬编码在插件或 UI 中。
 - `src/plugin/` 负责 Catalog、包、generation、Scope、热重载和故障隔离。每个插件可见资源都要
   记录在 `PluginScope`，回调不能超出其 generation lease。
 - `src/render/dx12/` 与 `src/ui/` 负责 Present/Resize/输入/UI 生命周期。Render 回调不得扫描
   包、加载 DLL、等待生命周期任务或同步执行文件/网络 I/O。
 - `include/anomaly/sdk/` 是公开 DLL 边界：仅纯 C ABI、定宽类型、opaque handle、清晰所有权以及
-  version/`struct_size` 检查。不得暴露 STL、异常、RTTI 对象、裸 UE 对象、`ImGuiContext*` 或内部头文件。
+  version/`struct_size` 检查。不得暴露 STL、异常、RTTI 对象、裸游戏对象、`ImGuiContext*` 或内部头文件。
 - Core 以手工映射方式运行，映像不能携带 loader-managed 静态 TLS。链接进 `anomaly_core` 的代码禁止
   `thread_local`，也禁止会拉入 `_Init_thread_epoch` 的函数级动态初始化局部静态；线程本地状态一律改用
   `include/anomaly/thread_local_value.hpp` 的 FLS 封装，新链接进 Core 的 target 必须登记到
@@ -207,6 +207,6 @@ ABI/线程/回调最外层 `catch (...)`、Dispatcher 锁外销毁 callback 等�
 | 服务与所有权 | `src/runtime/service_graph.cpp`、`src/runtime/runtime_dispatchers.cpp` |
 | 插件 ABI 与热重载 | `include/anomaly/sdk/`、`src/plugin/`、`examples/` |
 | 插件文案与本地化 | `include/anomaly/sdk/localization.hpp`、`plugins/*/locales/`、`tools/check_plugin_i18n.ps1` |
-| UE5/NTE 兼容 | `src/game/ue5/`、`src/game/nte/`、`profiles/nte/` |
+| Mayday/Unity 兼容 | `src/game/mayday/`、`include/anomaly/mayday_*.hpp`、`profiles/mayday/` |
 | 渲染与 UI | `src/render/dx12/`、`src/ui/` |
 | 验证与发布门禁 | `CMakeLists.txt`、`.agents/tooling.md` |

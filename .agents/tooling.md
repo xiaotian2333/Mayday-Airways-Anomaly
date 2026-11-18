@@ -15,11 +15,10 @@ cmake --install .build\windows-vs2022 --config RelWithDebInfo `
 
 默认构建只产出 Runtime、Tools、SDK 三个发布组件所需的 target。开发夹具（`fixtures`）、
 开发者测试插件包（`testplugins`）与 PDB（`symbols`）都不属于任何发布组件，默认
-不构建，只在需要时显式开启：`build.cmd fixtures|testplugins|symbols`，或在 configure
-阶段传入 `ANOMALY_BUILD_TEST_FIXTURES=ON`、
-`ANOMALY_BUILD_TEST_PLUGINS=ON`、`ANOMALY_BUILD_SYMBOLS=ON`。测试插件包
-（`MapSpawnExporter`、`NteMovementHold`、`NteNavmeshDemo`、`NtePickupDemo`、
-`TeleportLandmarksProbe`）通过独立的 `TestPlugins` 组件安装，任何发布组件都不含该组件。
+不构建，只在需要时显式开启：`build.cmd fixtures|symbols`，或在 configure
+阶段传入 `ANOMALY_BUILD_TEST_FIXTURES=ON`、`ANOMALY_BUILD_SYMBOLS=ON`。
+当前仓库没有开发者测试插件包；`ANOMALY_BUILD_TEST_PLUGINS` 开关保留给后续新增的
+`TestPlugins` 组件。
 `build.cmd package` 额外把 Tools、SDK（开启 symbols 时含 Symbols）暂存到
 `.build\windows-vs2022\package`。
 
@@ -44,7 +43,7 @@ cmake --install .build\windows-vs2022 --config RelWithDebInfo `
 | 发布包 | 构建发布所需 target、运行相关合同/集成验证，再使用标准构建树运行 `tools/package_release.ps1` |
 
 环境限制导致命令无法执行时，运行可执行的最强子集，并在完成说明中记录未执行命令及原因。
-不能因为某个构建目录存在，就宣称发布包或真实 NTE Smoke 已验证。
+不能因为某个构建目录存在，就宣称发布包或真实 Mayday Smoke 已验证。
 
 ## 项目工具
 
@@ -56,11 +55,9 @@ cmake --install .build\windows-vs2022 --config RelWithDebInfo `
 | `anomaly-inject` | 把 Runtime Core 手工映射进已经在运行的目标（`--list`、`--pid`、`--delivery`） | 目标只能是自有进程或玩家自己启动的本机游戏；失败不重启、不结束目标进程 |
 | `anomaly-cli` 只读命令 | `status`、`modules`、`sections`、`regions`、`scan`、`ue`、`read`、`chain`、`snapshot` | 目标只能是自有进程；snapshot 和日志可能含敏感路径/数据 |
 | `anomaly-cli` 修改命令 | `write`、`patch`、`protect`、`alloc`、`free` | 需要用户明确授权和自有测试目标；不得作为常规诊断手段 |
-| `diagnose_nte_profile.ps1`、`rescan_profile_signatures.ps1`、`scan_nte_entities.ps1` | 检查实时 NTE 目标和活动 Profile | 必须有明确请求、正确 PID/Profile；生成数据分享前需审查 |
 | `collect_diagnostics.ps1` | 生成脱敏诊断包 | 用 `pwsh -NoProfile -File` 启动；检查输入 Runtime 和输出路径，dump 必须人工审查 |
 | `package_release.ps1` | staging Runtime、Tools、SDK 三个组件，并覆盖发布输出 | 用 `pwsh -NoProfile -File` 启动；仅在干净标准构建后，且指定明确版本/输出目录时运行 |
 | `check_plugin_i18n.ps1` | 校验插件本地化：key 覆盖（含 `ScopedLabel`/`TextLocalized`/`LocalizedStatus` 等 helper 调用与 `window.`/`settings.` 等命名空间字面量）、`{N}` 占位符掩码与英文回退一致、残留中文字面量、manifest 回退语言与 `anomaly.localization` 声明 | 只读；`-Plugin A,B` 指定插件，省略则检查 `plugins/` 下全部插件 |
-| `migrate_plugin_ids/`（双击 `Migrate-Plugin-Ids.cmd`） | 把运行时数据里的旧插件 id 迁到 `<作者>.<插件名>`：`config/plugin-enablement.json` 键、`config/plugins/<id>`、`state/plugins/<id>`、`config-<配置键>.json`（[使用说明](../tools/migrate_plugin_ids/README.md)） | 改用户数据；双击走"预览→确认"；命令行先加 `-WhatIf`；`-Root` 缺省用脚本目录（与 AnomalyLauncher.exe 同级），已移除插件与第三方 id 只报告不动 |
 | `run_stability_suite.ps1` | 显式 opt-in 的 soak 证据；需要先 `build.cmd fixtures` | 用 `pwsh -NoProfile -File` 启动；`-Quick` 只用于脚本冒烟，不是发布证据 |
 
 所有工具脚本默认使用 `.build/windows-vs2022` 和其中的 `RelWithDebInfo` 二进制。只在有意使用

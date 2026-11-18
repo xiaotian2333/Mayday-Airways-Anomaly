@@ -1,23 +1,27 @@
 # Mayday Airways 适配层改造路线图
 
-本仓库 fork 自 [AnomalyNTE/Anomaly](https://github.com/AnomalyNTE/Anomaly)（《异环》插件平台），
+本仓库 fork 自 [AnomalyNTE/Anomaly](https://github.com/AnomalyNTE/Anomaly)（AGPL-3.0），
 目标：改造为 **Mayday Airways (Steam Demo, Unity IL2CPP)** 的 mod 加载器。
 
 ## 已完成
 
-- [x] 移除全部 NTE 专用内容：50 个异环插件、`src/game/ue5|nte`、`profiles/nte`、NTE 工具脚本
-- [x] CMakeLists 同步清理（configure 通过）
+- [x] 移除全部 NTE 专用内容：异环插件、`src/game/ue5|nte`、`profiles/nte`、NTE 工具脚本与文档
+- [x] CMakeLists 同步清理，修复 fixtures 构建路径
 - [x] 建立 `src/game/mayday/`、`profiles/mayday/` 骨架
 - [x] 引擎符号层：`MaydayAdapter` 等待 `GameAssembly.dll`，解析 il2cpp 导出并发布 `mayday.il2cpp`
 - [x] 渲染后端：实测 Mayday 使用 **D3D12**，上游 D3D12 Present hook + 内嵌 ImGui 覆盖层复用
 - [x] 内建服务 `mayday.money`：金币/债务读写（il2cpp 线程附加、原始值参数封送、差额债务语义）
 - [x] 内建插件 `plugins/money`：金币修改面板（本地化、`check_plugin_i18n.ps1` 通过），实机读写验证通过
+- [x] 内建服务与插件 `mayday.freecam`：自由镜头（主线程接管相机、原始鼠标增量）
+- [x] 覆盖层输入隔离：InputSystem 按钮/滚轮、UGUI `EventSystem` 与指针缓存
+- [x] 暂停菜单「Anomaly」入口，等价 Insert 热键
+- [x] 启动器：Mayday 单游戏配置、`MaydayAirways.exe` 进程识别、Steam 启动并附加、代理模式
 
 ## 保留的通用基础设施
 
 | 模块 | 说明 |
 |---|---|
-| `apps/launcher` | 启动器 UI（游戏路径配置、注入模式） |
+| `apps/launcher` | 启动器 UI（游戏路径、注入/代理模式、Steam 启动） |
 | `apps/injector` | 进程注入器（dwmapi 代理 / 手动映射） |
 | `src/bootstrap` | dwmapi 代理 + Core 异步启动 |
 | `src/runtime` | RuntimeSession / ServiceGraph / Dispatcher |
@@ -28,7 +32,6 @@
 
 ## 待改造
 
-1. **Profile 体系**：UE5 偏移 profile → il2cpp dump 基线（game version ↔ dump manifest）
-2. **更多游戏服务/插件**：参考 Mayday-Airways-ce 的 MelonLoader 版功能继续复刻
-3. **Launcher 配置**：游戏路径/版本探测从异环改为 MaydayAirways.exe
-4. **NTE 残留清理**：launcher/ui/services 中散布的 NTE 文案与配置项
+1. **更多游戏服务/插件**：参考 Mayday-Airways-ce 的 MelonLoader 版功能继续复刻
+2. **启动器模组页**：现有页面仍按 UE pak 语义组织；需替换为 Mayday 可用的 mod 模型
+3. **文档**：面向 Mayday 的用户/开发者文档继续补齐

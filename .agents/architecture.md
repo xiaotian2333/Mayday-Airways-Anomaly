@@ -4,21 +4,21 @@
 
 ```mermaid
 flowchart TD
-    Game["NTE / UE5 进程"] --> Proxy["dwmapi 代理"]
+    Game["MaydayAirways.exe (Unity IL2CPP)"] --> Proxy["dwmapi 代理"]
     Proxy --> Core["Anomaly.Core"]
     Core --> Session["RuntimeSession"]
     Session --> Graph["ServiceGraph"]
     Session --> Dispatch["Lifecycle / Worker / Game / Render Dispatcher"]
     Graph --> Platform["Windows 平台服务与诊断"]
     Graph --> Plugins["插件宿主与 PluginScope"]
-    Graph --> Profile["UE5 Resolver 与 NTE Profile Runtime"]
+    Graph --> Profile["Mayday Adapter 与 il2cpp 服务"]
     Session --> Render["D3D12 Bridge 与 UI"]
-    Profile --> Services["版本化 UE5/NTE SDK 服务"]
+    Profile --> Services["版本化 Mayday SDK 服务"]
     Plugins --> Services
 ```
 
 生产组合根是 `src/runtime/core_main.cpp`；`RuntimeSession` 管理进程生命周期，`ServiceGraph`
-管理依赖顺序。Bootstrap 只负责将 Core 安全带入进程。插件宿主、Renderer、NTE Adapter 和
+管理依赖顺序。Bootstrap 只负责将 Core 安全带入进程。插件宿主、Renderer、Mayday Adapter 和
 Repository Worker 都是由 Runtime 服务声明的并列所有者，彼此不能形成嵌套所有权。
 
 ## 模块契约
@@ -26,11 +26,10 @@ Repository Worker 都是由 Runtime 服务声明的并列所有者，彼此不�
 | 区域 | 负责内容 | 可依赖 | 禁止依赖 |
 | --- | --- | --- | --- |
 | `src/bootstrap/dwmapi` | 系统转发和异步 Core 启动 | Win32 Loader、Bootstrap ABI | 配置、Profile、Hook、插件、UI |
-| `src/runtime` | Session 状态、ServiceGraph、停止信号、Dispatcher | 平台抽象 | UE5/NTE 布局、渲染细节、插件实现 |
-| `src/services`、`src/platform/windows`、`src/diagnostics` | 日志、存储、内存、Pattern、Pipe、Crash | Win32 和 Runtime 合同 | NTE 策略、插件行为 |
-| `src/game/ue5` | 通用引擎符号、validator、快照 | 已验证的平台/Runtime 服务 | NTE 专用偏移、包管理策略 |
-| `src/game/nte` | 活动 Profile 选择和 NTE 服务 Gate | UE5 Adapter、NTE Profile | 生命周期所有权决策、Build identity 匹配 |
-| `src/plugin` | Manifest、依赖、Scope、generation、热重载 | SDK 合同、Runtime 服务 | Renderer 后端内部、固定 NTE 地址 |
+| `src/runtime` | Session 状态、ServiceGraph、停止信号、Dispatcher | 平台抽象 | Unity/Mayday 布局、渲染细节、插件实现 |
+| `src/services`、`src/platform/windows`、`src/diagnostics` | 日志、存储、内存、Pattern、Pipe、Crash | Win32 和 Runtime 合同 | Mayday 策略、插件行为 |
+| `src/game/mayday` | il2cpp 导出解析、GameState/PlayerRig 服务与降级 | 已验证的平台/Runtime 服务 | 生命周期所有权、插件实现 |
+| `src/plugin` | Manifest、依赖、Scope、generation、热重载 | SDK 合同、Runtime 服务 | Renderer 后端内部、固定游戏地址 |
 | `src/render/dx12`、`src/ui` | SwapChain/输入/UI 与绘制服务 | Render Dispatcher、受控 Hook、插件只读快照 | 包 I/O、DLL 加载、同步 Game Update |
 | `src/repository` | 签名 Index、网络 worker、staging、回滚 | Worker/Network、validator | 游戏对象、渲染提交、插件回调 |
 | `include/anomaly/sdk` | 稳定公开 C ABI 与 C++ wrapper | 版本化公开合同 | 宿主内部类型 |
@@ -42,8 +41,8 @@ Repository Worker 都是由 Runtime 服务声明的并列所有者，彼此不�
 | Bootstrap | 解析导出，在 Loader Lock 外启动 Runtime | 长循环、插件回调 |
 | Lifecycle | 服务/插件状态转换、热重载提交、停止 | 直接读取游戏对象、提交 D3D12 命令 |
 | Worker | 解析、哈希、扫描准备、Repository 网络 | 使用仅在 Game/Render 线程有效的指针 |
-| Game | 已验证 UE5/NTE 更新与快照刷新 | 包发现、同步文件 I/O |
-| Render | Present/Resize、ImGui、纹理上传、插件 Draw | DLL 加载、Profile 扫描、阻塞生命周期工作 |
+| Game | 已验证的 il2cpp 服务调用与快照刷新 | 包发现、同步文件 I/O |
+| Render | Present/Resize、ImGui、纹理上传、插件 Draw | DLL 加载、il2cpp 扫描、阻塞生命周期工作 |
 | Diagnostics | 解析请求、采集只读快照、投递 intent | 直接修改 Game/Render 状态 |
 
 Dispatcher 任务必须携带 owner、generation、取消状态和 in-flight lease。禁止在持有
@@ -52,8 +51,8 @@ Lifecycle intent，不能拥有插件加载过程。
 
 ## 变更规则
 
-- 新增 UE5/NTE 地址、布局或能力：必须更新活动 Profile、resolver/validator 覆盖、不可用/降级
-  行为和 Adapter 层验证。
+- 新增 il2cpp 类、方法或字段：必须在运行时按名称解析并校验，提供不可用/降级行为，
+  不能写死地址、偏移或版本分支。
 - 新增 SDK 字段：必须保持 C 内存布局，使用 `struct_size` 或新的版本化服务表；同步更新 C/C++
   使用方验证与 ABI Snapshot 基线。
 - 新增插件资源（Hook、Subscription、Task、UI、Texture、Patch、IPC）：必须登记到 Scope ledger，
