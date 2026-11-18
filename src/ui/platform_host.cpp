@@ -13,6 +13,7 @@
 #include "anomaly/ui_resource_decoder.hpp"
 #include "anomaly/ui_resource_registry.hpp"
 #include "anomaly/ue5_nte_adapter.hpp"
+#include "anomaly/mayday_adapter.hpp"
 #include "plugin_manager.hpp"
 
 #include <Windows.h>
@@ -9010,7 +9011,7 @@ void RunPlatform(
     const AnalyzerConfig& config,
     std::stop_token stop_token,
     anomaly::CoreMemoryServices memory_services,
-    std::shared_ptr<anomaly::Ue5NteAdapter> adapter,
+    std::shared_ptr<anomaly::MaydayAdapter> adapter,
     PlatformDiagnostics diagnostics,
     std::shared_ptr<PluginManager> plugin_owner,
     PlatformWindowAppearance appearance) {

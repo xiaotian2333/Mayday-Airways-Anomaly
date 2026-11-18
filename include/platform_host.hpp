@@ -21,7 +21,7 @@
 #include <stop_token>
 
 namespace anomaly {
-class Ue5NteAdapter;
+class MaydayAdapter;
 class StructuredLogger;
 }
 
@@ -131,7 +131,7 @@ void RunPlatform(
     const AnalyzerConfig& config,
     std::stop_token stop_token = {},
     anomaly::CoreMemoryServices memory_services = {},
-    std::shared_ptr<anomaly::Ue5NteAdapter> adapter = {},
+    std::shared_ptr<anomaly::MaydayAdapter> adapter = {},
     PlatformDiagnostics diagnostics = {},
     std::shared_ptr<PluginManager> plugins = {},
     PlatformWindowAppearance appearance = {});
@@ -140,7 +140,7 @@ void RunEmbeddedPlatform(
     const AnalyzerConfig& config,
     std::stop_token stop_token = {},
     anomaly::CoreMemoryServices memory_services = {},
-    std::shared_ptr<anomaly::Ue5NteAdapter> adapter = {},
+    std::shared_ptr<anomaly::MaydayAdapter> adapter = {},
     PlatformDiagnostics diagnostics = {},
     std::shared_ptr<PluginManager> plugins = {});
 [[nodiscard]] bool InitializePlatformUi(

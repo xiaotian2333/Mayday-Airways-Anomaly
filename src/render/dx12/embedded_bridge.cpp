@@ -3,7 +3,7 @@
 #include "embedded_present_scope.hpp"
 
 #include "anomaly/host_ui_service.hpp"
-#include "anomaly/nte_esc_menu_bridge.hpp"
+#include "anomaly/mayday_adapter.hpp"
 #include "anomaly/structured_logger.hpp"
 #include "anomaly/thread_local_value.hpp"
 #include "anomaly/ue5_nte_adapter.hpp"
@@ -49,6 +49,9 @@ std::string DescribeCodeAddress(void* address) {
 
 std::atomic<EmbeddedState*> g_state{};
 PresentFn g_present{};
+// Mayday：tick 帧源。Present hook 每帧驱动一次适配器 tick（插件 GameUpdate）。
+std::shared_ptr<anomaly::MaydayAdapter> g_mayday_adapter;
+std::atomic<long long> g_last_frame_ticks{0};
 Present1Fn g_present1{};
 ResizeBuffersFn g_resize_buffers{};
 ResizeBuffers1Fn g_resize_buffers1{};
@@ -425,6 +428,14 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* swap_chain, UINT interval,
     const auto render_started = sampled ? std::chrono::steady_clock::now()
                                         : std::chrono::steady_clock::time_point{};
     if (callback) RenderEmbedded(swap_chain, flags);
+    if (callback && g_mayday_adapter) {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        const long long last = g_last_frame_ticks.exchange(now);
+        const double delta = last == 0
+            ? 0.0
+            : static_cast<double>(now - last) / 1'000'000'000.0;
+        g_mayday_adapter->OnFrame(delta);
+    }
     const auto original_started = sampled ? std::chrono::steady_clock::now()
                                           : std::chrono::steady_clock::time_point{};
     const HRESULT result = g_present(swap_chain, interval, flags);
@@ -462,6 +473,14 @@ HRESULT STDMETHODCALLTYPE HookPresent1(
     const auto render_started = sampled ? std::chrono::steady_clock::now()
                                         : std::chrono::steady_clock::time_point{};
     if (callback) RenderEmbedded(swap_chain, flags);
+    if (callback && g_mayday_adapter) {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        const long long last = g_last_frame_ticks.exchange(now);
+        const double delta = last == 0
+            ? 0.0
+            : static_cast<double>(now - last) / 1'000'000'000.0;
+        g_mayday_adapter->OnFrame(delta);
+    }
     const auto original_started = sampled ? std::chrono::steady_clock::now()
                                           : std::chrono::steady_clock::time_point{};
     const HRESULT result = g_present1(swap_chain, interval, flags, parameters);
@@ -912,7 +931,7 @@ void RunEmbeddedPlatform(
     const AnalyzerConfig& config,
     std::stop_token stop_token,
     anomaly::CoreMemoryServices memory_services,
-    std::shared_ptr<anomaly::Ue5NteAdapter> adapter,
+    std::shared_ptr<anomaly::MaydayAdapter> adapter,
     PlatformDiagnostics diagnostics,
     std::shared_ptr<PluginManager> plugin_owner) {
     using namespace embedded;
@@ -993,9 +1012,7 @@ void RunEmbeddedPlatform(
     }
     const auto tick_plugins = plugin_owner;
     const auto tick_enabled = std::make_shared<std::atomic_bool>(true);
-    std::shared_ptr<anomaly::NteEscMenuBridge> esc_menu_bridge;
     bool tick_bound{};
-    bool esc_menu_bridge_started{};
     bool hooks_owned{};
     bool cleanup_done{};
     ScopeExit cleanup_guard;
@@ -1027,13 +1044,7 @@ void RunEmbeddedPlatform(
                     return;
                 }
             }
-            if (esc_menu_bridge_started && esc_menu_bridge != nullptr) {
-                esc_menu_bridge_started = false;
-                if (!esc_menu_bridge->Stop(std::chrono::seconds(5))) {
-                    std::ofstream(root / L"anomaly-platform.log", std::ios::app)
-                        << "NTE ESC menu bridge shutdown deadline exceeded\n";
-                }
-            }
+            g_mayday_adapter = nullptr;
             if (hooks_owned && !RemoveHooks()) {
                 std::ofstream(root / L"anomaly-platform.log", std::ios::app)
                     << "embedded hook shutdown deadline exceeded; "
@@ -1091,49 +1102,13 @@ void RunEmbeddedPlatform(
         }
     };
     if (adapter != nullptr) {
-        const auto bridge_logger = state.diagnostics.logger;
-        esc_menu_bridge = std::make_shared<anomaly::NteEscMenuBridge>(
-            memory_services, adapter->Resolution(),
-            [weak = std::weak_ptr<PluginManager>(plugin_owner)] {
-                const auto plugins = weak.lock();
-                return plugins == nullptr
-                    ? std::vector<anomaly::NteEscMenuButtonSnapshot>{}
-                    : plugins->NteEscMenuButtons();
-            },
-            [weak = std::weak_ptr<PluginManager>(plugin_owner)](
-                const AnomalyGenerationHandleV1 handle) {
-                if (const auto plugins = weak.lock()) {
-                    static_cast<void>(plugins->InvokeNteEscMenuButton(handle));
-                }
-            },
-            [bridge_logger](const std::uint32_t level, std::string message) {
-                if (bridge_logger == nullptr) return;
-                anomaly::LogLevel mapped = anomaly::LogLevel::Info;
-                if (level >= ANOMALY_CORE_LOG_LEVEL_V1_ERROR) {
-                    mapped = anomaly::LogLevel::Error;
-                } else if (level >= ANOMALY_CORE_LOG_LEVEL_V1_WARNING) {
-                    mapped = anomaly::LogLevel::Warning;
-                } else if (level == ANOMALY_CORE_LOG_LEVEL_V1_TRACE) {
-                    mapped = anomaly::LogLevel::Trace;
-                }
-                anomaly::LogDetails details;
-                details.thread_domain = anomaly::LogThreadDomain::Game;
-                details.event_id = "nte.esc-menu-bridge";
-                static_cast<void>(bridge_logger->Log(
-                    mapped, "nte.esc-menu", std::move(message), std::move(details)));
-            });
-        esc_menu_bridge_started = esc_menu_bridge->Start();
-        if (!esc_menu_bridge_started) {
-            std::ofstream(root / L"anomaly-platform.log", std::ios::app)
-                << "NTE ESC menu bridge unavailable for active Profile\n";
-        }
         const auto plugin_mutex = state.plugin_mutex;
         const auto game_pump = state.diagnostics.game_pump;
         auto* const performance = &state.performance;
         tick_bound = true;
         adapter->SetTickCallback([
             tick_plugins, plugin_mutex, tick_enabled, game_pump,
-            esc_menu_bridge, performance](double delta_seconds) {
+            performance](double delta_seconds) {
             if (!tick_enabled->load(std::memory_order_acquire)) return;
             const bool sampled = performance->SampleGameTick();
             const auto total_started = sampled ? std::chrono::steady_clock::now()
@@ -1146,28 +1121,24 @@ void RunEmbeddedPlatform(
                                                 : std::chrono::steady_clock::time_point{};
             if (tick_enabled->load(std::memory_order_relaxed)) {
                 if (tick_plugins != nullptr) tick_plugins->GameUpdate(delta_seconds);
-                const auto esc_started = sampled ? std::chrono::steady_clock::now()
-                                                 : std::chrono::steady_clock::time_point{};
-                if (esc_menu_bridge != nullptr && esc_menu_bridge->Started()) {
-                    esc_menu_bridge->Update(delta_seconds);
-                }
-                if (sampled) {
-                    const auto completed = std::chrono::steady_clock::now();
-                    performance->Record(
-                        EmbeddedPerformanceStage::GamePump, lock_started - total_started);
-                    performance->Record(
-                        EmbeddedPerformanceStage::GamePluginLockWait,
-                        update_started - lock_started);
-                    performance->Record(
-                        EmbeddedPerformanceStage::GamePluginUpdate,
-                        esc_started - update_started);
-                    performance->Record(
-                        EmbeddedPerformanceStage::GameEscMenu, completed - esc_started);
-                    performance->Record(
-                        EmbeddedPerformanceStage::GameTotal, completed - total_started);
-                }
+            }
+            plugin_lock.unlock();
+            const auto completed = std::chrono::steady_clock::now();
+            if (sampled) {
+                performance->Record(
+                    EmbeddedPerformanceStage::GamePump, lock_started - total_started);
+                performance->Record(
+                    EmbeddedPerformanceStage::GamePluginLockWait,
+                    update_started - lock_started);
+                performance->Record(
+                    EmbeddedPerformanceStage::GamePluginUpdate,
+                    completed - update_started);
+                performance->Record(
+                    EmbeddedPerformanceStage::GameTotal, completed - total_started);
             }
         });
+        // Mayday：tick 帧源 = Present 回调。注册全局适配器指针供 hook 每帧驱动。
+        g_mayday_adapter = adapter;
     }
     EmbeddedState* expected_state{};
     if (!g_state.compare_exchange_strong(

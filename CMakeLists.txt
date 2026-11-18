@@ -532,6 +532,19 @@ target_compile_options(anomaly_internal_memory_services PRIVATE /W4 /permissive-
 target_link_libraries(anomaly_internal_memory_services PUBLIC ue5mem_memory)
 
 
+# AdapterServiceRegistry：插件可见的服务表注册中心（通用设施，原在 ue5 目录，Mayday 改造迁出）
+# pak_mod_catalog/mod_group_names：mod 目录枚举（原在 nte 目录；Mayday 改造时将替换为
+# Unity 语义的 mod 模型，先原样迁出保构建）
+add_library(anomaly_adapter_services STATIC
+    src/services/adapter_service_registry.cpp
+    src/services/pak_mod_catalog.cpp
+    src/services/mod_group_names.cpp)
+target_include_directories(anomaly_adapter_services PUBLIC include)
+target_compile_definitions(
+    anomaly_adapter_services PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(anomaly_adapter_services PRIVATE /W4 /permissive- /EHsc)
+target_link_libraries(anomaly_adapter_services PUBLIC nlohmann_json::nlohmann_json)
+
 add_library(anomaly_udp_packet_parser STATIC src/diagnostics/udp_packet_parser.cpp)
 target_include_directories(anomaly_udp_packet_parser PUBLIC include)
 target_compile_definitions(
@@ -578,7 +591,7 @@ target_compile_definitions(
 target_compile_options(anomaly_pak_mod_runtime PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(
     anomaly_pak_mod_runtime PUBLIC anomaly_adapter_services
-    PRIVATE nlohmann_json::nlohmann_json anomaly_pak_mod_catalog)
+    PRIVATE nlohmann_json::nlohmann_json anomaly_adapter_services)
 
 add_library(ue5mem_core STATIC
     src/diagnostics/analyzer.cpp
@@ -938,16 +951,6 @@ target_compile_options(anomaly_service_graph PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(
     anomaly_runtime_kernel PUBLIC anomaly_service_graph anomaly_runtime_dispatchers)
 
-set(ANOMALY_STAGED_NTE_PROFILE_DIRECTORY
-    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Anomaly/profiles/nte")
-add_custom_target(anomaly_stage_nte_profiles ALL
-    COMMAND "${CMAKE_COMMAND}" -E remove_directory
-            "${ANOMALY_STAGED_NTE_PROFILE_DIRECTORY}"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory
-            "${CMAKE_SOURCE_DIR}/profiles/nte"
-            "${ANOMALY_STAGED_NTE_PROFILE_DIRECTORY}"
-    COMMENT "Synchronizing bundled NTE Profiles"
-    VERBATIM)
 
 add_library(anomaly_core SHARED
     src/runtime/core_main.cpp
@@ -961,6 +964,7 @@ add_library(anomaly_core SHARED
     src/render/dx12/embedded_ui_resource_render_backend.cpp
     src/ui/embedded_ui.cpp
     src/plugin/plugin_manager.cpp
+    src/game/mayday/mayday_profile_runtime.cpp
 )
 set_target_properties(anomaly_core PROPERTIES
     OUTPUT_NAME "Anomaly.Core"
@@ -969,7 +973,34 @@ set_target_properties(anomaly_core PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/Anomaly")
 target_include_directories(anomaly_core PRIVATE include src "${GENERATED_DIR}")
 target_compile_definitions(anomaly_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_core PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_core PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码含中文注释
+target_link_libraries(
+    anomaly_core PRIVATE
+    bcrypt
+    d3dcompiler
+    anomaly_telemetry
+    ue5mem_core
+    anomaly_runtime_kernel
+    anomaly_imgui
+    anomaly_minhook_backend
+    anomaly_ui_service
+    anomaly_platform_ui_model
+    anomaly_platform_settings
+    anomaly_platform_ui_layout
+    anomaly_platform_notice
+    anomaly_scoped_platform
+    anomaly_plugin_shadow
+    anomaly_plugin_dependency_resolver
+    anomaly_plugin_enablement
+    anomaly_pak_mod_runtime
+    anomaly_websocket_server
+    anomaly_repository_coordinator
+    anomaly_crash_reporter
+    anomaly_structured_logger
+    anomaly_ui_resources
+    anomaly_i18n
+    anomaly_plugin_profile
+    nlohmann_json::nlohmann_json)
 
 # The Core is manually mapped and cannot use MSVC's loader-managed TLS slot for
 # function-local static guards. These targets initialize their process-scoped
@@ -977,7 +1008,6 @@ target_compile_options(anomaly_core PRIVATE /W4 /permissive- /EHsc)
 foreach(target IN LISTS ANOMALY_MANUAL_MAP_TLS_FREE_TARGETS)
     target_compile_options(${target} PRIVATE /Zc:threadSafeInit-)
 endforeach()
-add_dependencies(anomaly_core anomaly_stage_nte_profiles)
 add_custom_command(TARGET anomaly_core POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_SOURCE_DIR}/CONTACT"
@@ -1035,13 +1065,6 @@ add_executable(anomaly_inspect apps/cli/inspect_main.cpp)
 set_target_properties(anomaly_inspect PROPERTIES OUTPUT_NAME "anomaly-inspect")
 target_compile_definitions(anomaly_inspect PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anomaly_inspect PRIVATE /W4 /permissive- /EHsc)
-
-add_executable(anomaly-profile apps/profile_tool/main.cpp)
-target_include_directories(anomaly-profile PRIVATE include)
-target_compile_definitions(
-    anomaly-profile PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly-profile PRIVATE /W4 /permissive- /EHsc)
-target_link_libraries(anomaly-profile PRIVATE anomaly_build_profile)
 
 add_executable(anomaly-plugin apps/plugin_tool/main.cpp)
 set_target_properties(anomaly-plugin PROPERTIES OUTPUT_NAME "anomaly-plugin")
@@ -1186,7 +1209,6 @@ if(ANOMALY_BUILD_TEST_FIXTURES)
         anomaly_plugin_runtime
         anomaly_structured_logger anomaly_scoped_platform anomaly_ui_resources
         anomaly_i18n anomaly_plugin_profile nlohmann_json::nlohmann_json ole32 shell32 comdlg32)
-    add_dependencies(anomaly-platform-preview anomaly_stage_nte_profiles)
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/launcher_archive.cmake")
@@ -1197,7 +1219,7 @@ add_executable(anomaly_launcher WIN32
     "${LAUNCHER_RESOURCES_RC}")
 set_target_properties(anomaly_launcher PROPERTIES OUTPUT_NAME "AnomalyLauncher")
 target_link_libraries(anomaly_launcher PRIVATE winhttp anomaly_launcher_archive)
-target_link_libraries(anomaly_launcher PRIVATE nlohmann_json::nlohmann_json anomaly_pak_mod_catalog)
+target_link_libraries(anomaly_launcher PRIVATE nlohmann_json::nlohmann_json anomaly_adapter_services)
 target_link_libraries(anomaly_launcher PRIVATE advapi32)
 # The launcher carries a few user-facing strings inline; /utf-8 keeps them valid.
 target_compile_options(anomaly_launcher PRIVATE /utf-8)
@@ -1349,10 +1371,6 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         target_link_libraries(anomaly_better_pose_t_pose_calibration_fixture PRIVATE
             anomaly_mmd2bip_converter winmm ws2_32 user32 ole32 shell32 uuid comdlg32 advapi32 shlwapi)
     endif()
-    add_executable(anomaly_mmd2bip apps/mmd2bip/main.cpp)
-    set_target_properties(anomaly_mmd2bip PROPERTIES OUTPUT_NAME "anomaly-mmd2bip")
-    target_compile_options(anomaly_mmd2bip PRIVATE /W4 /permissive- /EHsc /utf-8)
-    target_link_libraries(anomaly_mmd2bip PRIVATE anomaly_mmd2bip_converter)
     if(ANOMALY_BUILD_TEST_FIXTURES)
         target_compile_features(anomaly_scene_loader_fixture PRIVATE cxx_std_20)
         target_compile_options(anomaly_scene_loader_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -1493,40 +1511,8 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
 
     # Test packages exist only when ANOMALY_BUILD_TEST_PLUGINS is on, so every list that
     # reaches their targets is built from the targets that actually exist.
-    set(ANOMALY_BUILTIN_PLUGIN_TARGETS
-        anomaly_builtin_mod_manager
-        anomaly_builtin_nte_position anomaly_builtin_nte_teleport anomaly_builtin_nte_vehicle
-        anomaly_builtin_entity_esp anomaly_builtin_pink_paw_heist_esp
-        anomaly_builtin_fake_uid anomaly_builtin_camera_tools
-        anomaly_builtin_camera_blur_fix anomaly_builtin_better_pose
-        anomaly_builtin_wallet_collector anomaly_builtin_box_auto anomaly_builtin_combat_box
-        anomaly_builtin_clone_enter anomaly_builtin_scene_loader
-        anomaly_builtin_nte_quick_ultimate
-        anomaly_builtin_nte_free_fly anomaly_builtin_vehicle_flight
-        anomaly_builtin_skin_changer anomaly_builtin_ui_buttons
-        anomaly_builtin_dll_loader anomaly_builtin_hifi_vehicle_music
-        anomaly_builtin_model_scale anomaly_builtin_status_bar anomaly_builtin_autofish anomaly_builtin_autotaxi
-        anomaly_builtin_autoclaw anomaly_builtin_character_studio anomaly_builtin_better_map
-        anomaly_builtin_deserted anomaly_builtin_jelly anomaly_builtin_night999
-        anomaly_builtin_npc_summon anomaly_builtin_training_dummy
-        anomaly_builtin_summon_lab anomaly_builtin_health_display anomaly_builtin_memory_dump anomaly_builtin_nailong
-        anomaly_builtin_better_tv anomaly_builtin_nte_combat_tracker)
-
-    if(ANOMALY_BUILD_TEST_PLUGINS)
-        list(APPEND ANOMALY_BUILTIN_PLUGIN_TARGETS
-            anomaly_builtin_nte_movement_hold
-            anomaly_builtin_nte_navigation anomaly_builtin_nte_pickup_demo
-            anomaly_builtin_teleport_landmarks_probe
-            anomaly_builtin_map_spawn_exporter
-            anomaly_builtin_mod_name_export)
-        target_link_libraries(anomaly_builtin_mod_name_export PRIVATE nlohmann_json::nlohmann_json)
-        target_compile_options(anomaly_builtin_mod_name_export PRIVATE /utf-8)
-    endif()
-    foreach(builtin_target IN LISTS ANOMALY_BUILTIN_PLUGIN_TARGETS)
-    endforeach()
-    if(MSVC)
-    endif()
-    add_dependencies(anomaly_test_host ${ANOMALY_BUILTIN_PLUGIN_TARGETS})
+    # (Mayday 改造：原异环内建插件清单已随 NTE 清理移除，后续在此登记新内建插件。)
+    set(ANOMALY_BUILTIN_PLUGIN_TARGETS "")
 endif()
 
 if(TARGET anomaly-platform-preview)
@@ -1635,7 +1621,7 @@ install(CODE [[
 ]] COMPONENT GameRuntime)
 install(DIRECTORY profiles/
     DESTINATION Anomaly/profiles COMPONENT GameRuntime)
-install(TARGETS anomaly_cli anomaly_inspect anomaly-profile anomaly-plugin anomaly_abi_snapshot anomaly_test_host
+install(TARGETS anomaly_cli anomaly_inspect anomaly-plugin anomaly_abi_snapshot anomaly_test_host
     anomaly_injector
     RUNTIME DESTINATION . COMPONENT Tools)
 # The layout editor is one offline HTML file: it needs no runtime, no network and

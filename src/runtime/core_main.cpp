@@ -5,11 +5,7 @@
 #include "anomaly/embedded_artwork.hpp"
 #include "anomaly/diagnostic_pipe_service.hpp"
 #include "anomaly/i18n.hpp"
-#include "anomaly/nte_profile_runtime.hpp"
-#include "anomaly/nte_pak_signature_bypass.hpp"
-#include "anomaly/pak_mod_runtime.hpp"
-#include "anomaly/pak_mod_catalog.hpp"
-#include "anomaly/pak_mod_settings.hpp"
+#include "anomaly/mayday_profile_runtime.hpp"
 #include "anomaly/platform_settings.hpp"
 #include "anomaly/repository_coordinator.hpp"
 #include "anomaly/runtime_session.hpp"
@@ -73,13 +69,7 @@ struct CoreContext {
     std::shared_ptr<anomaly::PlatformSettingsStore> settings;
     std::shared_ptr<anomaly::WebSocketServer> websocket;
     HMODULE game_module{};
-    std::shared_ptr<anomaly::NteProfileRuntime> profile_runtime;
-    mutable std::mutex pak_mods_mutex;
-    std::shared_ptr<anomaly::PakModRuntime> pak_mods;
-    std::shared_ptr<anomaly::Ue5PakBinding> pak_binding;
-    bool pak_settings_valid{};
-    bool pak_compatibility_mode{};
-    bool pak_startup_enabled{true};
+    std::shared_ptr<anomaly::MaydayProfileRuntime> profile_runtime;
     std::shared_ptr<anomaly::RepositoryCoordinator> repository;
     std::string repository_diagnostics{
         "{\"schemaVersion\":1,\"state\":\"unavailable\",\"reason\":\"not-started\"}"};
@@ -96,10 +86,6 @@ std::string EscapeJson(std::string_view value);
 struct RuntimeControl {
     std::mutex mutex;
     anomaly::CoreInstanceClaim process_claim;
-    std::optional<bool> pak_compatibility_mode;
-    // Cache routing and the signature gate remain patched across sessions in this process.
-    // Keep the original validated binding with them; rescanning patched prologues cannot recover it.
-    std::shared_ptr<anomaly::Ue5PakBinding> pak_binding = std::make_shared<anomaly::Ue5PakBinding>();
     std::shared_ptr<anomaly::RuntimeSession> session;
     anomaly::RuntimeSessionSnapshot last_snapshot;
 };
@@ -350,24 +336,6 @@ std::shared_ptr<ue5mem::PluginManager> TakePluginHost(
     return std::exchange(context->plugins, {});
 }
 
-std::shared_ptr<anomaly::PakModRuntime> PakModRuntimeSnapshot(
-    const std::shared_ptr<CoreContext>& context) {
-    std::scoped_lock lock(context->pak_mods_mutex);
-    return context->pak_mods;
-}
-
-void PublishPakModRuntime(
-    const std::shared_ptr<CoreContext>& context,
-    std::shared_ptr<anomaly::PakModRuntime> runtime) {
-    std::scoped_lock lock(context->pak_mods_mutex);
-    context->pak_mods = std::move(runtime);
-}
-
-std::shared_ptr<anomaly::PakModRuntime> TakePakModRuntime(
-    const std::shared_ptr<CoreContext>& context) {
-    std::scoped_lock lock(context->pak_mods_mutex);
-    return std::exchange(context->pak_mods, {});
-}
 
 bool WriteDiagnosticsSummary(
     const std::shared_ptr<CoreContext>& context,
@@ -384,10 +352,7 @@ bool WriteDiagnosticsSummary(
             ? context->repository_diagnostics
             : anomaly::SerializeRepositoryCoordinatorSnapshotJson(
                   context->repository->Snapshot());
-        const std::string pak_mods = [&context] {
-            const auto runtime = PakModRuntimeSnapshot(context);
-            return runtime == nullptr ? std::string{"null"} : runtime->StatusJson();
-        }();
+        const std::string pak_mods{"null"};  // Mayday：无 UE5 pak 体系
         output << "{\"schemaVersion\":1,\"runtimeVersion\":\""
                << ANOMALY_SDK_VERSION_STRING << "\",\"runtimeState\":\""
                << runtime_state << "\",\"profile\":"
@@ -654,19 +619,6 @@ DWORD PrepareDiagnosticPipe(
             return context->profile_runtime == nullptr
                 ? std::string("{\"ok\":true,\"state\":\"no-profile\",\"symbols\":[],\"features\":[]}")
                 : context->profile_runtime->DiagnosticsJson();
-        },
-        [weak = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)](
-            std::string_view arguments) {
-            const auto runtime = weak.lock();
-            return runtime == nullptr
-                ? std::string{"{\"ok\":false,\"error\":\"UE reflection queries are unavailable\"}"}
-                : runtime->ExecuteReflectionQuery(arguments);
-        },
-        [context](std::string_view arguments) {
-            const auto runtime = PakModRuntimeSnapshot(context);
-            return runtime == nullptr
-                ? std::string{"{\"ok\":false,\"error\":\"pak mod runtime is unavailable\"}"}
-                : runtime->Execute(arguments);
         });
     auto pipe = std::make_shared<anomaly::DiagnosticPipeService>(
         anomaly::PipeServiceOptions{std::move(analyzer), pipe_name});
@@ -711,35 +663,13 @@ void StopDiagnosticPipe(const std::shared_ptr<CoreContext>& context) noexcept {
     if (context->diagnostic_pipe != nullptr) context->diagnostic_pipe->Stop();
 }
 
-DWORD PrepareNteProfile(
+DWORD PrepareMaydayProfile(
     const std::shared_ptr<CoreContext>& context,
     std::stop_token stop_token) {
     if (stop_token.stop_requested()) return ERROR_CANCELLED;
-    anomaly::NteProfileRuntimeOptions options;
-    options.runtime_root = context->runtime_root;
-    options.profile_directory = context->config.profile_directory;
-    options.local_profile_directory = context->config.local_profile_directory;
-    options.managed_profile_directory = context->config.managed_profile_directory;
-    options.game_id = context->config.game_id;
-    options.game_module = context->game_module;
-    options.memory_services = context->memory_services;
-    options.section_readiness_timeout = std::chrono::seconds(20);
-    options.snapshot_sampling.player_tick_interval = static_cast<std::uint32_t>((std::min)(
-        context->config.player_snapshot_tick_interval,
-        static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())));
-    options.snapshot_sampling.entity_tick_interval = static_cast<std::uint32_t>((std::min)(
-        context->config.entity_snapshot_tick_interval,
-        static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())));
-    options.snapshot_sampling.actor_tick_interval = static_cast<std::uint32_t>((std::min)(
-        context->config.actor_snapshot_tick_interval,
-        static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())));
-    auto runtime = std::make_shared<anomaly::NteProfileRuntime>(std::move(options));
+    auto runtime = std::make_shared<anomaly::MaydayProfileRuntime>();
     if (!runtime->Start(stop_token)) {
         return stop_token.stop_requested() ? ERROR_CANCELLED : ERROR_GEN_FAILURE;
-    }
-    if (stop_token.stop_requested()) {
-        runtime->Stop();
-        return ERROR_CANCELLED;
     }
     context->profile_diagnostics = runtime->DiagnosticsJson();
     if (!WriteDiagnosticsSummary(context, "running")) {
@@ -752,7 +682,7 @@ DWORD PrepareNteProfile(
     return ERROR_SUCCESS;
 }
 
-void StopNteProfile(const std::shared_ptr<CoreContext>& context) noexcept {
+void StopMaydayProfile(const std::shared_ptr<CoreContext>& context) noexcept {
     bool stopped{};
     if (context->profile_runtime != nullptr) {
         const auto runtime = context->profile_runtime;
@@ -776,277 +706,6 @@ std::string NarrowUtf8(const std::wstring& text) {
     WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), utf8.data(), length,
         nullptr, nullptr);
     return utf8;
-}
-
-// The pak platform file owns the game's Paks directory; the launcher and this runtime have to
-// agree on it, so it is derived from the game module instead of the working directory.
-std::filesystem::path ResolvePaksDirectory(HMODULE game_module) {
-    const std::filesystem::path module = ModulePath(game_module);
-    if (module.empty()) return {};
-    const std::filesystem::path content = module.parent_path().parent_path().parent_path();
-    std::error_code error;
-    const std::array<std::filesystem::path, 2> candidates{
-        content / L"Content" / L"Paks",
-        module.parent_path().parent_path() / L"Content" / L"Paks"};
-    for (const auto& candidate : candidates) {
-        if (std::filesystem::is_directory(candidate, error)) return candidate;
-    }
-    return candidates[0];
-}
-
-DWORD PreparePakMods(
-    const std::shared_ptr<CoreContext>& context,
-    std::stop_token stop_token) {
-    if (stop_token.stop_requested()) return ERROR_CANCELLED;
-    try {
-        if (!context->pak_settings_valid) throw std::runtime_error("invalid pak startup settings");
-        anomaly::PakModRuntimeOptions options;
-        options.runtime_root = context->runtime_root;
-        std::array<wchar_t, 32768> executable{};
-        if (GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()))) {
-            const auto installed = std::filesystem::path(executable.data()).parent_path() / L"Anomaly" / L"config" / L"pak-mods.json";
-            options.settings_paths.push_back(installed);
-        }
-        options.compatibility_mode = context->pak_compatibility_mode;
-        options.startup_enabled = context->pak_startup_enabled;
-        options.mod_directory = ResolvePaksDirectory(context->game_module) / L"~mods";
-        options.engine_base_directory = ModuleDirectory(context->game_module);
-        options.log = [context](
-            const anomaly::LogLevel level, const std::string_view message) {
-            RuntimeLog(
-                context, level, "pak.mods", std::string(message),
-                anomaly::LogThreadDomain::Worker);
-        };
-        // Retry while Profile startup is incomplete, then pin the validated ABI for this session.
-        // An owned FPakFile must be released using the same binding even during Profile shutdown.
-        const std::weak_ptr<anomaly::NteProfileRuntime> weak_profile = context->profile_runtime;
-        const auto memory_services = context->memory_services;
-        const auto pinned_binding = context->pak_binding;
-        const auto bind = [weak_profile, memory_services, pinned_binding](anomaly::Ue5PakBinding& binding) {
-            // PakModRuntime serializes all binding consumers through its operation mutex.
-            if (pinned_binding->Complete()) {
-                binding = *pinned_binding;
-                return true;
-            }
-            const auto runtime = weak_profile.lock();
-            if (runtime == nullptr) return false;
-            const auto resolution = runtime->Resolution();
-            if (!resolution || !resolution->FeatureAvailable(anomaly::kUe5PakFeature)) return false;
-            const auto evidence = runtime->Evidence();
-            if (!evidence.profile) return false;
-            std::string error;
-            // The memory view lets the binding reject a look-alike prologue before anything is
-            // called: a wrong address here is a crash inside the engine, not a failed mount.
-            const anomaly::LiveSymbolMemory memory(memory_services);
-            if (!anomaly::BindUe5Pak(*evidence.profile, *resolution, binding, error, &memory)) return false;
-            *pinned_binding = binding;
-            return true;
-        };
-        options.resolve_pak_platform_file = [bind, memory_services]() -> std::uintptr_t {
-            anomaly::Ue5PakBinding binding{};
-            if (!bind(binding)) return 0;
-            const anomaly::LiveSymbolMemory memory(memory_services);
-            return anomaly::FindUe5PakPlatformFile(binding, memory);
-        };
-        const auto compatibility = std::make_shared<anomaly::Ue5ModCompatibility>();
-        const auto compatibility_directory = context->runtime_root / L"cache" / L"mod-compatibility";
-        const auto path_key = [](const std::filesystem::path& path) {
-            auto key = std::filesystem::absolute(path).lexically_normal().generic_wstring();
-            std::transform(key.begin(), key.end(), key.begin(),
-                [](wchar_t value) { return static_cast<wchar_t>(std::towlower(value)); });
-            return key;
-        };
-        auto compatibility_mod_root = path_key(options.mod_directory);
-        if (!compatibility_mod_root.ends_with(L'/')) compatibility_mod_root += L'/';
-        auto compatibility_cache_root = path_key(compatibility_directory);
-        if (!compatibility_cache_root.ends_with(L'/')) compatibility_cache_root += L'/';
-        const auto compatibility_base = options.engine_base_directory;
-        options.prepare_compatibility = [bind, memory_services, compatibility, compatibility_directory,
-            compatibility_mod_root, compatibility_cache_root, compatibility_base, path_key](const std::filesystem::path& candidate) {
-            anomaly::Ue5PakBinding binding{};
-            if (!bind(binding)) throw std::runtime_error("pak compatibility binding unavailable");
-            const anomaly::LiveSymbolMemory memory(memory_services);
-            const auto engine = anomaly::FindUe5PakPlatformFile(binding, memory);
-            const auto mounted = anomaly::MountedUe5PakFiles(binding, engine, memory);
-            if (!mounted) throw std::runtime_error("mounted game package baseline unavailable");
-            const auto candidate_key = path_key(candidate);
-            std::vector<std::filesystem::path> official;
-            for (const auto& item : *mounted) {
-                auto path = std::filesystem::path(item.filename);
-                if (path.is_relative()) path = compatibility_base / path;
-                path = std::filesystem::absolute(path).lexically_normal();
-                // Windows spelling differences must not let a mounted mod become its own baseline.
-                const auto key = path_key(path);
-                if (key.starts_with(compatibility_mod_root) || key.starts_with(compatibility_cache_root) ||
-                    key == candidate_key) continue;
-                official.push_back(std::move(path));
-            }
-            return compatibility->Prepare(candidate, official, compatibility_directory,
-                anomaly::Ue5PakContainerCodecs(binding));
-        };
-        options.mount_pak = [bind](
-            const std::uintptr_t engine,
-            const anomaly::Ue5PakMountRequest& request) -> anomaly::PakModMountOutcome {
-            anomaly::PakModMountOutcome outcome{};
-            anomaly::Ue5PakBinding binding{};
-            if (!bind(binding)) {
-                outcome.detail = "profile symbols are unavailable";
-                return outcome;
-            }
-            auto result = anomaly::MountUe5Pak(binding, engine, request);
-            outcome.mounted = result.mounted;
-            outcome.native_fault = result.native_fault;
-            if (result.mounted) {
-                outcome.container = result.container;
-                return outcome;
-            }
-            // The engine's own words are the only useful explanation of a refusal.
-            if (!result.error_message.empty()) {
-                outcome.detail = NarrowUtf8(result.error_message);
-            } else if (result.error_code >= 0) {
-                outcome.detail = "io error " + std::to_string(result.error_code);
-            }
-            return outcome;
-        };
-        const auto runtime_session = context->session;
-        options.unmount_pak = [bind, runtime_session](
-            const std::uintptr_t engine, const std::wstring& pak_file) {
-            anomaly::Ue5PakBinding binding{};
-            if (!bind(binding)) return false;
-            const auto session = runtime_session.lock();
-            if (session == nullptr) return false;
-            auto& dispatchers = session->Dispatchers();
-            if (dispatchers.BoundThread(anomaly::ExecutionDomain::Game) == std::thread::id{})
-                return false;
-
-            bool unmounted{};
-            // FlushAsyncLoading is a Game-thread barrier. Wait without a timeout so an invocation
-            // that has started cannot unmount after the watcher has recorded a failed release.
-            const DWORD invoke_result = dispatchers.Invoke(
-                anomaly::ExecutionDomain::Game,
-                [binding, engine, path = pak_file, &unmounted] {
-                    if (!anomaly::FlushUe5AsyncLoading(binding)) return;
-                    unmounted = anomaly::UnmountUe5Pak(binding, engine, path);
-                },
-                std::chrono::milliseconds::max());
-            return invoke_result == ERROR_SUCCESS && unmounted;
-        };
-        options.mounted_files = [bind, memory_services](const std::uintptr_t engine)
-            -> std::optional<std::vector<anomaly::Ue5MountedPakFile>> {
-            anomaly::Ue5PakBinding binding{};
-            if (!bind(binding)) return std::nullopt;
-            return anomaly::MountedUe5PakFiles(binding, engine, anomaly::LiveSymbolMemory(memory_services));
-        };
-        options.release_container = [bind](const std::uintptr_t container) {
-            anomaly::Ue5PakBinding binding{};
-            if (bind(binding)) anomaly::ReleaseUe5PakContainer(binding, container);
-        };
-        options.remove_cache_verify = [] { anomaly::DetachUe5PakBlockCacheVerifySink(); };
-        // `pak prime <id>` probes one mounted container on explicit diagnostic request.
-        options.prime_pak = [bind](
-            const std::uintptr_t engine,
-            const std::uintptr_t container) -> anomaly::PakModPrimeOutcome {
-            anomaly::PakModPrimeOutcome outcome{};
-            anomaly::Ue5PakBinding binding{};
-            if (!bind(binding)) {
-                outcome.stage = "no-binding";
-                outcome.detail = "profile symbols are unavailable";
-                return outcome;
-            }
-            const anomaly::Ue5PakPrimeReport report =
-                anomaly::PrimeUe5PakContainer(binding, engine, container);
-            outcome.primed = report.primed;
-            outcome.stage = report.stage;
-            outcome.detail = report.detail;
-            return outcome;
-        };
-        // Unsigned mod containers are what this service exists for; the engine only accepts them
-        // once the instance's signature requirement is cleared. Doing it here means the per-build
-        // pattern in config/pak-signature-bypass.json is not on the critical path any more.
-        options.clear_signature_requirement = [bind, memory_services, context](
-                                                 const std::uintptr_t engine) {
-            anomaly::Ue5PakBinding binding{};
-            if (!bind(binding)) return false;
-            anomaly::LiveSymbolMemory memory(memory_services);
-            const bool flag = anomaly::ClearUe5PakSignatureRequirement(binding, engine, memory);
-            // The flag only covers FPakPlatformFile; the game's own container gate still answers
-            // `Missing signature` for an unsigned .utoc, so both have to be released together.
-            std::uint8_t gate_byte{};
-            const anomaly::Ue5PakGateStatus gate =
-                anomaly::DisableUe5PakSignatureGate(binding, &gate_byte);
-            const bool gate_ok = gate == anomaly::Ue5PakGateStatus::Patched ||
-                gate == anomaly::Ue5PakGateStatus::AlreadyPatched;
-            // Containers that declare a signature section still parse it and invoke the verifier.
-            // Only that verifier's status is replaced; unsigned containers skip the section entirely.
-            const bool verify =
-                anomaly::InstallUe5PakSignatureVerificationBypass(binding.signature_verify);
-            RuntimeLog(context, flag ? anomaly::LogLevel::Info : anomaly::LogLevel::Warning,
-                "pak.mods.signature_flag", flag ? "pak_mods.signature_flag=cleared"
-                                                : "pak_mods.signature_flag=unavailable");
-            RuntimeLog(context, gate_ok ? anomaly::LogLevel::Info : anomaly::LogLevel::Warning,
-                "pak.mods.signature_gate",
-                std::string("pak_mods.signature_gate=") +
-                    (gate_ok ? "patched" : "unavailable") + " state=" +
-                    std::to_string(static_cast<int>(gate)) + " address=0x" +
-                    [&binding] {
-                        char text[24]{};
-                        std::snprintf(text, sizeof(text), "%llX",
-                            static_cast<unsigned long long>(binding.signature_gate));
-                        return std::string(text);
-                    }() +
-                    " byte=0x" + [&gate_byte] {
-                        char text[8]{};
-                        std::snprintf(text, sizeof(text), "%02X", gate_byte);
-                        return std::string(text);
-                    }());
-            RuntimeLog(context, verify ? anomaly::LogLevel::Info : anomaly::LogLevel::Warning,
-                "pak.mods.signature_verify", verify ? "pak_mods.signature_verify=bypassed"
-                                                    : "pak_mods.signature_verify=unavailable");
-            return flag && gate_ok && verify;
-        };
-        // The block-cache verifier dereferences a per-container table with no null check. A container
-        // without a .sig can therefore fault on its first verified read. The detour reports the request
-        // and only lets the original run when that element has a table.
-        options.apply_cache_verify = [bind](const anomaly::Ue5PakCacheVerifySink sink, void* context,
-                                         std::uintptr_t& target) {
-            anomaly::Ue5PakBinding binding{};
-            if (!bind(binding)) return anomaly::Ue5PakCacheVerifyStatus::Unavailable;
-            return anomaly::InstallUe5PakBlockCacheVerifyDetour(
-                binding.cache_verify_layout, binding.cache_verify, binding.cache_verify_complete,
-                sink, context, &target);
-        };
-        auto runtime = std::make_shared<anomaly::PakModRuntime>(std::move(options));
-        if (!runtime->Start()) {
-            RuntimeLog(
-                context, anomaly::LogLevel::Warning, "pak.mods.start_failed",
-                "pak_mods=watcher_failed");
-            return ERROR_SUCCESS;
-        }
-        if (!anomaly::ProcessAdapterServices().Publish(ANOMALY_MODS_SERVICE_V1_ID, 1,
-                runtime->Service(), {}, std::static_pointer_cast<const void>(runtime))) {
-            runtime->Stop();
-            return ERROR_GEN_FAILURE;
-        }
-        PublishPakModRuntime(context, std::move(runtime));
-        RuntimeLog(
-            context, anomaly::LogLevel::Info, "pak.mods.ready", "pak_mods=ready");
-        return ERROR_SUCCESS;
-    } catch (...) {
-        RuntimeLog(
-            context, anomaly::LogLevel::Warning, "pak.mods.start_failed",
-            "pak_mods=start_failed");
-        return ERROR_SUCCESS;
-    }
-}
-
-void StopPakMods(const std::shared_ptr<CoreContext>& context) noexcept {
-    auto runtime = TakePakModRuntime(context);
-    if (runtime) static_cast<void>(anomaly::ProcessAdapterServices().Revoke(ANOMALY_MODS_SERVICE_V1_ID, runtime->Service()));
-    if (runtime == nullptr) return;
-    runtime->Stop();
-    // The Core remains resident. Engine reads queued before Unmount may still need the cache
-    // routing hook; Stop drains and detaches its session-owned reporting sink instead.
-    anomaly::RemoveUe5PakSignatureVerificationBypass();
 }
 
 std::string EscapeJson(std::string_view value) {
@@ -1234,29 +893,20 @@ DWORD RunPlatform(const std::shared_ptr<CoreContext>& context, std::stop_token s
         const auto graph = weak.lock();
         return graph ? graph->Snapshot() : anomaly::ServiceGraphSnapshot{};
     };
-    diagnostics.profile_json = [weak = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)] {
+    diagnostics.profile_json = [weak = std::weak_ptr<anomaly::MaydayProfileRuntime>(context->profile_runtime)] {
         const auto runtime = weak.lock();
         return runtime ? runtime->DiagnosticsJson() : std::string{"{\"state\":\"unavailable\"}"};
     };
-    diagnostics.nte_compatibility =
-        [profile = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)] {
-            const auto runtime = profile.lock();
-            if (runtime == nullptr) return anomaly::BuildNteCompatibilitySnapshot(
-                {}, {}, {});
-            const auto current = runtime->Evidence();
-            return anomaly::BuildNteCompatibilitySnapshot(
-                current.fingerprint, current.profile, current.resolution);
-        };
-    diagnostics.hooks = [weak = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)] {
-        const auto runtime = weak.lock();
-        return runtime ? runtime->Hooks() : std::vector<anomaly::HookRecordView>{};
+    // Mayday：无 NTE 兼容性矩阵与特征码 hook 记录，提供恒空快照
+    diagnostics.nte_compatibility = [] {
+        return anomaly::BuildNteCompatibilitySnapshot({}, {}, {});
     };
-    diagnostics.retry_profile_hooks =
-        [weak = std::weak_ptr<anomaly::NteProfileRuntime>(context->profile_runtime)] {
-            const auto runtime = weak.lock();
-            // A settled retry (or a runtime that is already gone) stops the worker polling.
-            return runtime == nullptr || runtime->RetryPendingHooks();
-        };
+    diagnostics.hooks = [] {
+        return std::vector<anomaly::HookRecordView>{};
+    };
+    diagnostics.retry_profile_hooks = [] {
+        return false;  // 无待重试的 hook
+    };
     diagnostics.repository_snapshot =
         [weak = std::weak_ptr<anomaly::RepositoryCoordinator>(context->repository)] {
             const auto repository = weak.lock();
@@ -1621,7 +1271,7 @@ anomaly::RuntimeSessionOptions BuildSessionOptions(
     }
 
     anomaly::ServiceDescriptor profile;
-    profile.id = "anomaly.internal.nte-profile";
+    profile.id = "anomaly.internal.mayday-profile";
     profile.startup = anomaly::ServiceStartup::Blocking;
     profile.affinity = anomaly::ServiceAffinity::Worker;
     profile.required_dependencies.push_back({"anomaly.config", 1});
@@ -1629,33 +1279,14 @@ anomaly::RuntimeSessionOptions BuildSessionOptions(
     profile.required_dependencies.push_back({"anomaly.internal.pattern", 1});
     profile.required_dependencies.push_back({"anomaly.repository.coordinator", 1});
     profile.start = [context](std::stop_token stop_token) {
-        return PrepareNteProfile(context, stop_token);
+        return PrepareMaydayProfile(context, stop_token);
     };
-    profile.stop = [context] { StopNteProfile(context); };
+    profile.stop = [context] { StopMaydayProfile(context); };
     result = services->Register(std::move(profile));
     if (result != ERROR_SUCCESS) {
         throw std::system_error(
             static_cast<int>(result), std::system_category(),
-            "register NTE profile service");
-    }
-
-    anomaly::ServiceDescriptor pak_mods;
-    pak_mods.id = std::string(anomaly::kPakModRuntimeServiceId);
-    pak_mods.startup = anomaly::ServiceStartup::Blocking;
-    // Directory scanning and the engine's pak calls never run on Game or Render; the service keeps
-    // its own worker so a slow container never stalls a frame.
-    pak_mods.affinity = anomaly::ServiceAffinity::Worker;
-    pak_mods.required_dependencies.push_back({"anomaly.config", 1});
-    pak_mods.required_dependencies.push_back({"anomaly.internal.nte-profile", 1});
-    pak_mods.start = [context](std::stop_token stop_token) {
-        return PreparePakMods(context, stop_token);
-    };
-    pak_mods.stop = [context] { StopPakMods(context); };
-    result = services->Register(std::move(pak_mods));
-    if (result != ERROR_SUCCESS) {
-        throw std::system_error(
-            static_cast<int>(result), std::system_category(),
-            "register pak mod service");
+            "register Mayday profile service");
     }
 
     anomaly::ServiceDescriptor repository;
@@ -1680,8 +1311,7 @@ anomaly::RuntimeSessionOptions BuildSessionOptions(
     plugin_host.affinity = anomaly::ServiceAffinity::Lifecycle;
     plugin_host.required_dependencies.push_back({"anomaly.config", 1});
     plugin_host.required_dependencies.push_back({ANOMALY_WEBSOCKET_SERVICE_V1_ID, 1});
-    plugin_host.required_dependencies.push_back({"anomaly.internal.nte-profile", 1});
-    plugin_host.required_dependencies.push_back({std::string(anomaly::kPakModRuntimeServiceId), 1});
+    plugin_host.required_dependencies.push_back({"anomaly.internal.mayday-profile", 1});
     plugin_host.required_dependencies.push_back({"anomaly.repository.coordinator", 1});
     plugin_host.start = [context](std::stop_token stop_token) {
         return PreparePluginHost(context, stop_token);
@@ -1763,9 +1393,6 @@ void ArchiveStoppedSessionLocked(RuntimeControl& control) {
 
 }  // namespace
 
-// Lives for the whole process: the hook it installs must stay in place while the game runs.
-std::unique_ptr<anomaly::NtePakSignatureBypass> pak_signature_bypass;
-
 extern "C" __declspec(dllexport) DWORD WINAPI AnomalyStart(
     const AnomalyStartInfo* start_info) {
     const DWORD validation = ValidateStartInfo(start_info);
@@ -1783,34 +1410,6 @@ extern "C" __declspec(dllexport) DWORD WINAPI AnomalyStart(
         core_context->runtime_root = start_context.runtime_root;
         core_context->log_directory = start_context.log_directory;
         core_context->game_module = start_context.game_module;
-        core_context->pak_binding = control.pak_binding;
-        try {
-            std::array<wchar_t, 32768> executable{};
-            if (!GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())))
-                throw std::runtime_error("cannot resolve game settings directory");
-            const auto settings = anomaly::ReadGamePakModSettings(start_info->runtime_root,
-                std::filesystem::path(executable.data()).parent_path());
-            core_context->pak_compatibility_mode = anomaly::PakModCompatibilityMode(settings);
-            core_context->pak_startup_enabled = settings.value("enabled", true);
-            if (control.pak_compatibility_mode &&
-                *control.pak_compatibility_mode != core_context->pak_compatibility_mode)
-                throw std::runtime_error("pak loading mode requires a new game process");
-            control.pak_compatibility_mode = core_context->pak_compatibility_mode;
-            // Native startup mounting does not pass through PakModRuntime's desired set.
-            // Disable restricted containers before enabling the legacy signature bypass.
-            if (core_context->pak_compatibility_mode && core_context->pak_startup_enabled)
-                anomaly::DisableRestrictedPakMods(ResolvePaksDirectory(core_context->game_module) / L"~mods");
-            core_context->pak_settings_valid = true;
-            // Start before service/profile initialization: the engine scans startup paks early.
-            if (core_context->pak_compatibility_mode && core_context->pak_startup_enabled &&
-                !pak_signature_bypass) {
-                pak_signature_bypass = std::make_unique<anomaly::NtePakSignatureBypass>();
-                pak_signature_bypass->Start(
-                    start_info->runtime_root, start_info->game_module, start_info->log_directory);
-            }
-        } catch (...) {
-            // Keep diagnostics available while the optional pak service degrades.
-        }
         auto session = std::make_shared<anomaly::RuntimeSession>(
             start_context, BuildSessionOptions(core_context));
         core_context->session = session;
