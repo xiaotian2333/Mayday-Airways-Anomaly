@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "messages": {
+    "window.title": "金币修改",
+    "plugin.description": "修改飞行中的金币与债务。",
+    "money.label": "金币 ${0}",
+    "debt.label": "债务 ${0}",
+    "amount.label": "金额",
+    "button.set": "设为该值",
+    "button.add": "增加该值",
+    "button.quick": "金币 +100000",
+    "button.clear_debt": "清空债务",
+    "status.waiting": "等待宿主的金币服务（游戏运行时加载后可用）。",
+    "status.unavailable": "游戏符号尚未就绪。",
+    "status.not_in_flight": "进入一局飞行后可修改金币。",
+    "status.attach_failed": "无法附加到游戏运行时。",
+    "status.failed": "操作失败。"
+  }
+}

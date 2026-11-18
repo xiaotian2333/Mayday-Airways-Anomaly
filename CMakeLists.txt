@@ -1302,6 +1302,14 @@ if(ANOMALY_BUILD_SDK_EXAMPLES)
 endif()
 
 if(ANOMALY_BUILD_BUILTIN_PLUGINS)
+    # Mayday 内建插件：金币/债务修改。il2cpp 细节由宿主 mayday.money 服务封装。
+    anomaly_add_plugin(anomaly_builtin_money
+        SOURCES plugins/money/plugin.cpp
+        MANIFEST plugins/money/manifest.json
+        PACKAGE_NAME Money
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Money")
+    target_compile_options(anomaly_builtin_money PRIVATE /utf-8)
+
     # The panel reads the Chinese category names its package ships in `assets/mod-groups.json`.
 
     # 开发者测试插件：只在 ANOMALY_BUILD_TEST_PLUGINS 打开时构建，并只随 TestPlugins 组件安装。
@@ -1512,7 +1520,8 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
     # Test packages exist only when ANOMALY_BUILD_TEST_PLUGINS is on, so every list that
     # reaches their targets is built from the targets that actually exist.
     # (Mayday 改造：原异环内建插件清单已随 NTE 清理移除，后续在此登记新内建插件。)
-    set(ANOMALY_BUILTIN_PLUGIN_TARGETS "")
+    set(ANOMALY_BUILTIN_PLUGIN_TARGETS
+        anomaly_builtin_money)
 endif()
 
 if(TARGET anomaly-platform-preview)

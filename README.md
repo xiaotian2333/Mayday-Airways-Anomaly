@@ -23,8 +23,10 @@
 ## 状态
 
 - ✅ 通用基础设施完整保留（见 roadmap 表格）
-- 🔧 游戏适配层（Unity IL2CPP 符号 / D3D11 渲染桥 / Mayday Profile）重写中
-- 📦 原异环插件已移除，内建插件将按需从零实现
+- ✅ 游戏适配层：il2cpp 导出探测（`mayday.il2cpp`）与金币/债务服务（`mayday.money`）
+- ✅ D3D12 Present hook + 内嵌 ImGui 管理界面（Mayday 实际使用 D3D12）
+- ✅ 内建插件 `plugins/money`：金币修改面板，实机读写验证通过
+- 📦 更多游戏服务与插件按需实现
 
 ## 构建
 
