@@ -455,9 +455,11 @@ public:
             result.bytes_processed = offset;
             return result;
         }
-        if (!FlushFileBuffers(temp.get())) {
-            return Failure(StorageError::IoFailure, GetLastError(), offset);
-        }
+        // rename 已成功发布数据，数据页在 rename 前也已 flush；此处对临时句柄
+        // 的二次 flush 只是尽力保证 rename 元数据落盘，失败时数据同样已经生效，
+        // 报 IoFailure 会让调用方误判写入失败。该类没有独立诊断通道，
+        // 按最小改动降级为成功。
+        static_cast<void>(FlushFileBuffers(temp.get()));
         return Success(offset);
     }
 

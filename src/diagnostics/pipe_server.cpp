@@ -4,16 +4,27 @@
 
 #include <Windows.h>
 
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <system_error>
 
 namespace anomaly {
 namespace {
 
 void LogPipeError(const Analyzer& analyzer, DWORD error) noexcept {
     try {
-        std::ofstream error_log(analyzer.Root() / L"anomaly-pipe-error.log", std::ios::app);
+        const auto path = analyzer.Root() / L"anomaly-pipe-error.log";
+        // 低频失败诊断日志：超过 1 MiB 时截断重开，避免无界追加。
+        constexpr std::uintmax_t kMaximumLogBytes = 1024U * 1024U;
+        std::error_code size_error;
+        const auto size = std::filesystem::file_size(path, size_error);
+        if (!size_error && size > kMaximumLogBytes) {
+            std::ofstream truncate_log(path, std::ios::trunc);
+        }
+        std::ofstream error_log(path, std::ios::app);
         error_log << "pipe service error=" << error << '\n';
     } catch (...) {
     }

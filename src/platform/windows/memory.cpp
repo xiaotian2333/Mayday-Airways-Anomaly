@@ -302,18 +302,55 @@ std::vector<std::uintptr_t> ScanSection(
     return ScanSection(*found, pattern, limit);
 }
 
+// 分块扫描的单次读取量。块间保留 overlap，使跨块边界的模式匹配不丢失。
+constexpr std::size_t kScanChunkBytes = 64 * 1024;
+
+std::size_t ScanChunkOverlap(std::span<const Pattern> patterns) {
+    std::size_t largest = 0;
+    for (const Pattern& pattern : patterns) {
+        largest = (std::max)(largest, pattern.Size());
+    }
+    return largest > 1 ? largest - 1 : 0;
+}
+
 std::vector<std::uintptr_t> ScanSection(
     const SectionInfo& section,
     const Pattern& pattern,
     std::size_t limit) {
-    if (section.virtual_size == 0 || !HasRange(section.base, section.virtual_size, false)) return {};
-    const auto* const mapped = reinterpret_cast<const std::uint8_t*>(section.base);
-    const auto offsets = pattern.FindAll(
-        std::span<const std::uint8_t>(mapped, section.virtual_size), limit);
     std::vector<std::uintptr_t> addresses;
-    addresses.reserve(offsets.size());
-    for (const auto offset : offsets) {
-        addresses.push_back(section.base + offset);
+    if (section.virtual_size == 0 || !HasRange(section.base, section.virtual_size, false)) {
+        return addresses;
+    }
+    // 模块可能在 HasRange 的 TTL 缓存窗口内被卸载，直接把映像内存当裸指针
+    // 整段遍历无法拦截这种 AV。改为分块经 ReadMemoryInto（自带 SEH）读入本地
+    // 缓冲后再匹配；每块把上一块尾部 overlap 拼进窗口，保证跨块匹配不漏。
+    const std::size_t overlap = ScanChunkOverlap(std::span<const Pattern>(&pattern, 1));
+    const std::size_t pattern_size = pattern.Size();
+    std::vector<std::uint8_t> buffer(kScanChunkBytes + overlap);
+    const auto section_end = section.base + section.virtual_size;
+    auto cursor = section.base;
+    std::size_t remaining = limit;
+    // carry 是缓冲开头保留的上一块尾部字节数，保证跨块边界的匹配可见。
+    std::size_t carry = 0;
+    while (cursor < section_end && remaining > 0) {
+        const std::size_t read_size = static_cast<std::size_t>(
+            (std::min<std::uintptr_t>)(section_end - cursor, kScanChunkBytes));
+        if (!ReadMemoryInto(cursor, buffer.data() + carry, read_size)) break;
+        const std::size_t window = carry + read_size;
+        const auto offsets = pattern.FindAll(
+            std::span<const std::uint8_t>(buffer.data(), window), remaining);
+        for (const auto offset : offsets) {
+            // 完全落在 carry 区内的匹配上一块已经报告过，跳过重复项。
+            if (offset + pattern_size <= carry) continue;
+            addresses.push_back(cursor - carry + offset);
+        }
+        remaining -= offsets.size();
+        const std::size_t tail = (std::min)(overlap, window);
+        if (tail > 0) {
+            std::memcpy(buffer.data(), buffer.data() + window - tail, tail);
+        }
+        carry = tail;
+        cursor += read_size;
     }
     return addresses;
 }
@@ -323,13 +360,37 @@ std::vector<std::vector<std::uintptr_t>> ScanSectionBatch(
     std::span<const Pattern> patterns,
     std::size_t limit) {
     std::vector<std::vector<std::uintptr_t>> addresses(patterns.size());
-    if (section.virtual_size == 0 || !HasRange(section.base, section.virtual_size, false)) return addresses;
-    const auto* const mapped = reinterpret_cast<const std::uint8_t*>(section.base);
-    const auto offsets = Pattern::FindAllBatch(
-        std::span<const std::uint8_t>(mapped, section.virtual_size), patterns, limit);
-    for (std::size_t index = 0; index < offsets.size(); ++index) {
-        addresses[index].reserve(offsets[index].size());
-        for (const auto offset : offsets[index]) addresses[index].push_back(section.base + offset);
+    if (section.virtual_size == 0 || !HasRange(section.base, section.virtual_size, false)) {
+        return addresses;
+    }
+    const std::size_t overlap = ScanChunkOverlap(patterns);
+    std::vector<std::uint8_t> buffer(kScanChunkBytes + overlap);
+    const auto section_end = section.base + section.virtual_size;
+    auto cursor = section.base;
+    // carry 是缓冲开头保留的上一块尾部字节数，保证跨块边界的匹配可见。
+    std::size_t carry = 0;
+    while (cursor < section_end) {
+        const std::size_t read_size = static_cast<std::size_t>(
+            (std::min<std::uintptr_t>)(section_end - cursor, kScanChunkBytes));
+        if (!ReadMemoryInto(cursor, buffer.data() + carry, read_size)) break;
+        const std::size_t window = carry + read_size;
+        const auto offsets = Pattern::FindAllBatch(
+            std::span<const std::uint8_t>(buffer.data(), window), patterns, limit);
+        for (std::size_t index = 0; index < offsets.size(); ++index) {
+            const std::size_t pattern_size = index < patterns.size()
+                ? patterns[index].Size() : 0;
+            for (const auto offset : offsets[index]) {
+                // 完全落在 carry 区内的匹配上一块已经报告过，跳过重复项。
+                if (offset + pattern_size <= carry) continue;
+                addresses[index].push_back(cursor - carry + offset);
+            }
+        }
+        const std::size_t tail = (std::min)(overlap, window);
+        if (tail > 0) {
+            std::memcpy(buffer.data(), buffer.data() + window - tail, tail);
+        }
+        carry = tail;
+        cursor += read_size;
     }
     return addresses;
 }

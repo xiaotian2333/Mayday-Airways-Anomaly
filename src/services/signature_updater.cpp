@@ -325,8 +325,14 @@ std::string CompactRecipe(const SignatureScanContext& context, std::string_view 
     const auto parsed = anomaly::Pattern::Parse(pattern);
     const auto bytes = parsed.Bytes();
     std::size_t minimum = declaration_size;
-    for (const auto& anchor : anchors)
-        minimum = (std::max)(minimum, anchor.instruction + Decode(bytes, anchor.instruction)->code.len);
+    for (const auto& anchor : anchors) {
+        const auto decoded = Decode(bytes, anchor.instruction);
+        // 锚点位置落在声明通配符上时，模式字节可能无法解码；此时无法保证前缀
+        // 覆盖锚点指令，回退为完整配方（与 ends 为空的既有回退一致），避免对
+        // nullopt 解引用。
+        if (!decoded) return std::string(pattern);
+        minimum = (std::max)(minimum, anchor.instruction + decoded->code.len);
+    }
     std::vector<std::size_t> ends;
     std::size_t fixed{}, instructions{};
     for (std::size_t offset{}; offset < bytes.size();) {

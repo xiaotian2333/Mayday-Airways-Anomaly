@@ -287,6 +287,9 @@ struct WebSocketServer::Impl final {
             request.reserve(1024U);
             std::array<char, 1024> buffer{};
             while (request.size() < kMaximumHandshakeBytes) {
+                // 停止请求到达时立即放弃握手，避免 Stop 的 join 被慢速客户端
+                // 的 1 秒接收超时逐字节拖长。
+                if (!running.load(std::memory_order_acquire)) return false;
                 const int received = recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
                 if (received <= 0) return false;
                 request.append(buffer.data(), static_cast<std::size_t>(received));
@@ -492,6 +495,12 @@ struct WebSocketServer::Impl final {
         DeliverQueued(clients);
         DrainPendingClients(clients);
         for (const Client& client : clients) CloseSocket(client.socket);
+        // 协作式停止：listener 与正在握手的客户端都由 worker 线程自行关闭。
+        // Stop() 若从另一线程 close 正被 select/accept 阻塞使用的 socket 是
+        // 未定义行为（句柄还可能被系统复用），因此停止只翻转标志并等待本线程
+        // 收尾。
+        CloseSocket(listener.exchange(INVALID_SOCKET, std::memory_order_acq_rel));
+        CloseSocket(handshaking_client.exchange(INVALID_SOCKET, std::memory_order_acq_rel));
         connected_clients.store(0, std::memory_order_release);
     }
 };
@@ -583,8 +592,9 @@ void WebSocketServer::Stop() noexcept {
     {
         std::scoped_lock lock(impl_->lifecycle_mutex);
         if (!impl_->running.exchange(false, std::memory_order_acq_rel)) return;
-        CloseSocket(impl_->listener.exchange(INVALID_SOCKET, std::memory_order_acq_rel));
-        CloseSocket(impl_->handshaking_client.exchange(INVALID_SOCKET, std::memory_order_acq_rel));
+        // 不在此处 close listener/handshaking_client：worker 可能正阻塞在
+        // select/accept 使用这些句柄。worker 循环以 50ms 为界响应 running，
+        // 退出时自行关闭它持有的全部 socket。
         worker = std::move(impl_->worker);
         cleanup = impl_->winsock_ready.exchange(false, std::memory_order_acq_rel);
     }

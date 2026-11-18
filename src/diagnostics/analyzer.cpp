@@ -324,6 +324,23 @@ std::string ValuesJson(
     return result;
 }
 
+// 输出裸模块数组，供 ModulesJson 包装与 BuildSnapshot 直接嵌入，
+// 避免 BuildSnapshot 对 ModulesJson 的包装字符串做字节手术。
+std::string ModulesArrayJson(const anomaly::ModuleMemoryService& memory) {
+    const auto modules = memory.EnumerateModules();
+    std::string result = "[";
+    for (std::size_t index = 0; index < modules.size(); ++index) {
+        const auto& module = modules[index];
+        if (index != 0) result += ',';
+        result += "{\"name\":" + json::Quote(module.name) +
+                  ",\"path\":" + json::Quote(module.path) +
+                  ",\"base\":" + json::Hex(module.base) +
+                  ",\"size\":" + std::to_string(module.size) + "}";
+    }
+    result += "]";
+    return result;
+}
+
 }  // namespace
 
 Analyzer::Analyzer(
@@ -339,18 +356,7 @@ Analyzer::Analyzer(
       profile_status_(std::move(profile_status)) {}
 
 std::string Analyzer::ModulesJson() const {
-    const auto modules = memory_services_.memory->EnumerateModules();
-    std::string result = "{\"ok\":true,\"modules\":[";
-    for (std::size_t index = 0; index < modules.size(); ++index) {
-        const auto& module = modules[index];
-        if (index != 0) result += ',';
-        result += "{\"name\":" + json::Quote(module.name) +
-                  ",\"path\":" + json::Quote(module.path) +
-                  ",\"base\":" + json::Hex(module.base) +
-                  ",\"size\":" + std::to_string(module.size) + "}";
-    }
-    result += "]}";
-    return result;
+    return "{\"ok\":true,\"modules\":" + ModulesArrayJson(*memory_services_.memory) + "}";
 }
 
 std::string Analyzer::SectionsJson(std::wstring_view module_name) const {
@@ -476,10 +482,9 @@ std::string Analyzer::ProfileJson() const {
 }
 
 std::string Analyzer::BuildSnapshot() const {
-    const auto modules = ModulesJson();
     const auto profile = ProfileJson();
     return "{\"ok\":true,\"pid\":" + std::to_string(GetCurrentProcessId()) +
-           ",\"modules\":" + modules.substr(std::string("{\"ok\":true,\"modules\":").size(), modules.size() - std::string("{\"ok\":true,\"modules\":").size() - 1) +
+           ",\"modules\":" + ModulesArrayJson(*memory_services_.memory) +
            ",\"profile\":" + profile + "}";
 }
 
@@ -602,14 +607,36 @@ std::string Analyzer::Execute(std::string_view command_line) const {
             remaining = next;
         }
         const auto base_address = static_cast<std::uintptr_t>(*base);
-        if (AddressIntersectsPluginModule(
-                memory_services_, root_, config_, base_address, sizeof(std::uintptr_t))) {
-            return Error("plugin memory is not readable through diagnostics");
+        // 与 ResolvePointerChain 相同的逐跳推进逻辑，但对每一跳解引用地址补
+        // AddressIntersectsPluginModule guard：平台层解析无法在读取前感知插件
+        // 模块边界，中间跳落在插件模块内同样会泄露插件内存。
+        auto current = base_address;
+        for (std::size_t index = 0; index < offsets.size(); ++index) {
+            if (AddressIntersectsPluginModule(
+                    memory_services_, root_, config_, current, sizeof(std::uintptr_t))) {
+                return Error("plugin memory is not readable through diagnostics");
+            }
+            std::uintptr_t next{};
+            if (!memory_services_.memory->ReadMemoryInto(
+                    current, &next, sizeof(next)) || next == 0) {
+                return Error("pointer chain could not be resolved");
+            }
+            const auto offset = offsets[index];
+            if (offset >= 0) {
+                const auto magnitude = static_cast<std::uintptr_t>(offset);
+                if (next > (std::numeric_limits<std::uintptr_t>::max)() - magnitude) {
+                    return Error("pointer chain could not be resolved");
+                }
+                current = next + magnitude;
+            } else {
+                const auto magnitude = std::uintptr_t{0} - static_cast<std::uintptr_t>(offset);
+                if (next < magnitude) {
+                    return Error("pointer chain could not be resolved");
+                }
+                current = next - magnitude;
+            }
         }
-        const auto result = memory_services_.memory->ResolvePointerChain(
-            base_address, offsets.data(), offsets.size());
-        return result ? Ok("\"address\":" + json::Hex(*result))
-                      : Error("pointer chain could not be resolved");
+        return Ok("\"address\":" + json::Hex(current));
     }
     if (command == "ptr") {
         const auto address = ParseInteger(arguments);
@@ -641,8 +668,21 @@ std::string Analyzer::Execute(std::string_view command_line) const {
                 memory_services_, root_, config_, instruction_address, instruction_size)) {
             return Error("plugin memory is not readable through diagnostics");
         }
+        // ResolveRipRelative 在指令地址 + disp_offset 处读取 4 字节位移；该读取
+        // 可能越过指令本身已被 guard 的范围，需对位移读取地址单独拦截。
+        const auto displacement_offset = static_cast<std::size_t>(*offset);
+        const auto displacement_address = instruction_address + displacement_offset;
+        if (displacement_offset >
+                (std::numeric_limits<std::uintptr_t>::max)() - instruction_address ||
+            displacement_address >
+                (std::numeric_limits<std::uintptr_t>::max)() - sizeof(std::int32_t) ||
+            AddressIntersectsPluginModule(
+                memory_services_, root_, config_, displacement_address,
+                sizeof(std::int32_t))) {
+            return Error("plugin memory is not readable through diagnostics");
+        }
         const auto target = memory_services_.memory->ResolveRipRelative(
-            instruction_address, static_cast<std::size_t>(*offset),
+            instruction_address, displacement_offset,
             instruction_size, 0);
         if (!target) return Error("failed to read RIP displacement");
         if (AddressIntersectsPluginModule(
@@ -665,14 +705,23 @@ std::string Analyzer::Execute(std::string_view command_line) const {
         const auto address = ParseInteger(address_text);
         const auto count = count_text.empty() ? std::optional<std::uint64_t>(3) : ParseInteger(count_text);
         if (!address || !count) return Error("usage: f32|f64 <address> [count]");
+        const auto target = static_cast<std::uintptr_t>(*address);
+        // 与 read 命令相同的插件模块边界 guard。ValuesJson 最多读取 256 个元素，
+        // 无效 count 由其拒绝且不会真正发起读取，guard 按同一上界覆盖实际读取跨度。
+        const auto element_size = command == "f32" ? sizeof(float) : sizeof(double);
+        const auto byte_count = (std::min)(*count, static_cast<std::uint64_t>(256)) * element_size;
+        if (target > (std::numeric_limits<std::uintptr_t>::max)() - byte_count ||
+            AddressIntersectsPluginModule(memory_services_, root_, config_, target, byte_count)) {
+            return Error("plugin memory is not readable through diagnostics");
+        }
         return command == "f32"
             ? ValuesJson<float>(
                   *memory_services_.memory,
-                  static_cast<std::uintptr_t>(*address),
+                  target,
                   static_cast<std::size_t>(*count))
             : ValuesJson<double>(
                   *memory_services_.memory,
-                  static_cast<std::uintptr_t>(*address),
+                  target,
                   static_cast<std::size_t>(*count));
     }
     if (command == "scan") {

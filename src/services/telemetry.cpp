@@ -390,14 +390,29 @@ public:
                 if (now < next_send) continue;
                 // Serialize installations sharing this identity, including restarts.
                 // Persist the attempt before networking so crashes cannot create a loop.
-                state_file.value = CreateFileW(state_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                state_file.value = CreateFileW(state_path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr,
                     OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
                 if (state_file.value == INVALID_HANDLE_VALUE) {
                     if (GetLastError() != ERROR_SHARING_VIOLATION) return;
                     next_send = now + std::chrono::seconds(30);
                     continue;
                 }
-                if (!ReadDailyState(state_file.value, day, state)) return;
+                if (!ReadDailyState(state_file.value, day, state)) {
+                    // 状态文件损坏（非法 JSON、超限或 reparse 点）：删除重建后
+                    // 以空状态继续运行，避免一次损坏永久禁用遥测；当日尝试计数
+                    // 随空状态重新开始，防发送循环依赖其后的落盘节奏。
+                    FILE_DISPOSITION_INFO disposition{};
+                    disposition.DeleteFile = TRUE;
+                    static_cast<void>(SetFileInformationByHandle(
+                        state_file.value, FileDispositionInfo, &disposition, sizeof(disposition)));
+                    CloseHandle(state_file.value);
+                    state_file.value = INVALID_HANDLE_VALUE;
+                    state_file.value = CreateFileW(state_path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                        0, nullptr, OPEN_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+                    if (state_file.value == INVALID_HANDLE_VALUE) return;
+                    if (!ReadDailyState(state_file.value, day, state)) return;
+                }
                 attempts = state.attempts;
                 sent = state.sent;
                 for (const auto& id : sent) pending.erase(id);

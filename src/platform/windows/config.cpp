@@ -80,7 +80,8 @@ AnalyzerConfig AnalyzerConfig::Load(const std::filesystem::path& path) {
         std::max<std::size_t>(1, ReadSize(path, L"Performance", L"UpdateSlowMilliseconds", 2)));
     result.draw_slow_milliseconds = static_cast<double>(
         std::max<std::size_t>(1, ReadSize(path, L"Performance", L"DrawSlowMilliseconds", 4)));
-    result.game_id = NarrowAscii(ReadWide(path, L"Profiles", L"Game", L"mayday"));
+    // 游戏标识默认留空，由组合根注入具体游戏名；此处不再携带 "mayday"。
+    result.game_id = NarrowAscii(ReadWide(path, L"Profiles", L"Game", L""));
     return result;
 }
 

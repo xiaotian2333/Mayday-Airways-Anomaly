@@ -28,7 +28,9 @@ struct AnalyzerConfig {
     bool telemetry_enabled{true};
     double update_slow_milliseconds{2.0};
     double draw_slow_milliseconds{4.0};
-    std::string game_id{"mayday"};
+    // 具体游戏的 Profile 标识由组合根（core_main）注入；游戏无关的配置
+    // 模块不携带默认游戏名。
+    std::string game_id;
     std::vector<ConfigDiagnostic> diagnostics;
     static AnalyzerConfig Load(const std::filesystem::path& path);
 };
