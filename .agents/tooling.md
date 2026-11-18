@@ -49,11 +49,10 @@ cmake --install .build\windows-vs2022 --config RelWithDebInfo `
 
 | 工具 | 用途 | 边界 |
 | --- | --- | --- |
-| `anomaly-profile` | 离线诊断 fingerprint 和 Profile 校验 | fingerprint 只用于诊断/证据/cache，不作为 Profile 激活条件 |
 | `anomaly-plugin` | 校验或打包本地插件包 | 只处理受控目录；真实热重载前必须先校验 |
 | `anomaly-test-host` | 无游戏进程的插件生命周期测试 | 真实游戏进程之前的首选验证方式 |
 | `anomaly-inject` | 把 Runtime Core 手工映射进已经在运行的目标（`--list`、`--pid`、`--delivery`） | 目标只能是自有进程或玩家自己启动的本机游戏；失败不重启、不结束目标进程 |
-| `anomaly-cli` 只读命令 | `status`、`modules`、`sections`、`regions`、`scan`、`ue`、`read`、`chain`、`snapshot` | 目标只能是自有进程；snapshot 和日志可能含敏感路径/数据 |
+| `anomaly-cli` 只读命令 | `status`、`modules`、`sections`、`regions`、`scan`、`read`、`chain`、`snapshot` | 目标只能是自有进程；snapshot 和日志可能含敏感路径/数据 |
 | `anomaly-cli` 修改命令 | `write`、`patch`、`protect`、`alloc`、`free` | 需要用户明确授权和自有测试目标；不得作为常规诊断手段 |
 | `collect_diagnostics.ps1` | 生成脱敏诊断包 | 用 `pwsh -NoProfile -File` 启动；检查输入 Runtime 和输出路径，dump 必须人工审查 |
 | `package_release.ps1` | staging Runtime、Tools、SDK 三个组件，并覆盖发布输出 | 用 `pwsh -NoProfile -File` 启动；仅在干净标准构建后，且指定明确版本/输出目录时运行 |

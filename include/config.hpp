@@ -14,20 +14,9 @@ struct ConfigDiagnostic final {
     std::string message;
 };
 
-struct SymbolConfig {
-    std::string name;
-    std::wstring module;
-    std::string section;
-    std::string pattern;
-    std::size_t rip_offset{};
-    std::size_t instruction_size{};
-    std::ptrdiff_t addend{};
-};
-
 struct AnalyzerConfig {
     std::wstring pipe_prefix{L"Anomaly"};
     std::size_t max_scan_results{1024};
-    std::vector<SymbolConfig> symbols;
 
     bool platform_enabled{true};
     bool platform_visible{};

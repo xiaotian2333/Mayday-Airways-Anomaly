@@ -331,16 +331,12 @@ Analyzer::Analyzer(
     AnalyzerConfig config,
     RuntimeStatusProvider runtime_status,
     anomaly::CoreMemoryServices memory_services,
-    ProfileStatusProvider profile_status,
-    Ue5ReflectionQueryProvider ue5_reflection_query,
-    PakModCommandProvider pak_mod_command)
+    ProfileStatusProvider profile_status)
     : root_(std::move(root)),
       config_(std::move(config)),
       runtime_status_(std::move(runtime_status)),
       memory_services_(anomaly::NormalizeCoreMemoryServices(std::move(memory_services))),
-      profile_status_(std::move(profile_status)),
-      ue5_reflection_query_(std::move(ue5_reflection_query)),
-      pak_mod_command_(std::move(pak_mod_command)) {}
+      profile_status_(std::move(profile_status)) {}
 
 std::string Analyzer::ModulesJson() const {
     const auto modules = memory_services_.memory->EnumerateModules();
@@ -470,63 +466,28 @@ std::string Analyzer::XrefsJson(
     return result;
 }
 
-std::string Analyzer::UnrealJson() const {
-    if (profile_status_) {
-        try {
-            return profile_status_();
-        } catch (...) {
-            return Error("profile diagnostics failed");
-        }
+std::string Analyzer::ProfileJson() const {
+    if (!profile_status_) return "null";
+    try {
+        return profile_status_();
+    } catch (...) {
+        return Error("profile diagnostics failed");
     }
-    std::string result = "{\"ok\":true,\"symbols\":[";
-    for (std::size_t symbol_index = 0; symbol_index < config_.symbols.size(); ++symbol_index) {
-        const auto& symbol = config_.symbols[symbol_index];
-        if (symbol_index != 0) result += ',';
-        result += "{\"name\":" + json::Quote(symbol.name);
-        const auto module = memory_services_.memory->FindModule(symbol.module);
-        if (!module) {
-            result += ",\"found\":false,\"error\":\"module not found\"}";
-            continue;
-        }
-        try {
-            const auto pattern = memory_services_.patterns->Parse(symbol.pattern);
-            const auto matches = memory_services_.patterns->ScanSection(
-                *module, symbol.section, pattern, config_.max_scan_results);
-            result += ",\"module\":" + json::Quote(module->name) +
-                      ",\"found\":" + (matches.empty() ? std::string("false") : std::string("true")) +
-                      ",\"matches\":[";
-            for (std::size_t index = 0; index < matches.size(); ++index) {
-                if (index != 0) result += ',';
-                const auto resolved = symbol.instruction_size == 0
-                    ? std::optional<std::uintptr_t>(matches[index] + symbol.addend)
-                    : memory_services_.memory->ResolveRipRelative(
-                          matches[index], symbol.rip_offset, symbol.instruction_size, symbol.addend);
-                result += "{\"instruction\":" + json::Hex(matches[index]);
-                if (resolved) result += ",\"address\":" + json::Hex(*resolved);
-                result += '}';
-            }
-            result += "]}";
-        } catch (const std::exception& exception) {
-            result += ",\"found\":false,\"error\":" + json::Quote(exception.what()) + "}";
-        }
-    }
-    result += "]}";
-    return result;
 }
 
 std::string Analyzer::BuildSnapshot() const {
     const auto modules = ModulesJson();
-    const auto unreal = UnrealJson();
+    const auto profile = ProfileJson();
     return "{\"ok\":true,\"pid\":" + std::to_string(GetCurrentProcessId()) +
            ",\"modules\":" + modules.substr(std::string("{\"ok\":true,\"modules\":").size(), modules.size() - std::string("{\"ok\":true,\"modules\":").size() - 1) +
-           ",\"unreal\":" + unreal + "}";
+           ",\"profile\":" + profile + "}";
 }
 
 std::string Analyzer::Execute(std::string_view command_line) const {
     const auto [command, arguments] = Shift(command_line);
     if (command == "ping") return Ok("\"pid\":" + std::to_string(GetCurrentProcessId()));
     if (command == "help") {
-        return Ok("\"commands\":[\"ping\",\"status\",\"modules\",\"sections <module|.>\",\"regions <module|.>\",\"scan <module|.> <section> <pattern>\",\"xrefs <module|.> <target>\",\"ue\",\"ue actors <filter|*> [limit] [cursor]\",\"ue objects <filter|*> [limit] [cursor]\",\"ue functions <filter|*> [limit] [cursor]\",\"ue fname <id>\",\"ue ftext <address>\",\"ue combat\",\"ue buffs\",\"pak [status|reload|mount <path> [order]|release <id>|unmountall]\",\"read <address> <size<=1048576>\",\"write <address> <hex bytes>\",\"patch <address> <hex bytes>\",\"protect <address> <size> <r|rw|x|rx|rwx>\",\"alloc <size> [protection]\",\"free <address>\",\"chain <base> [offset ...]\",\"rip <instruction> <disp_offset> <instruction_size>\",\"ptr <address>\",\"f32 <address> [count]\",\"f64 <address> [count]\",\"snapshot [filename]\"]");
+        return Ok("\"commands\":[\"ping\",\"status\",\"modules\",\"sections <module|.>\",\"regions <module|.>\",\"scan <module|.> <section> <pattern>\",\"xrefs <module|.> <target>\",\"read <address> <size<=1048576>\",\"write <address> <hex bytes>\",\"patch <address> <hex bytes>\",\"protect <address> <size> <r|rw|x|rx|rwx>\",\"alloc <size> [protection]\",\"free <address>\",\"chain <base> [offset ...]\",\"rip <instruction> <disp_offset> <instruction_size>\",\"ptr <address>\",\"f32 <address> [count]\",\"f64 <address> [count]\",\"snapshot [filename]\"]");
     }
     if (command == "status") {
         std::string runtime = "null";
@@ -538,7 +499,6 @@ std::string Analyzer::Execute(std::string_view command_line) const {
             }
         }
         return Ok("\"pid\":" + std::to_string(GetCurrentProcessId()) +
-                  ",\"configured_symbols\":" + std::to_string(config_.symbols.size()) +
                   ",\"profile_game\":" + json::Quote(config_.game_id) +
                   ",\"platform_enabled\":" + (config_.platform_enabled ? std::string("true") : std::string("false")) +
                    ",\"platform_embedded\":" + (config_.platform_embedded ? std::string("true") : std::string("false")) +
@@ -548,23 +508,6 @@ std::string Analyzer::Execute(std::string_view command_line) const {
     if (command == "modules") return ModulesJson();
     if (command == "sections") return SectionsJson(WideUtf8(arguments));
     if (command == "regions") return RegionsJson(WideUtf8(arguments));
-    if (command == "ue") {
-        if (arguments.empty()) return UnrealJson();
-        if (!ue5_reflection_query_) return Error("UE reflection queries are unavailable");
-        try {
-            return ue5_reflection_query_(arguments);
-        } catch (...) {
-            return Error("UE reflection query failed");
-        }
-    }
-    if (command == "pak") {
-        if (!pak_mod_command_) return Error("pak mod runtime is unavailable");
-        try {
-            return pak_mod_command_(arguments);
-        } catch (...) {
-            return Error("pak mod command failed");
-        }
-    }
     if (command == "read") {
         const auto [address_text, size_text] = Shift(arguments);
         const auto address = ParseInteger(address_text);

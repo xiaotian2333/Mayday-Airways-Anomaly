@@ -71,17 +71,6 @@ constexpr char kUsageText[] =
     "                                wildcards, e.g. \"48 8B ?? ?? 48 85 C0\" or \"4? ?F\"\n"
     "    xrefs <module|.> <target>   code references to an absolute target address\n"
     "\n"
-    "  unreal engine state (depends on the active Profile and its feature gates)\n"
-    "    ue                          active profile, resolved symbols, feature matrix\n"
-    "    ue actors <filter|*> [limit] [cursor]\n"
-    "    ue objects <filter|*> [limit] [cursor]\n"
-    "    ue functions <filter|*> [limit] [cursor]\n"
-    "                                paged lists; filter is a name/class substring or *\n"
-    "    ue fname <id>               resolve an FName id to text\n"
-    "    ue ftext <address>          read the FText living at an address\n"
-    "    ue combat                   combat bridge status\n"
-    "    ue buffs                    buff snapshot\n"
-    "\n"
     "  reading memory\n"
     "    read <address> <size>       size <= 1048576; returns the bytes and decoded values\n"
     "    chain <base> [offset ...]   follow a pointer chain, at most 64 offsets, return the end address\n"
@@ -91,16 +80,6 @@ constexpr char kUsageText[] =
     "    f32 <address> [count]       float32 values, count defaults to 3\n"
     "    f64 <address> [count]       float64 values, count defaults to 3\n"
     "    snapshot [filename]         write a full JSON snapshot into the Anomaly directory\n"
-    "\n"
-    "  runtime pak mods (mutates the mounted container set)\n"
-    "    pak                         same as \"pak status\": every container the runtime knows about\n"
-    "    pak status                  id, path, read order, size and state of each container\n"
-    "    pak performance             read-only reconciliation, mount-list and catalog scan counters\n"
-    "    pak reload                  rescan ~mods and the optional config/pak-mods.json now\n"
-    "    pak mount <path> [order]    mount one container; order defaults to the runtime base order\n"
-    "    pak release <id>            unmount one container; pending engine reads may retain handles\n"
-    "    pak unmountall              unmount everything the runtime mounted\n"
-    "    pak prime <id>              explicitly probe one mounted container and report the read stage\n"
     "\n"
     "  writing memory (mutates the running game)\n"
     "    write <address> <hex bytes>       write into a page that is already writable\n"
@@ -133,7 +112,6 @@ constexpr char kUsageText[] =
     "  anomaly-cli --pid 1234 scan . .text \"48 8B ?? ?? ?? ?? ?? 48 85 C0\"\n"
     "  anomaly-cli --pid 1234 xrefs . 0x1418aacf0\n"
     "  anomaly-cli --pid 1234 read 0x14fb292f0 16\n"
-    "  anomaly-cli --pid 1234 ue actors * 20\n"
     "  anomaly-cli --pid 1234 snapshot\n"
     "\n"
     "recommended sequence for an unfamiliar target: status, modules, scan or xrefs, then\n"
@@ -196,15 +174,7 @@ int wmain(int argc, wchar_t** argv) {
             std::cerr << "arguments must not contain line breaks\n";
             return 2;
         }
-        // The shell removes quotes around a pak id/path. Preserve that argument boundary on the
-        // diagnostics wire, whose pak parser accepts quoted tokens. Other command grammars differ.
-        const bool quote_pak_argument = std::wstring_view(argv[3]) == L"pak" && index >= 5 &&
-            argument->find_first_of(" \t") != std::string::npos;
-        if (quote_pak_argument && argument->find('"') != std::string::npos) {
-            std::cerr << "quoted pak arguments must not contain a quote\n";
-            return 2;
-        }
-        const auto encoded = quote_pak_argument ? '"' + *argument + '"' : *argument;
+        const auto encoded = *argument;
         const std::size_t separator = request.empty() ? 0U : 1U;
         const std::size_t maximum_command_bytes = kMaximumRequestBytes - 1U;
         if (request.size() > maximum_command_bytes - separator ||
