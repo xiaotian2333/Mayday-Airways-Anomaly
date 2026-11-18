@@ -127,9 +127,9 @@ typedef struct AnomalyUiServiceV1 {
 | `draw_screen_primitives` | 一次提交一批位于插件窗口下方的屏幕空间线段、矩形或圆形；可在 `on_draw` 或 `on_overlay` 中调用 |
 
 > [!NOTE]
-> `draw_entity_*`（ESP 绘制）需要 `entity-esp` capability。它们仅为 ABI v1 兼容而保留；新插件应使用
-> [`anomaly.ue5.ahud`](ue5-services.md#anomalyue5ahud) 的 Game-thread 绘制回调。`Entity ESP` 已采用该路径。
-> `AnomalyPluginDescriptorV1::on_draw` 收到的 `ui` 就是 `AnomalyUiServiceV1*`。
+> `draw_entity_*`（ESP 绘制）需要 `entity-esp` capability。它们仅为 ABI v1 兼容而保留；
+> 新插件应使用常规 UI 服务绘制。`AnomalyPluginDescriptorV1::on_draw` 收到的 `ui` 就是
+> `AnomalyUiServiceV1*`。
 
 相关枚举：
 

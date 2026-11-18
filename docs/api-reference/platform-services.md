@@ -178,7 +178,7 @@ Game/Render 返回 `UNAVAILABLE`。输入必须是 UTF-8 相对 `.json` 路径�
   指定的布局符号必须唯一解析成功；其他未解析符号地址为零，由插件停用依赖功能。失败不替换旧快照，
   调用方必须检查返回值；成功加载、赋值或销毁会使旧的借用引用失效。初始化和读取不得并发。
 
-这些接口没有 NTE 默认条件，布局候选符号由插件显式指定。原有 `LoadProfile` 和
+这些接口没有游戏默认条件，布局候选符号由插件显式指定。原有 `LoadProfile` 和
 `ResolveProfileSymbol` 保持可用。详见[插件开发中的 Profile 示例](../developer-guide/plugin-development.md)。
 
 所有插件共用仓库 `schemas/plugin-profile.schema.json`（SDK 安装到 `share/anomaly/schemas/`）。

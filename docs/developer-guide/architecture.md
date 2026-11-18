@@ -1,155 +1,63 @@
 # 架构概览
 
-本页给出 Anomaly 的架构全景，帮助你在动手前建立心智模型。实现层面的模块归属、依赖与线程边界速查见 `.agents/architecture.md`。
-
-## 设计原则
-
-1. Bootstrap、Runtime、渲染、UE5 集成、NTE 集成与插件宿主是彼此独立的**所有权域**。
-2. Runtime 内核**与游戏无关**；构建专用的签名、偏移与 validator 属于适配器 Profile。
-3. 每个长生命周期资源只有**一个所有者**，并参与确定性的、依赖反序的关停。
-4. 公开插件接口是**纯 C ABI**；C++ 实现类型不跨越 DLL 边界。
-5. 游戏回调与渲染回调有不同的**线程亲和性**，绝不经由同一条回调路径驱动。
-6. 一次推进一个可测试模块。仓库只暴露**一个**当前合同，不保留旧 ABI / Manifest / 协议适配层。
-
-## 组件模型
+## 运行时形态
 
 ```mermaid
 flowchart TD
-    Game["NTE / HTGame.exe"] --> Bootstrap["Bootstrap: dwmapi proxy"]
-    Bootstrap --> Runtime["Runtime entry / RuntimeSession"]
-    Runtime --> Graph["ServiceGraph"]
-    Graph --> Platform["Windows 平台服务"]
-    Graph --> Dispatch["Lifecycle / Game / Render / Worker Dispatcher"]
-    Graph --> Hook["HookManager"]
-    Graph --> Render["D3D12 渲染 / 输入 / UI"]
-    Graph --> PluginHost["插件 Catalog 与 Runtime"]
-    Graph --> Diagnostics["日志 / 指标 / 管道 / 恢复"]
-    Graph --> Repository["Repository index / 网络 worker / 更新事务"]
-    Graph --> UE5["UE5 适配器"]
-    UE5 --> NTE["NTE 适配器"]
-    NTE --> Profiles["Build Profile 与 validator"]
-    PluginHost --> Scope["PluginScope 与资源 ledger"]
-    Scope --> SDK["版本化 C 服务表"]
+    Game["MaydayAirways.exe (Unity IL2CPP)"] --> Bootstrap["dwmapi 代理 / 启动器注入"]
+    Bootstrap --> Core["Anomaly.Core"]
+    Core --> Session["RuntimeSession"]
+    Session --> Graph["ServiceGraph"]
+    Session --> Dispatch["Lifecycle / Worker / Game / Render Dispatcher"]
+    Graph --> Platform["Windows 平台服务与诊断"]
+    Graph --> Plugins["插件宿主与 PluginScope"]
+    Graph --> Adapter["Mayday Adapter (il2cpp)"]
+    Session --> Render["D3D12 Bridge 与 ImGui UI"]
+    Adapter --> Services["mayday.money / mayday.freecam / mayday.il2cpp"]
+    Plugins --> Services
 ```
 
-## 分层与依赖方向
+生产组合根是 `src/runtime/core_main.cpp`；`RuntimeSession` 管理进程生命周期，`ServiceGraph`
+管理依赖顺序。Bootstrap 只负责把 Core 安全带入进程。插件宿主、Renderer、Mayday Adapter 和
+Repository Worker 都是 Runtime 服务声明的并列所有者。
 
-依赖沿声明接口**向下**。Runtime 内核向适配器发布接口，但绝不 include NTE 适配器头文件。跨层回调经由 Dispatcher 投递，而非伸手进入另一层的内部所有者。
+## 模块契约
 
-| 层 | 拥有 | 不得依赖 |
+| 区域 | 负责内容 | 禁止依赖 |
 | --- | --- | --- |
-| Bootstrap | 系统 DLL 转发、runtime 发现、启动请求 | 配置、扫描、Hook、插件、UI |
-| Runtime 内核 | `RuntimeSession`、生命周期状态、service graph、停止传播 | UE5/NTE 符号、D3D12 细节、插件实现 |
-| 平台服务 | 模块、内存、文件、日志、worker 原语 | NTE 语义、插件策略 |
-| 插件宿主 | Catalog、兼容性、状态机、Scope、热重载 | D3D12 后端、固定 NTE 地址 |
-| Repository / 更新 | 签名 index、有界 bundle、staging、rollback | 游戏对象、渲染提交、插件回调 |
-| 渲染 / 输入 / UI | 交换链生命周期、输入路由、UI 服务 | 插件发现、包 I/O、游戏更新调度 |
-| UE5 适配器 | 引擎通用的 world/object/name 与游戏线程锚点 | NTE 专用字段、插件管理 |
-| NTE 适配器 | 活动 Profile 选择、Feature Gate、高层 NTE 服务 | Runtime 所有权决策 |
-| 插件 | 插件自有状态与回调 | 内部头文件、service graph 变更、runtime 单例 |
+| `src/bootstrap/dwmapi` | 系统转发和异步 Core 启动 | 配置、Hook、插件、UI |
+| `src/runtime` | Session 状态、ServiceGraph、停止信号、Dispatcher | Unity/Mayday 布局、渲染细节、插件实现 |
+| `src/services`、`src/platform/windows`、`src/diagnostics` | 日志、存储、内存、Pattern、Pipe、Crash | Mayday 策略、插件行为 |
+| `src/game/mayday` | 等待 `GameAssembly.dll`、解析 il2cpp、发布 Mayday 服务 | 生命周期所有权、插件实现 |
+| `src/plugin` | Manifest、依赖、Scope、generation、热重载 | Renderer 后端内部、固定游戏地址 |
+| `src/render/dx12`、`src/ui` | SwapChain、输入、ImGui 与插件绘制 | 包 I/O、DLL 加载、同步 Game Update |
+| `src/repository` | 签名 Index、网络 worker、staging、回滚 | 游戏对象、渲染提交、插件回调 |
+| `include/anomaly/sdk` | 稳定公开 C ABI 与 C++ wrapper | 宿主内部类型 |
 
 ## 线程域
 
-所有公开回调都标注**唯一亲和性**。Dispatch 任务携带 owner、generation、取消状态与 in-flight lease。Runtime 代码在持有 service graph、插件 catalog 或 hook manager 锁时，**不得**调用插件代码。
-
-| 域 | 主要工作 | 禁止工作 |
+| 域 | 允许工作 | 禁止工作 |
 | --- | --- | --- |
-| Bootstrap | 在 loader lock 之外解析并启动 runtime | 长循环与插件回调 |
-| Lifecycle | 服务 / 插件状态转换、reload 提交、停止 | 直接访问游戏对象或渲染提交 |
-| Game | UE5 / NTE tick 与 world 事件 | 包扫描与同步文件 I/O |
-| Render | D3D12 提交、UI 绘制、纹理上传 | DLL 加载、插件发现、游戏更新 |
-| Worker | 哈希、扫描、解析、压缩、后台计算 | 仅在 game/render 线程有效的指针 |
-| Diagnostics | 解析请求与采集快照 | 直接 game/render 变更（应改用 dispatch） |
+| Bootstrap | 解析导出，在 Loader Lock 外启动 Runtime | 长循环、插件回调 |
+| Lifecycle | 服务/插件状态转换、热重载提交、停止 | 直接读取游戏对象、提交 D3D12 命令 |
+| Worker | 解析、哈希、扫描准备、Repository 网络 | 使用仅在 Game/Render 线程有效的指针 |
+| Game | 已验证的 il2cpp 服务调用与快照刷新 | 包发现、同步文件 I/O |
+| Render | Present/Resize、ImGui、纹理上传、插件 Draw | DLL 加载、il2cpp 扫描、阻塞生命周期工作 |
+| Diagnostics | 解析请求、采集只读快照、投递 intent | 直接修改 Game/Render 状态 |
 
-## 所有权与生命周期
+Dispatcher 任务必须携带 owner、generation、取消状态和 in-flight lease。禁止在持有
+ServiceGraph、Catalog、Scope 或 HookManager 锁时调用插件代码。
 
-`RuntimeSession` 是进程级所有者，拥有 service graph 与 stop source。服务按依赖顺序启动、按依赖反序停止；即使后续服务启动失败，已成功启动的服务也必须被停止。
+## Mayday 适配
 
-Core 在 `AnomalyStart` 内、启动任何服务或 Hook 前取得按 PID 命名的内核对象占有权，阻止不同映像各自创建 Runtime。
-同一 Core 的 session 可以停止后再启动；占有权跨 session 保留，因为进程级签名与缓存 Hook 仍由该映像持有。
-另一个 Core 返回 `ERROR_ALREADY_INITIALIZED`，启动器按“已附加”处理且不结束游戏。启动日志记录 Core 映像地址和引导类型，便于区分重复入口。
+- 宿主等待 `GameAssembly.dll` 加载后解析 il2cpp 导出函数。
+- 类、方法和字段按名称在运行时解析并校验；失败时对应服务返回 `UNAVAILABLE`。
+- `mayday.money` 读写 `Mayday.GameState` 的 Mirror SyncVar；`mayday.freecam` 在主线程接管相机。
+- 覆盖层展开时阻断 InputSystem 按钮、滚轮与 UGUI `EventSystem` 输入。
 
-外部映射入口另外持有按目标 PID 命名的短期占有权，覆盖“检查已有映像 → 映射 → 启动”的整个调用，
-避免两个启动器或注入器同时通过检查。启动超时后保留映像时，也保留附加标记，防止再次映射仍可能运行的 Core。
-`anomaly-runtime.log` 的 `attach` 记录包含调用者路径、PID/TID、目标 PID、映像地址和结果；
-它用于区分同一启动器的重复调用、多个启动器以及其他外部附加入口，不能仅凭两个 Runtime 日志认定用户重复点击。
+## 变更规则
 
-启动器关闭时，Controller 的停止请求必须传到游戏捕获与 loader 等待。捕获在该工作线程上运行，
-不能另建一个立即 join、却没有连接调用者停止请求的线程，否则窗口消失后旧任务仍会捕获下一次启动的游戏。
-取消在开始映射前生效；已经执行的远程引导必须完成并返回结果，不能因窗口关闭而释放其仍在使用的映像。
-
-每个插件 generation 获得一个宿主创建的 `PluginScope`，它记录该插件的每一项宿主资源（订阅、任务、Hook、命令、UI 回调、纹理、Patch、IPC 端点）。卸载流程：
-
-1. 停止新回调并取消排队任务；
-2. 以依赖安全的顺序回收资源；
-3. 等待仍持有当前 generation lease 的回调；
-4. 调用插件 `stop` / `unload`；
-5. 仅当 ledger 与 in-flight 计数均为空时才卸载 DLL。
-
-若 drain 超时，该 generation 被 **quarantine**，其 DLL 保持映射——执行已被 unmap 的插件代码，比保留一个被隔离的模块更危险。
-
-## ABI 边界
-
-已安装 SDK 使用定宽整型字段、C 兼容结构、函数表、string view 与 opaque handle。它**排除** STL 容器、C++ 异常、RTTI 对象、内部类与所有权模糊的内存。
-
-插件 ABI 保留一个很小的生命周期内核，并通过 `query_service` 获取彼此独立版本化的服务表。消费者在读取一张表前先校验 `struct_size` 与 `service_version`。跨插件调用使用 `anomaly.ipc`，其资源绑定到插件 ID 与 generation。细节见 [API 参考](../api-reference/README.md)。
-
-## 源码布局
-
-```text
-src/bootstrap/dwmapi/   极薄代理入口、导出转发与 Runtime 引导
-src/runtime/            RuntimeSession、ServiceGraph 与线程域 Dispatcher
-src/services/           结构化日志、可靠存储等 game-agnostic 服务
-src/platform/windows/   模块、内存、Pattern 与配置实现
-src/diagnostics/        管道、命令分析、CrashReporter 与恢复
-src/hook/               Owner-scoped HookManager 与 MinHook backend
-src/render/dx12/        Discovery、Bridge、Renderer 与 Input 生命周期
-src/ui/                 宿主 UI 服务、管理界面与 Win32 平台宿主
-src/plugin/             Catalog、依赖、Scope、Runtime、Shadow 与热重载
-src/repository/         Index、签名、bundle、网络 worker 与原子更新事务
-src/game/ue5/           Build Profile、Symbol Resolver 与 UE5 Adapter
-src/game/nte/           NTE Profile 选择、降级与高层服务接线
-```
-
-## 运行时目录边界
-
-```text
-Game\Binaries\Win64\
-  dwmapi.dll                     入口与系统导出跳板
-  Anomaly\
-    Anomaly.Core.dll             分析、内存 API、D3D12 ImGui、插件宿主
-    anomaly.ini                  平台、Profile 目录与开发覆盖配置
-    plugin-repositories.json     第三方插件频道与逐频道启用状态
-    repository.json              Profile 更新源与 trust root
-    profiles\                    NTE Profile 与迁移模板
-    profiles-local\              最高优先级本地 Profile 覆盖
-    state\profiles\managed\      Repository 发布的签名 Profile
-    state\repository\            插件频道列表与签名 Index cache
-    .anomaly-plugin-transactions\ 插件安装的 staging / rollback 临时状态
-    state\update-rollback\       插件与 Profile 的上一可用 generation
-    config\plugin-enablement.json    全局插件启用默认值与逐插件 override
-    config\plugins\              anomaly.config 管理的插件 JSON 设置
-    plugins\                     独立插件包、资源与进程隔离缓存
-    logs\anomaly-runtime.log     Runtime 与管道服务日志
-    anomaly-platform.log         平台与插件日志
-    anomaly-imgui.ini            浮动窗口布局
-```
-
-日志目录不会无限增长：`logs\anomaly-runtime.jsonl` 按体积滚动（8 MiB 一轮，保留 3 个历史
-文件），`StructuredLogger` 在启动时以及每小时的维护周期里还会按 `PruneLogFiles` 的策略删除
-旧日志——先删最后写入时间超过 3 天的文件，再从最旧的开始删到目录内 `.log` / `.jsonl` 总量
-不超过 48 MiB。当前正在写入的 jsonl 永远不参与删除。新增的日志文件只要用这两个扩展名，就会被
-自动纳入清理范围；其他文件不会被触碰。
-
-## 架构检查
-
-- 一次干净的 `configure → build → install` 是集成门禁。
-- ABI Snapshot 冻结 Windows x64 布局与回调类型。
-- 新服务显式声明依赖与线程亲和性。
-- 新的 NTE 地址需要 Build Profile 与 validator。
-- 新的插件可见资源需要 Scope-ledger 登记与拆除。
-- Present / Draw 路径不得扫描包、加载 DLL 或驱动游戏更新。
-
-## 设计决策
-
-上文的[设计原则](#设计原则)与各层边界即是本项目的核心架构决策：单一所有权、游戏无关的 Runtime 内核、纯 C ABI、线程域分离、单一当前合同。新增服务、NTE 地址或插件可见资源时，须遵守对应的[架构检查](#架构检查)。
+- 新增 il2cpp 类、方法或字段：必须在运行时按名称解析并校验，提供不可用/降级行为，不能写死地址、偏移或版本分支。
+- 新增 SDK 字段：保持 C 内存布局，使用 `struct_size` 或新的版本化服务表，并同步更新 ABI Snapshot。
+- 新增插件资源：登记到 Scope ledger，并在 DLL 卸载前撤销。
+- 新增会改变宿主状态的 UI 操作：只能投递 typed work，不能在 `Present` 执行发现、磁盘访问或网络工作。

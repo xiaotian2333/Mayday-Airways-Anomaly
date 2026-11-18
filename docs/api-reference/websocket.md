@@ -1,6 +1,6 @@
 # WebSocket Service
 
-`anomaly.websocket` is a general Runtime service. It is independent of UE, NTE,
+`anomaly.websocket` is a general Runtime service. It is independent of the game engine,
 Profiles, and rendering. The Runtime owns the listener, connection lifecycle,
 and socket I/O; a plugin may only enqueue UTF-8 text frames for broadcast.
 

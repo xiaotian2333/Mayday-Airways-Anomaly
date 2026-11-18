@@ -1,7 +1,5 @@
 # 开发者文档
 
-> 🌐 [English](../en/developer-guide/README.md) · 简体中文
-
 本文档集面向**贡献者与插件作者**。如果你只是想使用 Anomaly，请看[用户文档](../user-guide/README.md)。
 
 ## 阅读顺序
@@ -33,7 +31,7 @@
 | --- | --- |
 | 构建并部署 | [从源码构建](building.md) |
 | 理解模块边界 | [架构概览](architecture.md) |
-| 写一个插件 | [插件开发](plugin-development.md)、[插件模板](https://github.com/AnomalyNTE/Anomaly-Plugin-Template)、[`examples/`](../../examples/README.md) |
+| 写一个插件 | [插件开发](plugin-development.md)、[`examples/`](../../examples/README.md) |
 | 把插件放进“可用”页面 | [发布第三方插件](plugin-distribution.md) |
 | 查接口签名 | [API 参考](../api-reference/README.md)、`include/anomaly/sdk/` |
 | 提交改动 | [贡献指南](contributing.md)、[`AGENTS.md`](../../AGENTS.md) |

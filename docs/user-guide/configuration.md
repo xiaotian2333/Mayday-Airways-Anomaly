@@ -1,8 +1,8 @@
 # 配置参考
 
-Anomaly 的平台配置位于 `Anomaly\anomaly.ini`。签名与结构偏移**不在** INI 中——它们属于 [NTE Build Profile](nte-profiles.md)；`anomaly.ini` 只选择游戏、Profile 目录与平台行为。
+## 运行时配置
 
-## anomaly.ini 全字段
+运行时配置位于 `Anomaly\anomaly.ini`。修改后重启游戏或重新注入生效。
 
 ```ini
 [Analyzer]
@@ -18,190 +18,45 @@ ToggleKey=45
 Language=auto
 PluginDirectory=plugins
 
+[Telemetry]
+Enabled=1
+
 [Performance]
 UpdateSlowMilliseconds=2
 DrawSlowMilliseconds=4
-PlayerSnapshotTickInterval=1
-EntitySnapshotTickInterval=1
-ActorSnapshotTickInterval=60
 
 [Profiles]
-Game=nte
-Directory=profiles
-LocalDirectory=profiles-local
-ManagedDirectory=state/profiles/managed
+Game=mayday
 ```
 
-### [Analyzer]
-
-| 字段 | 说明 |
+| 键 | 说明 |
 | --- | --- |
-| `PipePrefix` | 命名管道名前缀，供诊断协议使用。 |
-| `MaxScanResults` | 单次签名扫描返回的最大命中数量。 |
+| `Platform.ToggleKey` | 覆盖层热键，`45` 是 `Insert`。也可以在游戏内重新绑定。 |
+| `Platform.Visible` | `1` 时启动即展开覆盖层，仅用于调试。 |
+| `Platform.Language` | `auto`、`zh-CN` 或 `en-US`。 |
+| `Platform.PluginDirectory` | 相对 `Anomaly\` 的插件目录，默认 `plugins`。 |
+| `Telemetry.Enabled` | 匿名使用统计开关。 |
+| `Performance.UpdateSlowMilliseconds` | Game Update 慢回调阈值。 |
+| `Performance.DrawSlowMilliseconds` | Draw 慢回调阈值。 |
+| `Profiles.Game` | 插件兼容性使用的游戏标识，Mayday 固定为 `mayday`。 |
 
-### [Platform]
+## 启动器配置
 
-| 字段 | 说明 |
-| --- | --- |
-| `Enabled` | 是否启用平台（UI 与插件宿主）。 |
-| `Visible` | 启动时界面是否可见，默认 `0`；按 `Insert` 手动呼出。 |
-| `Embedded` | `1` 启用 D3D12 交换链内嵌模式（游戏内界面）。 |
-| `AttachToProcessWindow` | 仅在关闭内嵌模式、使用 Win32 回退后端时生效；独立演示程序始终使用普通窗口。 |
-| `ToggleKey` | 呼出 / 折叠界面的 Win32 虚拟键码。默认 `45` 即 `VK_INSERT`；推荐直接在 **Anomaly Launcher > 启动设置** 中按键修改。 |
-| `Language` | UI 语言，见下文。 |
-| `PluginDirectory` | 插件目录（相对 `Anomaly\`），默认 `plugins`。 |
+启动器配置位于启动器同级的 `AnomalyLauncher.json`（schemaVersion 3），包括：
 
-### [Performance]
+- `gameDirectory`：游戏目录。
+- `theme`、`language`：启动器外观与语言。
+- `artwork`、`customColors`：背景和自定义配色。
+- `view`：模组页布局与分页。
+- `update`：自动检查更新、镜像端点和跳过版本。
 
-| 字段 | 说明 |
-| --- | --- |
-| `UpdateSlowMilliseconds` | 判定插件 `on_update` 回调为"慢"的阈值（毫秒）。 |
-| `DrawSlowMilliseconds` | 判定插件 `on_draw` 回调为"慢"的阈值（毫秒）。 |
-| `PlayerSnapshotTickInterval` | 玩家快照的采样间隔（tick）。 |
-| `EntitySnapshotTickInterval` | 实体快照的采样间隔（tick）。 |
-| `ActorSnapshotTickInterval` | 全关卡 actor 快照的重扫间隔（tick，默认 60）。调大减少扫描开销，调小让销毁/新生成的 actor 更快反映到快照。 |
+旧版本的 `clients` / `selectedClient` 字段只在读取时用于迁移，保存后会写成单游戏格式。
 
-### [Profiles]
+## 插件配置
 
-| 字段 | 说明 |
-| --- | --- |
-| `Game` | 当前游戏标识（如 `nte`）。 |
-| `Directory` | 运行包自带的 Profile 目录。 |
-| `LocalDirectory` | 最高优先级的本地 Profile 覆盖目录。 |
-| `ManagedDirectory` | 更新源下发的 Profile 目录。 |
-
-Runtime 的选择顺序是：本地覆盖 > 更新源下发 > 运行包自带。详见 [NTE Build Profile](nte-profiles.md)。
-
-## 语言
-
-`Language` 允许三种取值：
-
-- `auto` — 进程启动时按 Windows 用户语言选择。
-- `en-US` — 英文。
-- `zh-CN` — 简体中文。
-
-> [!NOTE]
-> 修改 `Language` 后需要**重启对应进程**才能生效。
-
-## 切换键
-
-`ToggleKey` 使用 Win32 虚拟键码。常见值：
-
-启动器会显示当前快捷键并捕获下一次按键，保存到运行时设置；手动编辑 `anomaly.ini` 仍然兼容，重启 Runtime 后生效。
-
-| 键 | 十进制码 |
-| --- | --- |
-| `Insert`（默认） | `45` |
-| `Home` | `36` |
-| `End` | `35` |
-| `F1` | `112` |
-
-完整键码见微软的 [Virtual-Key Codes](https://learn.microsoft.com/windows/win32/inputdev/virtual-key-codes) 文档。
-
-## 界面布局
-
-游戏内主界面是可拖动、可缩放的 ImGui 浮动窗口，位置与尺寸保存在 `Anomaly\anomaly-imgui.ini`：
-
-- 首次显示时居中为 `1040×700`。
-- 主管理窗口不提供关闭按钮，旧版本留下的关闭状态会在启动时自动修复。
-- `Insert` 折叠 / 展开未锁定菜单；标题栏锁按钮可让单个窗口保持展开。
-
-### 主题与背景图
-
-界面配色在 **设置 > 界面 > 配色** 里选（内置包括奶蛙 / Naiwa，**默认就是奶蛙**），背景图片和贴纸则写在 `Anomaly\config\themes\`（`layout.json` 通用，`<配色名>.json` 专属）；该目录出厂只带 Naiwa 预设（`naiwa.json` 及其贴纸），其余布局在你首次修改背景或贴纸时才生成。两者同时作用于游戏内主界面和启动器。
-
-完整字段、三种背景填充方式和网页贴纸编辑器的用法见[主题与背景](theme.md)。
-
-## 第三方插件（plugin-repositories.json）
-
-日常添加、下载、更新和卸载插件的步骤见[第三方插件](third-party-plugins.md)。这里仅说明配置文件格式。
-
-`Anomaly\plugin-repositories.json` 保存 **Plugins > 第三方插件** 中的插件源地址。运行包自带一个已启用的 GitHub 索引；具体地址以运行包中的 JSON 为准。插件源和下载地址默认必须使用 HTTPS。`file://` 只供本地测试，需要显式设置 `"allowInsecureSources": true`。
-
-```json
-{
-  "schemaVersion": 1,
-  "enabled": true,
-  "allowInsecureSources": false,
-  "repositories": [
-    {
-      "url": "https://example.com/pluginmaster.json",
-      "enabled": true
-    }
-  ]
-}
-```
-
-在界面中应用插件源后会立即刷新，不需要重启 Runtime。如果网络刷新失败，界面仍会显示上一次成功获取的列表。安装时会重新下载插件包，并检查 ZIP 路径、Manifest ID、版本、游戏、Plugin API 和入口 DLL。
-
-从插件源安装的插件可以在操作菜单中卸载。卸载只删除插件包，`Anomaly\config\plugins\` 中的设置会保留。
-
-## 签名更新源（repository.json）
-
-`Anomaly\repository.json` 是 Runtime 使用的 Profile 签名更新源。当前运行包默认关闭该功能（`"enabled": false`），也没有预置更新地址和信任密钥：
-
-```json
-{
-  "schemaVersion": 1,
-  "enabled": false,
-  "allowFileSources": false,
-  "withdrawalPolicy": "block-new",
-  "freshness": {
-    "maximumClockSkewSeconds": 300,
-    "maximumIndexAgeSeconds": 86400,
-    "maximumOfflineAgeSeconds": 604800,
-    "downgradePolicy": "reject"
-  },
-  "sources": [],
-  "trustKeys": []
-}
-```
-
-要启用它，必须同时配置 `sources` 和 `trustKeys`。普通用户不需要修改这个文件。
-
-## 外部宿主 DLL（`config\hosts.json`）
-
-有些宿主必须在游戏创建图形设备之前装好 hook，因此 Runtime 在 Core 初始化最前面留了一个加载点，
-与插件系统无关。只有一个配置文件：
-
-`Anomaly\config\hosts.json`
-
-```json
-{
-  "schemaVersion": 1,
-  "hosts": [
-    "D:\\Hosts\\example-host.dll",
-    "%LOCALAPPDATA%\\ExampleHost\\host.dll",
-    { "path": "..\\Example\\plugin-host.dll", "enabled": false }
-  ]
-}
-```
-
-- `schemaVersion`：只接受 `1`，缺省按 1 处理。
-- `hosts`：按数组顺序加载。每项是路径字符串，或 `{ "path": ..., "enabled": false }`（停用但保留路径）。
-- 路径：`%ENV%` 展开；相对路径按 `Anomaly\` 解析；同一路径（大小写不敏感）只加载一次。
-- 文件不存在、`hosts` 为空、或全部停用：一次属性查询后返回，不解析 JSON、不写日志。
-
-**生效范围**：只对进程启动引导生效（经 `dwmapi.dll` 代理启动）。运行中注入（`anomaly-inject --pid`）
-一律跳过——那时设备与交换链已建好，装 hook 已经没有意义。
-
-**加载方式**：`LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)`，
-宿主自己的目录优先参与依赖解析；加载成功后立即 PIN（`GET_MODULE_HANDLE_EX_FLAG_PIN`），进程内不再卸载。
-单个宿主失败不影响其它条目，也不影响 Runtime 启动。
-
-**日志**（`Anomaly\logs\anomaly-runtime.log`，或 `anomaly-runtime.jsonl` 的 `event_id`）：
-
-| 事件 | 含义 |
-|---|---|
-| `hosts.payload.loaded` | 加载成功（`pinned=true`） |
-| `hosts.payload.skipped` | 非进程启动引导，跳过加载 |
-| `hosts.payload.missing` / `hosts.payload.failed` | 文件不存在 / `LoadLibrary` 失败 |
-| `hosts.config.invalid` | JSON 不合法或结构不符 |
-| `hosts.config.legacy_ignored` | 旧的 `hosts.txt` 存在但已不再读取 |
-
-宿主保留自己的文件名，不要填代理名（`dxgi.dll`、`dwmapi.dll` 之类）——那是别的工具的入口，会互相冲突。
+插件的开关、数值和热键通过插件窗口修改，由宿主 `anomaly.config` 服务持久化到 `Anomaly\config\plugins\<id>\`。不要在 Game/Render 回调中直接读写文件。
 
 ## 相关
 
-- [NTE Build Profile](nte-profiles.md) — 签名与结构偏移
-- [插件的持久化设置](../developer-guide/plugin-development.md) — 插件自身的 JSON 配置存放在 `Anomaly\config\plugins\`
+- [安装与启动](installation.md)
+- [故障排查](troubleshooting.md)

@@ -5,7 +5,7 @@
 
 ## 已完成
 
-- [x] 移除全部 NTE 专用内容：异环插件、`src/game/ue5|nte`、`profiles/nte`、NTE 工具脚本与文档
+- [x] 移除全部上游游戏专用内容：插件、引擎适配层、Profile 与工具脚本
 - [x] CMakeLists 同步清理，修复 fixtures 构建路径
 - [x] 建立 `src/game/mayday/`、`profiles/mayday/` 骨架
 - [x] 引擎符号层：`MaydayAdapter` 等待 `GameAssembly.dll`，解析 il2cpp 导出并发布 `mayday.il2cpp`

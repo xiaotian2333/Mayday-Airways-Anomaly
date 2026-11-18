@@ -14,7 +14,7 @@
 | `read_memory` | `memory-read` | `PERMISSION_DENIED` |
 | `write_memory` | `memory-write` | `PERMISSION_DENIED` |
 
-签名见 [`anomaly.core`](lifecycle-and-core.md#anomalycore)。新插件应优先使用语义 [NTE 服务](nte-services.md)。
+签名见 [`anomaly.core`](lifecycle-and-core.md#anomalycore)。新插件应优先使用语义游戏服务。
 
 ---
 

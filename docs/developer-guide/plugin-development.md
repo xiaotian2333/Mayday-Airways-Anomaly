@@ -2,7 +2,7 @@
 
 本页带你用 Anomaly SDK 从零写一个插件。**完整的接口签名在 [API 参考](../api-reference/README.md)**；本页讲流程与要点。仓库 [`examples/`](../../examples/README.md) 内有四个可直接构建的示例。
 
-要新建独立插件仓库，可从 [Anomaly 插件模板](https://github.com/AnomalyNTE/Anomaly-Plugin-Template) 开始：点击 GitHub 的 **Use this template**，再按模板说明替换插件 ID、名称、作者和 capability。模板已包含 CMake 工程、Manifest、本地化资源与可运行的 UI Gallery 示例。
+要新建独立插件仓库，可参考本仓库 `examples/` 下的最小工程，并按 SDK 包说明配置 CMake、Manifest、本地化资源与 UI。
 
 ## 核心概念
 
@@ -162,7 +162,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
 | `on_stop(deadline)` | 停止，提交状态 | Lifecycle |
 | `on_unload` | 卸载前清理 | Lifecycle |
 
-Render 回调必须保持为纯绘制路径。游戏语义服务查询、cursor 推进、分页、名称解析和统计应在 Game 域 `on_update` 完成，并转换为插件自有的不可变展示快照；`on_draw` 和 `on_overlay` 仅在短锁内复制快照，锁外调用 UI。持续存在的世界标记应使用 `on_overlay`，普通插件窗口内容使用 `on_draw`。[`nte_combat_demo`](../../examples/nte_combat_demo/plugin.cpp) 展示了该边界：新伤害到达时才解析来源与参与者，静止帧不会重复调用 NTE 服务。
+Render 回调必须保持为纯绘制路径。游戏语义服务查询、cursor 推进、分页、名称解析和统计应在 Game 域 `on_update` 完成，并转换为插件自有的不可变展示快照；`on_draw` 和 `on_overlay` 仅在短锁内复制快照，锁外调用 UI。持续存在的世界标记应使用 `on_overlay`，普通插件窗口内容使用 `on_draw`。
 
 完整入口 / 描述符定义见 [生命周期与 Core 服务](../api-reference/lifecycle-and-core.md)。
 
@@ -177,7 +177,7 @@ if (!config) { /* 该服务不可用，降级处理 */ }
 ```
 
 > [!IMPORTANT]
-> 插件必须能处理服务不可用的情况。UI 服务可能还没就绪；NTE 服务也会因为没有活动 Profile，或相关 Feature 校验失败而返回 `UNAVAILABLE`。调用前要检查 `struct_size`，调用后要检查 status。
+> 插件必须能处理服务不可用的情况。UI 服务可能还没就绪；游戏服务也会在游戏符号未解析或场景未就绪时返回 `UNAVAILABLE`。调用前要检查 `struct_size`，调用后要检查 status。
 
 未授权的服务返回 `ANOMALY_STATUS_V1_PERMISSION_DENIED`，与尚未发布时的 `ANOMALY_STATUS_V1_UNAVAILABLE` 区分。
 
@@ -197,7 +197,7 @@ if (!config) { /* 该服务不可用，降级处理 */ }
   "entry": "plugin.dll",
   "api": {"major": 1, "minMinor": 0, "maxMinor": 0},
   "games": ["nte"],
-  "builds": ["nte-*"],
+  "builds": ["mayday-*"],
   "loadPhase": "game-ready",
   "services": [
     {"id": "anomaly.ui", "minVersion": 1},
@@ -211,7 +211,7 @@ if (!config) { /* 该服务不可用，降级处理 */ }
 
 - `id` 是插件 ID：`<作者>.<插件名>`，固定两段小写 kebab 标签。第一段是作者命名空间（写法随作者署名，如 `CCYellowStar` 写作 `ccyellowstar`），第二段是插件名；不再有第三段，`local` / `builtin` / `plugin` 前缀与反域名形式会被 manifest 校验拒绝。
 - `description` 是管理界面“关于”区域使用的插件简介；插件可通过本地化目录中的 `plugin.description` 提供翻译。
-- `builds` 是 build 兼容性声明，可以写 `nte-*` 或精确 fingerprint。当前生产 Runtime 不计算 fingerprint，加载时也不用该字段拦截插件，因此不能把它当作运行时安全检查。
+- `builds` 是 build 兼容性声明，可以写通配模式或精确 fingerprint。当前生产 Runtime 不计算 fingerprint，加载时也不用该字段拦截插件，因此不能把它当作运行时安全检查。
 - `license` 是单个 SPDX identifier（公开分发时必填）。
 
 ### 文本本地化
@@ -268,73 +268,7 @@ capability ↔ service 对应关系见 [Manifest 与 capability · capability �
 缺失时对应调用返回 `PERMISSION_DENIED`。
 
 > [!NOTE]
-> capability 机制约束服务可见性与资源归属，**不是**同进程 native 代码的安全沙箱。新插件应优先使用语义 NTE snapshot 服务，而不是自行读取游戏对象内存。
-
-### 周围拾取
-
-需要拾取周围 `PropBox_`、`InteractBox_` 或随机物品 Actor 时，声明 `nte-pickup` capability
-并查询 `anomaly.nte.pickup`。在 Game Update 中提交 `AnomalyNtePickupRequestV1`，在 Draw/UI
-中读取 `AnomalyNtePickupSnapshotV1`。请求只表示已排队，确认计数和 2 秒截止时间由 Host
-维护；`QUEUED` 或 `CHECKING` 时不应重复提交。
-
-插件不得自行扫描 GObjects/World、解析 `BPGetInteractEntries` 或 `BPCanTryInteract`，也不得
-直接调用 UE `ProcessEvent`、修改 UFunction flags 或读取 `bInteractFinish`。这些行为属于
-NTE Adapter 的 Profile gate 和线程域，避免实体 generation、对象生命周期和确认逻辑在插件间分叉。
-确认优先复用实体缓存和直接状态字节，仅在截止时调用一次 `BPCanTryInteract`。
-
-### 点击游戏 UI 按钮
-
-需要打开界面、领取奖励这类点击游戏按钮的流程时，声明 `nte-ui-buttons` capability 并查询
-`anomaly.nte.ui-buttons`。流程是 `request_scan` → 等请求 `COMPLETE` → `find` 按名称 / 文字 /
-所在界面找到按钮 → `request_click` → 等请求 `COMPLETE` 并检查 `status`；多步操作按这个顺序串联，
-每次界面变化后重新扫描。Host 在点击前会重新判定按钮是否被其他界面遮挡，`CONFLICT` 表示这一刻不能点，
-应等待或重新扫描，而不是加 `FORCE` 强行点击。
-
-插件不得自行扫描 GObjects 找按钮、直接调用按钮的 UFunction 或模拟鼠标点击：直接调点击会绕过
-Slate 命中测试，点到被遮挡的按钮会让游戏进入不可预期的状态。服务合同见
-[`anomaly.nte.ui-buttons`](../api-reference/nte-services.md#anomalynteui-buttons)。
-
-### 地图地标传送
-
-需要显示地图上所有可传送地标时，声明 `nte-map-landmarks` capability，并查询
-`anomaly.nte.map-landmarks`。地标目录由 Host 从活动 Profile 验证的 `TeleportPoint`
-DataTable 构造；插件只消费 `TeleportID`、所属世界、世界坐标、有效目的坐标、楼层和类型，
-不自行扫描 GObjects、解析 DataTable 或调用 `ProcessEvent`。
-
-目录用 `sequence` 标识不可变版本。插件缓存一次完整枚举；仅在 `sequence()` 变化时重新读取，
-并确认每个 `snapshot_at()` 返回的 `snapshot.sequence` 仍等于目标序列。选择状态保存
-`sequence + index`，不要保存 UE 指针或把 UI 文本重新解释为 ID：
-
-```cpp
-const auto sequence = service->sequence(service->user);
-if (sequence != 0 && sequence != cached_sequence) {
-    std::vector<AnomalyNteMapLandmarkSnapshotV1> next;
-    const auto count = service->count(service->user);
-    next.reserve(count);
-    bool complete = true;
-    for (std::uint32_t index = 0; index < count; ++index) {
-        AnomalyNteMapLandmarkSnapshotV1 item{sizeof(item)};
-        const auto status = service->snapshot_at(service->user, index, &item);
-        if (status.code != ANOMALY_STATUS_V1_OK || item.sequence != sequence) {
-            complete = false;
-            break;
-        }
-        next.push_back(item);
-    }
-    if (complete && service->sequence(service->user) == sequence) {
-        landmarks = std::move(next);
-        cached_sequence = sequence;
-    }
-}
-```
-
-`on_draw` 属于 Render 域，只负责显示选项并把所选 `sequence`、`index` 和 mode 放入插件自己的
-待处理状态；`on_update` 属于 Game 域，在开发者模式确认后构造
-`AnomalyNteMapLandmarkTeleportRequestV1` 并调用 `teleport`。若目录已刷新，旧请求返回
-`NOT_FOUND`，插件刷新列表并要求重新选择，不用猜测新的索引。
-
-仓库内的 `plugins/TeleportLandmarksProbe` 是该模式的开发者调试实现：它只依赖 `anomaly.ui`
-和 `anomaly.nte.map-landmarks`，不包含签名、偏移、原始内存读取或 UE 调用逻辑。
+> capability 机制约束服务可见性与资源归属，**不是**同进程 native 代码的安全沙箱。新插件应优先使用语义服务，而不是自行读取游戏对象内存。
 
 ## 7. 资源与所有权
 
@@ -387,9 +321,6 @@ if (resolved) {
 需要该地址的 Hook 自己用 `resolve` 再找一次，仍失败就只跳过那一个 Hook。
 种子不是失败兜底值。完整限制、C ABI 输出所有权和错误码见
 [Interop 与内存](../api-reference/interop-and-memory.md#版本-2同时解析地址与字段布局)。
-HiFi 已接入 PlayingID、Paused、PlayerType、CurrentID、OwnedIDs；核心播放和可选专辑分组解析，
-专辑组失败保留原有专辑降级行为。其他字段仍遵循原有兼容约束。
-
 所有由 Platform / Interop / IPC 创建的 handle 都**绑定 plugin generation**：
 
 - Scheduler / IPC 的未开始工作在 stop / reload 时取消。
@@ -397,7 +328,7 @@ HiFi 已接入 PlayingID、Paused、PlayerType、CurrentID、OwnedIDs；核心�
 - function Hook 的 detour 必须以 `begin_callback` / `end_callback` 包围；当前 Hook 只支持 function kind。
 - 插件 callback 首次故障后停止后续调用；失败的 stop 代际保持隔离。
 
-宿主分配的内存由宿主 allocator 释放；公开边界不传递 C++ STL、异常、`ImGuiContext*`、裸 `UObject*` 或宿主内部对象。
+宿主分配的内存由宿主 allocator 释放；公开边界不传递 C++ STL、异常、`ImGuiContext*`、裸游戏对象指针 或宿主内部对象。
 
 ## 8. 本地开发循环
 
@@ -409,7 +340,7 @@ anomaly-plugin pack build\package\MyPlugin --output .\dist
 anomaly-test-host --plugin .\dist\example.my-plugin --reload 10 --ticks 60
 ```
 
-`anomaly-test-host` 是**无游戏**的离线 fixture：它加载你的包、跑若干 tick 和 reload，用来验证生命周期与降级行为。该环境没有真实游戏适配器，NTE 服务会保持 `UNAVAILABLE`，但插件包本身仍应能够正常加载和卸载。
+`anomaly-test-host` 是**无游戏**的离线 fixture：它加载你的包、跑若干 tick 和 reload，用来验证生命周期与降级行为。该环境没有真实游戏适配器，游戏服务会保持 `UNAVAILABLE`，但插件包本身仍应能够正常加载和卸载。
 
 ## 9. 部署与热重载
 
@@ -436,8 +367,6 @@ anomaly-test-host --plugin .\dist\example.my-plugin --reload 10 --ticks 60
 | [`hello_ui`](../../examples/hello_ui/plugin.c) | 纯 C 的 scoped Window / Font / Texture / Input / Hotkey 与 host-owned UI；资源未就绪时降级绘制 |
 | [`tick_counter`](../../examples/tick_counter/plugin.cpp) | C++ RAII + Game Thread Tick |
 | [`reliable_config`](../../examples/reliable_config/plugin.cpp) | 通过 Config ABI 注册 JSON Schema、读取设置，`on_stop` 原子提交 |
-| [`nte_inspector`](../../examples/nte_inspector/plugin.cpp) | Session lifecycle event、bounded EntityPage、class-name 解析与 Host snapshot metrics |
-| [`nte_combat_demo`](../../examples/nte_combat_demo/plugin.cpp) | Game 域增量消费角色伤害事件，Render 域只绘制本地快照 |
 
 ## 相关
 

@@ -95,7 +95,7 @@ typedef struct AnomalyCoreServiceV1 {
 日志级别 `AnomalyCoreLogLevelV1`：`TRACE=0`、`INFO=1`、`WARNING=2`、`ERROR=3`。
 
 > [!NOTE]
-> `anomaly.core` 不会自动授予原始内存访问；新插件应优先使用语义 [NTE snapshot 服务](nte-services.md) 而非自行读游戏对象。
+> `anomaly.core` 不会自动授予原始内存访问；新插件应优先使用语义游戏服务，而非自行读取游戏对象。
 
 ---
 

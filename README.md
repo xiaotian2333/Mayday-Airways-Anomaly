@@ -26,7 +26,7 @@
 - D3D12 Present hook + 内嵌 ImGui 管理界面
 - 内建插件：`Money`（金币/债务）与 `Freecam`（自由镜头）
 - 覆盖层展开时阻断 Unity InputSystem 与 UGUI 输入；暂停菜单提供「Anomaly」入口
-- 已清理上游异环（NTE）专用插件、服务、资源、工具与文档
+- 已清理上游游戏专用插件、服务、资源、工具与文档
 
 ## 启动方式
 

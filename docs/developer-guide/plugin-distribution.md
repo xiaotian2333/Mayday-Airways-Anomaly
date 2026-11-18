@@ -95,7 +95,7 @@ example.my-plugin\
 
 JSON 字段名区分大小写，不支持注释或尾随逗号。索引中有多个插件时，在同一个数组中继续添加对象，不要给根节点套 `plugins` 或其他字段。
 
-可参考 [Anomaly 插件模板的 `pluginmaster.json`](https://raw.githubusercontent.com/AnomalyNTE/Anomaly-Plugin-Template/main/pluginmaster.json) 查看一份可直接被 Runtime 读取的在线示例。
+可参考本仓库 `examples/` 中的最小包结构，构造一份可被 Runtime 读取的 `pluginmaster.json`。
 
 ### 必填字段
 

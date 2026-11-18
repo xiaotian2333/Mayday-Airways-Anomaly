@@ -30,7 +30,7 @@ docs(sdk): document the config schema migration flow
 
 - `src/bootstrap/dwmapi/` 必须在 **Loader Lock 外**工作：仅转发系统导出并异步启动 Core，不放入配置、Hook、UI、扫描或插件加载。
 - `src/runtime/` 负责 Session 状态、停止传播、服务生命周期与 Dispatcher 所有权。部分启动失败时，已启动服务也必须按依赖**反序**停止。
-- `src/platform/`、`src/services/`、`src/diagnostics/` 保持**游戏无关**，不依赖 NTE 布局。
+- `src/platform/`、`src/services/`、`src/diagnostics/` 保持**游戏无关**，不依赖 Unity/Mayday 布局。
 - `src/game/ue5/` 负责已验证的通用 UE 符号；`src/game/nte/` 负责按来源优先级选择活动 Profile 与 Feature Gate。新偏移 / 签名必须有 **Profile、validator 与降级行为**，不能硬编码在插件或 UI 中。
 - `src/plugin/` 负责 Catalog、包、generation、Scope、热重载与故障隔离。每个插件可见资源都要记录在 `PluginScope`，回调不越出 generation lease。
 - `src/render/dx12/` 与 `src/ui/` 的 Render 回调**不得**扫描包、加载 DLL、等待生命周期任务或做同步 I/O。
