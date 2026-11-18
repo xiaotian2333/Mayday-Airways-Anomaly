@@ -244,14 +244,31 @@ struct MaydayAdapter::Impl {
     void* button_submit_original{};
     void* pause_get_invite_btn{};
     void* pause_get_resume_btn{};
+    void* invite_btn_field{};
+    std::size_t invite_btn_offset{};
+    void* resume_btn_field{};
+    std::size_t resume_btn_offset{};
     void* uif_button_method{};
     void* ui_theme_button_height{};
     void* transform_get_parent{};
     void* transform_get_sibling_index{};
     void* transform_set_sibling_index{};
+    void* transform_get_child_count{};
+    void* component_get_gameobject{};
+    void* gameobject_get_active{};
+    void* transform_get_local_scale{};
+    void* recttransform_get_size_delta{};
+    std::atomic<int> pause_button_active{-1};
+    std::atomic<int> pause_button_width_milli{0};
+    std::atomic<int> pause_button_height_milli{0};
+    std::atomic<int> pause_parent_children{-1};
     void* pause_screen{};
     std::atomic<void*> pause_button{nullptr};
     std::atomic<int> pause_menu_in_callback{0};
+    std::atomic<int> pause_stage{0};
+    std::atomic<int> pause_failure{0};
+    std::atomic<int> pause_resolve_step{0};
+    std::atomic<int> pause_anchor{0};
     static std::atomic<Impl*> pause_menu_owner;
 
     // 服务表回调：Impl 是 MaydayAdapter 的私有嵌套类型，只有成员才能访问。
@@ -1441,21 +1458,40 @@ std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::pause_menu_owner{nullptr}
 
 bool MaydayAdapter::Impl::ResolvePauseMenu() {
     if (pause_menu_resolved) return true;
+    const auto fail = [this](int step) noexcept {
+        pause_resolve_step.store(step, std::memory_order_release);
+        return false;
+    };
     if (runtime_invoke == nullptr || string_new == nullptr ||
         object_unbox == nullptr || class_from_name == nullptr ||
         class_get_method == nullptr || domain_get_assemblies == nullptr) {
-        return false;
+        return fail(1);
     }
-    if (!EnsureGameImage()) return false;
+    if (!EnsureGameImage()) return fail(2);
     pause_screen_class = class_from_name(image, "Mayday.UI", "PauseScreen");
     void* const uif_class = class_from_name(image, "Mayday.UI", "UIF");
     void* const ui_button_class = class_from_name(image, "Mayday.UI", "UIButton");
-    if (pause_screen_class == nullptr || uif_class == nullptr || ui_button_class == nullptr) {
-        return false;
-    }
+    if (pause_screen_class == nullptr) return fail(3);
+    if (uif_class == nullptr || ui_button_class == nullptr) return fail(4);
     void* const build_info = FindMethodInfo(pause_screen_class, "Build", 0);
     pause_get_invite_btn = FindMethodInfo(pause_screen_class, "get_inviteBtn", 0);
     pause_get_resume_btn = FindMethodInfo(pause_screen_class, "get_resumeBtn", 0);
+    if (class_get_field != nullptr && field_get_offset != nullptr) {
+        invite_btn_field = class_get_field(pause_screen_class, "<inviteBtn>k__BackingField");
+        if (invite_btn_field == nullptr) {
+            invite_btn_field = class_get_field(pause_screen_class, "inviteBtn");
+        }
+        if (invite_btn_field != nullptr) {
+            invite_btn_offset = field_get_offset(invite_btn_field);
+        }
+        resume_btn_field = class_get_field(pause_screen_class, "<resumeBtn>k__BackingField");
+        if (resume_btn_field == nullptr) {
+            resume_btn_field = class_get_field(pause_screen_class, "resumeBtn");
+        }
+        if (resume_btn_field != nullptr) {
+            resume_btn_offset = field_get_offset(resume_btn_field);
+        }
+    }
     uif_button_method = FindMethodInfo(uif_class, "Button", 10);
     void* const theme_class = class_from_name(image, "Mayday.UI", "UITheme");
     if (theme_class != nullptr) {
@@ -1463,13 +1499,15 @@ bool MaydayAdapter::Impl::ResolvePauseMenu() {
     }
     button_click_target = FindMethodTarget(ui_button_class, "OnPointerClick", 1);
     button_submit_target = FindMethodTarget(ui_button_class, "OnSubmit", 1);
-    if (build_info == nullptr || uif_button_method == nullptr ||
-        button_click_target == nullptr ||
-        (pause_get_invite_btn == nullptr && pause_get_resume_btn == nullptr)) {
-        return false;
+    if (build_info == nullptr) return fail(5);
+    if (uif_button_method == nullptr) return fail(6);
+    if (button_click_target == nullptr) return fail(7);
+    if (pause_get_invite_btn == nullptr && pause_get_resume_btn == nullptr &&
+        invite_btn_field == nullptr && resume_btn_field == nullptr) {
+        return fail(8);
     }
     pause_build_target = *reinterpret_cast<void**>(build_info);
-    if (pause_build_target == nullptr) return false;
+    if (pause_build_target == nullptr) return fail(5);
     void* const open_info = FindMethodInfo(pause_screen_class, "OnOpen", 0);
     if (open_info != nullptr) pause_open_target = *reinterpret_cast<void**>(open_info);
 
@@ -1486,22 +1524,32 @@ bool MaydayAdapter::Impl::ResolvePauseMenu() {
             break;
         }
     }
-    if (core_image == nullptr) return false;
+    if (core_image == nullptr) return fail(9);
     void* const transform_class = class_from_name(core_image, "UnityEngine", "Transform");
     void* const component_class = class_from_name(core_image, "UnityEngine", "Component");
-    if (transform_class == nullptr || component_class == nullptr) return false;
+    if (transform_class == nullptr || component_class == nullptr) return fail(10);
     if (component_get_transform == nullptr) {
         component_get_transform = class_get_method(component_class, "get_transform", 0);
     }
     transform_get_parent = class_get_method(transform_class, "get_parent", 0);
     transform_get_sibling_index = class_get_method(transform_class, "GetSiblingIndex", 0);
     transform_set_sibling_index = class_get_method(transform_class, "SetSiblingIndex", 1);
-    if (component_get_transform == nullptr || transform_get_parent == nullptr ||
-        transform_get_sibling_index == nullptr ||
-        transform_set_sibling_index == nullptr) {
-        return false;
+    transform_get_child_count = class_get_method(transform_class, "get_childCount", 0);
+    component_get_gameobject = class_get_method(component_class, "get_gameObject", 0);
+    void* const game_object_class = class_from_name(core_image, "UnityEngine", "GameObject");
+    if (game_object_class != nullptr) {
+        gameobject_get_active = class_get_method(game_object_class, "get_activeSelf", 0);
     }
+    void* const rect_transform_class = class_from_name(core_image, "UnityEngine", "RectTransform");
+    if (rect_transform_class != nullptr) {
+        recttransform_get_size_delta = class_get_method(rect_transform_class, "get_sizeDelta", 0);
+    }
+    if (component_get_transform == nullptr) return fail(11);
+    if (transform_get_parent == nullptr) return fail(12);
+    if (transform_get_sibling_index == nullptr) return fail(13);
+    // SetSiblingIndex 只影响插入位置；取不到时按钮仍会追加到父节点末尾。
     pause_menu_resolved = true;
+    pause_stage.store(1, std::memory_order_release);
     return true;
 }
 
@@ -1513,32 +1561,64 @@ void MaydayAdapter::Impl::InstallPauseMenuButton(void* screen) {
     if (pause_screen == screen && pause_button.load(std::memory_order_acquire) != nullptr) {
         return;
     }
-    if (AttachedThread() == nullptr) return;
-    void* exception{};
-    void* anchor{};
-    if (pause_get_invite_btn != nullptr) {
-        anchor = runtime_invoke(pause_get_invite_btn, screen, nullptr, &exception);
-        if (exception != nullptr) {
-            exception = nullptr;
-            anchor = nullptr;
-        }
+    pause_stage.store(3, std::memory_order_release);
+    if (AttachedThread() == nullptr) {
+        pause_failure.store(9, std::memory_order_release);
+        return;
     }
-    if (anchor == nullptr && pause_get_resume_btn != nullptr) {
+    void* exception{};
+    const auto read_button_field = [](void* object, std::size_t offset) noexcept -> void* {
+        return object != nullptr && offset != 0
+            ? *reinterpret_cast<void**>(
+                  reinterpret_cast<std::uint8_t*>(object) + offset)
+            : nullptr;
+    };
+    void* anchor{};
+    // 继续游戏按钮始终位于可见的主按钮列；邀请按钮可能属于隐藏容器。
+    if (pause_get_resume_btn != nullptr) {
         anchor = runtime_invoke(pause_get_resume_btn, screen, nullptr, &exception);
         if (exception != nullptr) {
             exception = nullptr;
             anchor = nullptr;
         }
+        if (anchor != nullptr) pause_anchor.store(3, std::memory_order_release);
     }
-    if (anchor == nullptr) return;
+    if (anchor == nullptr) {
+        anchor = read_button_field(screen, resume_btn_offset);
+        if (anchor != nullptr) pause_anchor.store(4, std::memory_order_release);
+    }
+    if (anchor == nullptr && pause_get_invite_btn != nullptr) {
+        anchor = runtime_invoke(pause_get_invite_btn, screen, nullptr, &exception);
+        if (exception != nullptr) {
+            exception = nullptr;
+            anchor = nullptr;
+        }
+        if (anchor != nullptr) pause_anchor.store(1, std::memory_order_release);
+    }
+    if (anchor == nullptr) {
+        anchor = read_button_field(screen, invite_btn_offset);
+        if (anchor != nullptr) pause_anchor.store(2, std::memory_order_release);
+    }
+    if (anchor == nullptr) {
+        pause_failure.store(1, std::memory_order_release);
+        return;
+    }
+    pause_stage.store(4, std::memory_order_release);
     void* const anchor_transform =
         runtime_invoke(component_get_transform, anchor, nullptr, &exception);
-    if (exception != nullptr || anchor_transform == nullptr) return;
+    if (exception != nullptr || anchor_transform == nullptr) {
+        pause_failure.store(2, std::memory_order_release);
+        return;
+    }
     exception = nullptr;
     void* const parent =
         runtime_invoke(transform_get_parent, anchor_transform, nullptr, &exception);
-    if (exception != nullptr || parent == nullptr) return;
+    if (exception != nullptr || parent == nullptr) {
+        pause_failure.store(3, std::memory_order_release);
+        return;
+    }
     exception = nullptr;
+    pause_stage.store(5, std::memory_order_release);
 
     float height = 54.0f;
     if (ui_theme_button_height != nullptr) {
@@ -1564,12 +1644,18 @@ void MaydayAdapter::Impl::InstallPauseMenuButton(void* screen) {
         &width, &height, static_cast<void*>(glyph.data()),
         &font_size, &radius};
     void* const button = runtime_invoke(uif_button_method, nullptr, params, &exception);
-    if (exception != nullptr || button == nullptr) return;
+    if (exception != nullptr || button == nullptr) {
+        pause_failure.store(4, std::memory_order_release);
+        return;
+    }
     exception = nullptr;
+    pause_stage.store(6, std::memory_order_release);
 
     void* const button_transform =
         runtime_invoke(component_get_transform, button, nullptr, &exception);
-    if (exception == nullptr && button_transform != nullptr) {
+    if (exception == nullptr && button_transform != nullptr &&
+        transform_get_sibling_index != nullptr &&
+        transform_set_sibling_index != nullptr) {
         std::int32_t index = 0;
         if (InvokeInt(transform_get_sibling_index, anchor_transform, &index)) {
             std::int32_t next = index + 1;
@@ -1577,8 +1663,42 @@ void MaydayAdapter::Impl::InstallPauseMenuButton(void* screen) {
                 transform_set_sibling_index, button_transform, &next));
         }
     }
+    // 诊断：确认按钮对象确实激活且有非零尺寸。
+    if (component_get_gameobject != nullptr && gameobject_get_active != nullptr) {
+        void* const game_object =
+            runtime_invoke(component_get_gameobject, button, nullptr, &exception);
+        if (exception == nullptr && game_object != nullptr) {
+            void* const boxed =
+                runtime_invoke(gameobject_get_active, game_object, nullptr, &exception);
+            if (exception == nullptr && boxed != nullptr) {
+                pause_button_active.store(
+                    *reinterpret_cast<const bool*>(object_unbox(boxed)) ? 1 : 0,
+                    std::memory_order_release);
+            }
+        }
+        exception = nullptr;
+    }
+    if (recttransform_get_size_delta != nullptr && button_transform != nullptr) {
+        void* const boxed = runtime_invoke(
+            recttransform_get_size_delta, button_transform, nullptr, &exception);
+        if (exception == nullptr && boxed != nullptr) {
+            const Vec2 size = *reinterpret_cast<const Vec2*>(object_unbox(boxed));
+            pause_button_width_milli.store(
+                static_cast<int>(size.x * 1000.0F), std::memory_order_release);
+            pause_button_height_milli.store(
+                static_cast<int>(size.y * 1000.0F), std::memory_order_release);
+        }
+        exception = nullptr;
+    }
+    if (transform_get_child_count != nullptr && parent != nullptr) {
+        std::int32_t child_count = 0;
+        if (InvokeInt(transform_get_child_count, parent, &child_count)) {
+            pause_parent_children.store(child_count, std::memory_order_release);
+        }
+    }
     pause_screen = screen;
     pause_button.store(button, std::memory_order_release);
+    pause_stage.store(7, std::memory_order_release);
 }
 
 void ANOMALY_CALL MaydayAdapter::Impl::PauseBuildThunk(void* self, void* method) {
@@ -1712,6 +1832,7 @@ bool MaydayAdapter::Impl::EnsurePauseMenuHook() {
         return false;
     }
     pause_menu_hooks_installed = true;
+    pause_stage.store(2, std::memory_order_release);
     return true;
 }
 
@@ -1871,6 +1992,20 @@ std::string MaydayAdapter::DiagnosticsJson() const {
          << (impl_->freecam_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
          << ",\"inputBlockHooks\":"
          << (impl_->input_hook_installed.load(std::memory_order_acquire) ? "true" : "false")
+         << ",\"pauseStage\":" << impl_->pause_stage.load(std::memory_order_acquire)
+         << ",\"pauseFailure\":" << impl_->pause_failure.load(std::memory_order_acquire)
+         << ",\"pauseResolve\":" << impl_->pause_resolve_step.load(std::memory_order_acquire)
+         << ",\"pauseAnchor\":" << impl_->pause_anchor.load(std::memory_order_acquire)
+         << ",\"pauseButtonActive\":"
+         << impl_->pause_button_active.load(std::memory_order_acquire)
+         << ",\"pauseButtonWidth\":"
+         << impl_->pause_button_width_milli.load(std::memory_order_acquire) / 1000.0
+         << ",\"pauseButtonHeight\":"
+         << impl_->pause_button_height_milli.load(std::memory_order_acquire) / 1000.0
+         << ",\"pauseParentChildren\":"
+         << impl_->pause_parent_children.load(std::memory_order_acquire)
+         << ",\"pauseButton\":"
+         << (impl_->pause_button.load(std::memory_order_acquire) != nullptr ? "true" : "false")
          << "}";
     return json.str();
 }
