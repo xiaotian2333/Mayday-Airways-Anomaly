@@ -1262,7 +1262,6 @@ bool CompleteGraphicsInitialization(EmbeddedState& state) {
         std::scoped_lock plugin_lock(*state.plugin_mutex);
         SynchronizeHostFontScale(state);
         state.plugins->SetUiResourceRenderBackend(resource_backend);
-        state.plugins->SetNteEscMenuHostAction(anomaly::RequestHostUiManagementExpansion);
         state.plugins->SetUiService(EmbeddedUiServiceTable());
         // The PluginManager owns logical font/texture generations. Do not
         // expose a fresh renderer generation until it has acknowledged the
@@ -1633,7 +1632,6 @@ bool ReleaseGraphics(
         }
         if (state.plugins != nullptr) {
             state.plugins->SetUiResourceRenderBackend({});
-            state.plugins->SetNteEscMenuHostAction({});
             state.plugins->SetUiService(nullptr);
             state.plugins->SetImGuiContext(nullptr);
         }

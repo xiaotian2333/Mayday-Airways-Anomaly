@@ -118,7 +118,7 @@
   },
   "definitions": {
     "qualifiedId": {
-      "description": "Service or dependency identifier. Shares the segment syntax with pluginId but may carry additional namespace depth (for example anomaly.nte.player-teleport).",
+      "description": "Service or dependency identifier. Shares the segment syntax with pluginId but may carry additional namespace depth (for example mayday.money).",
       "type": "string",
       "minLength": 3,
       "maxLength": 255,

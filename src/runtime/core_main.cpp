@@ -51,11 +51,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace {
 
-
-[[nodiscard]] std::vector<std::uint8_t> LoadNteEscMenuLogoBytes() {
-    const auto& bytes = anomaly::artwork::kEscMenuLogo;
-    return {bytes.begin(), bytes.end()};
-}
 struct CoreContext {
     std::filesystem::path runtime_root;
     std::filesystem::path log_directory;
@@ -802,15 +797,6 @@ DWORD PreparePluginHost(
                         owner, generation));
                 }
             });
-        const auto esc_menu_logo = LoadNteEscMenuLogoBytes();
-        if (!plugins->InstallDefaultNteEscMenuButton(esc_menu_logo)) {
-            // The logo is a resource inside this image, and a core that was mapped without a loader -- the
-            // live-attach path -- can have its image headers hidden from module scanners, which is also
-            // what makes those resources unreadable. A missing decoration must not cost the whole runtime.
-            RuntimeLog(
-                context, anomaly::LogLevel::Warning, "plugin.host.esc_menu_button_skipped",
-                "plugin_host=esc_menu_button_skipped reason=logo-unavailable");
-        }
         plugins->LoadAll();
         PublishPluginHost(context, std::move(plugins));
         const auto published = PluginHostSnapshot(context);

@@ -6,7 +6,6 @@
 #include "anomaly/mayday_adapter.hpp"
 #include "anomaly/structured_logger.hpp"
 #include "anomaly/thread_local_value.hpp"
-#include "anomaly/ue5_nte_adapter.hpp"
 
 #include <algorithm>
 #include <bcrypt.h>

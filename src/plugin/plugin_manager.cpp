@@ -52,52 +52,6 @@ struct PluginCacheOwnerLease final {
     HANDLE value{INVALID_HANDLE_VALUE};
 };
 
-struct NteEscMenuButtonRegistry final {
-    struct Registration final {
-        std::shared_ptr<anomaly::PluginScope> scope;
-        std::uint64_t token{};
-        std::uint64_t ledger_token{};
-        std::uint64_t sequence{};
-        std::string id;
-        std::string label;
-        std::uint32_t icon_format{};
-        std::vector<std::uint8_t> icon_bytes;
-        AnomalyNteEscMenuButtonCallbackV1 callback{};
-        void* callback_user{};
-        std::atomic_bool active{true};
-    };
-
-    std::mutex mutex;
-    std::unordered_map<std::uint64_t, std::shared_ptr<Registration>> registrations;
-    std::uint64_t next_handle_id{1};
-    std::uint64_t next_sequence{1};
-    std::function<void()> host_action;
-};
-
-struct AhudProxyState;
-
-struct AhudProxyRegistration final {
-    std::shared_ptr<anomaly::PluginScope> scope;
-    std::weak_ptr<AhudProxyState> state;
-    PluginManager* manager{};
-    std::uint64_t generation{};
-    std::uint64_t ledger_token{};
-    AnomalyGenerationHandleV1 proxy_handle{};
-    const AnomalyUe5AhudServiceV1* service{};
-    AnomalyGenerationHandleV1 service_handle{};
-    AnomalyUe5AhudDrawCallbackV1 callback{};
-    void* callback_user{};
-    std::atomic_bool active{};
-    std::atomic_bool revoked{};
-    std::atomic<std::uint32_t> revoke_status{ANOMALY_STATUS_V1_OK};
-};
-
-struct AhudProxyState final {
-    std::mutex mutex;
-    std::unordered_map<std::uint64_t, std::shared_ptr<AhudProxyRegistration>> registrations;
-    std::uint64_t next_handle_id{1};
-};
-
 namespace {
 
 PluginManager* g_manager{};
@@ -111,10 +65,7 @@ anomaly::ThreadLocalScalar<bool> g_lifecycle_callback;
 anomaly::ThreadLocalScalar<std::unique_lock<std::mutex>*> g_lifecycle_plugin_lock;
 
 constexpr std::wstring_view kPluginCacheOwnerFile{L".owner.lock"};
-constexpr std::size_t kMaximumNteEscMenuButtonIconBytes = 1024U * 1024U;
 constexpr std::chrono::milliseconds kEnablementStopTimeout{5000};
-constexpr std::array<std::uint8_t, 8> kPngSignature{
-    0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU};
 
 std::unique_ptr<anomaly::ScopedPlatformServices> CreatePlatformServices(
     anomaly::CoreMemoryServices memory_services,
@@ -126,11 +77,6 @@ std::unique_ptr<anomaly::ScopedPlatformServices> CreatePlatformServices(
     }
     return std::make_unique<anomaly::ScopedPlatformServices>(
         std::move(memory_services), std::move(ledger));
-}
-
-std::uint32_t ANOMALY_CALL ExpandAnomalyFromNteEscMenu(
-    void*, AnomalyGenerationHandleV1) noexcept {
-    return ANOMALY_NTE_ESC_MENU_BUTTON_RESULT_V1_EXPAND_ANOMALY;
 }
 
 std::optional<DWORD> CacheDirectoryProcessId(const std::filesystem::path& directory) noexcept {
@@ -1626,7 +1572,6 @@ struct PluginServiceContext {
     AnomalyIpcServiceV1 ipc_service{};
     AnomalyCommandsServiceV1 commands{};
     AnomalyNotificationsServiceV1 notifications{};
-    AnomalyNteEscMenuButtonServiceV1 nte_esc_menu_button{};
     AnomalySignatureServiceV1 signature{};
     AnomalySignatureServiceV2 signature_v2{};
     AnomalySignatureServiceV3 signature_v3{};
@@ -1639,8 +1584,6 @@ struct PluginServiceContext {
     AnomalyFontServiceV1 font{};
     AnomalyTextureServiceV1 texture{};
     AnomalyInputServiceV1 input_service{};
-    std::shared_ptr<AhudProxyState> ahud_state;
-    AnomalyUe5AhudServiceV1 ahud{};
     std::mutex json_mutex;
     std::unordered_map<std::uint64_t, JsonNode> json_nodes;
     std::vector<anomaly::UiResourceHandle> open_windows;
@@ -1663,197 +1606,6 @@ bool ValidServiceContext(const PluginServiceContext* context) noexcept {
         context->scope != nullptr &&
         context->generation == context->scope->Generation() &&
         context->plugin_id == context->scope->Owner();
-}
-
-constexpr std::size_t kAhudServiceV1Size =
-    offsetof(AnomalyUe5AhudServiceV1, unsubscribe) +
-    sizeof(AnomalyUe5AhudServiceV1::unsubscribe);
-
-bool ValidAhudServiceV1(const AnomalyUe5AhudServiceV1* service) noexcept {
-    return service != nullptr && service->struct_size >= kAhudServiceV1Size &&
-        service->service_version >= ANOMALY_UE5_AHUD_SERVICE_V1_VERSION &&
-        service->subscribe != nullptr && service->unsubscribe != nullptr;
-}
-
-const AnomalyUe5AhudServiceV1* QueryAhudServiceV1() noexcept {
-    const void* service = anomaly::ProcessAdapterServices().Query(
-        ANOMALY_UE5_AHUD_SERVICE_V1_ID,
-        ANOMALY_UE5_AHUD_SERVICE_V1_VERSION);
-    const auto* ahud = static_cast<const AnomalyUe5AhudServiceV1*>(service);
-    return ValidAhudServiceV1(ahud) ? ahud : nullptr;
-}
-
-void RevokeAhudRegistration(
-    const std::shared_ptr<AhudProxyRegistration>& registration) noexcept {
-    if (registration == nullptr || registration->revoked.exchange(true)) return;
-    registration->active.store(false, std::memory_order_release);
-    if (ValidAhudServiceV1(registration->service)) {
-        try {
-            const AnomalyStatusV1 status = registration->service->unsubscribe(
-                registration->service->user, registration->service_handle);
-            registration->revoke_status.store(status.code, std::memory_order_release);
-        } catch (...) {
-            registration->revoke_status.store(
-                ANOMALY_STATUS_V1_FAILED, std::memory_order_release);
-        }
-    }
-    if (const auto state = registration->state.lock()) {
-        std::scoped_lock lock(state->mutex);
-        const auto found = state->registrations.find(registration->proxy_handle.id);
-        if (found != state->registrations.end() && found->second == registration) {
-            state->registrations.erase(found);
-        }
-    }
-}
-
-void ANOMALY_CALL InvokeAhudDrawCallbackV1(
-    void* user, const AnomalyUe5AhudFrameV1* frame) noexcept {
-    auto* const candidate = static_cast<AhudProxyRegistration*>(user);
-    if (candidate == nullptr) return;
-    const auto state = candidate->state.lock();
-    if (state == nullptr) return;
-    std::shared_ptr<AhudProxyRegistration> registration;
-    {
-        std::scoped_lock lock(state->mutex);
-        const auto found = state->registrations.find(candidate->proxy_handle.id);
-        if (found == state->registrations.end() || found->second.get() != candidate) {
-            return;
-        }
-        registration = found->second;
-    }
-    if (!registration->active.load(std::memory_order_acquire) ||
-        registration->scope == nullptr || registration->callback == nullptr) {
-        return;
-    }
-    auto callback = registration->scope->AcquireCallback(registration->generation);
-    if (!callback || !registration->active.load(std::memory_order_acquire)) return;
-    const ScopedLogThreadDomain log_domain(anomaly::LogThreadDomain::Game);
-    ScopedPluginCallback callback_scope(
-        registration->scope, registration->generation, false);
-    try {
-        registration->callback(registration->callback_user, frame);
-    } catch (...) {
-        if (registration->manager != nullptr) {
-            try {
-                registration->manager->LogPlugin(
-                    ANOMALY_CORE_LOG_LEVEL_V1_ERROR,
-                    "exception in ABI v1 AHUD callback",
-                    registration->scope->Owner(), registration->generation);
-            } catch (...) {
-            }
-        }
-    }
-}
-
-AnomalyStatusV1 ANOMALY_CALL SubscribeAhudV1(
-    void* user, AnomalyUe5AhudDrawCallbackV1 callback, void* callback_user,
-    AnomalyGenerationHandleV1* handle) noexcept {
-    if (handle == nullptr || callback == nullptr) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_INVALID_ARGUMENT,
-            "AHUD subscription arguments are invalid");
-    }
-    *handle = {};
-    auto* const context = static_cast<PluginServiceContext*>(user);
-    if (!ValidServiceContext(context) || context->ahud_state == nullptr) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_INVALID_ARGUMENT,
-            "plugin AHUD service context is invalid");
-    }
-    auto service_callback = AcquireServiceCallback(context);
-    if (!service_callback) {
-        return StatusV1(ANOMALY_STATUS_V1_UNAVAILABLE, "plugin scope is stopping");
-    }
-    const AnomalyUe5AhudServiceV1* const service = QueryAhudServiceV1();
-    if (service == nullptr) {
-        return StatusV1(ANOMALY_STATUS_V1_UNAVAILABLE, "AHUD service is not ready");
-    }
-    std::shared_ptr<AhudProxyRegistration> registration;
-    bool subscribed{};
-    try {
-        registration = std::make_shared<AhudProxyRegistration>();
-        registration->scope = context->scope;
-        registration->state = context->ahud_state;
-        registration->manager = context->manager;
-        registration->generation = context->generation;
-        registration->service = service;
-        registration->callback = callback;
-        registration->callback_user = callback_user;
-
-        AnomalyStatusV1 status = service->subscribe(
-            service->user, InvokeAhudDrawCallbackV1, registration.get(),
-            &registration->service_handle);
-        if (status.code != ANOMALY_STATUS_V1_OK) return status;
-        subscribed = true;
-        if (registration->service_handle.id == 0) {
-            RevokeAhudRegistration(registration);
-            return StatusV1(
-                ANOMALY_STATUS_V1_FAILED,
-                "AHUD service returned an invalid subscription handle");
-        }
-
-        {
-            std::scoped_lock lock(context->ahud_state->mutex);
-            std::uint64_t id = context->ahud_state->next_handle_id++;
-            if (id == 0) id = context->ahud_state->next_handle_id++;
-            registration->proxy_handle = {id, context->generation};
-            context->ahud_state->registrations.emplace(id, registration);
-        }
-        registration->active.store(true, std::memory_order_release);
-        registration->ledger_token = context->scope->Register(
-            anomaly::PluginResourceKind::Subscription,
-            "ue5.ahud.draw",
-            [registration] { RevokeAhudRegistration(registration); });
-        if (registration->ledger_token == 0) {
-            RevokeAhudRegistration(registration);
-            return StatusV1(ANOMALY_STATUS_V1_UNAVAILABLE, "plugin scope is stopping");
-        }
-        if (registration->revoked.load(std::memory_order_acquire)) {
-            return StatusV1(ANOMALY_STATUS_V1_UNAVAILABLE, "plugin scope is stopping");
-        }
-        *handle = registration->proxy_handle;
-        return StatusV1(ANOMALY_STATUS_V1_OK);
-    } catch (...) {
-        if (subscribed) RevokeAhudRegistration(registration);
-        return StatusV1(ANOMALY_STATUS_V1_FAILED, "AHUD subscription failed");
-    }
-}
-
-AnomalyStatusV1 ANOMALY_CALL UnsubscribeAhudV1(
-    void* user, const AnomalyGenerationHandleV1 handle) noexcept {
-    auto* const context = static_cast<PluginServiceContext*>(user);
-    if (!ValidServiceContext(context) || context->ahud_state == nullptr ||
-        handle.id == 0 || handle.generation != context->generation) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_INVALID_ARGUMENT,
-            "AHUD subscription handle is invalid");
-    }
-    auto service_callback = AcquireServiceCallback(context);
-    if (!service_callback) {
-        return StatusV1(ANOMALY_STATUS_V1_UNAVAILABLE, "plugin scope is stopping");
-    }
-    std::shared_ptr<AhudProxyRegistration> registration;
-    {
-        std::scoped_lock lock(context->ahud_state->mutex);
-        const auto found = context->ahud_state->registrations.find(handle.id);
-        if (found == context->ahud_state->registrations.end() ||
-            found->second->proxy_handle.generation != handle.generation) {
-            return StatusV1(
-                ANOMALY_STATUS_V1_NOT_FOUND,
-                "AHUD subscription is not registered");
-        }
-        registration = found->second;
-    }
-    if (!context->scope->Release(registration->ledger_token)) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_NOT_FOUND,
-            "AHUD subscription is not registered");
-    }
-    const std::uint32_t revoke_status =
-        registration->revoke_status.load(std::memory_order_acquire);
-    return revoke_status == ANOMALY_STATUS_V1_OK
-        ? StatusV1(ANOMALY_STATUS_V1_OK)
-        : StatusV1(revoke_status, "AHUD provider rejected unsubscription");
 }
 
 bool IsActiveDrawResourceCallback(const PluginServiceContext& context) noexcept {
@@ -2615,23 +2367,6 @@ AnomalyStatusV1 ANOMALY_CALL DismissNotificationV1(
     void* user, AnomalyGenerationHandleV1 handle) {
     return InvokeScopedPlatform(user, [&](PluginServiceContext& context) {
         return context.platform->DismissNotification(ScopedPlatformOwner(context), handle);
-    });
-}
-
-AnomalyStatusV1 ANOMALY_CALL RegisterNteEscMenuButtonV1(
-    void* user, const AnomalyNteEscMenuButtonSpecV1* spec,
-    AnomalyNteEscMenuButtonCallbackV1 callback, void* callback_user,
-    AnomalyGenerationHandleV1* handle) {
-    return InvokeScopedPlatform(user, [&](PluginServiceContext& context) {
-        return context.manager->RegisterNteEscMenuButton(
-            context.scope, spec, callback, callback_user, handle);
-    });
-}
-
-AnomalyStatusV1 ANOMALY_CALL UnregisterNteEscMenuButtonV1(
-    void* user, AnomalyGenerationHandleV1 handle) {
-    return InvokeScopedPlatform(user, [&](PluginServiceContext& context) {
-        return context.manager->UnregisterNteEscMenuButton(context.scope, handle);
     });
 }
 
@@ -3712,11 +3447,6 @@ AnomalyStatusV1 ANOMALY_CALL QueryServiceV1(
         *service = &context->notifications;
         return StatusV1(ANOMALY_STATUS_V1_OK);
     }
-    if (id == ANOMALY_NTE_ESC_MENU_BUTTON_SERVICE_V1_ID &&
-        minimum_version <= context->nte_esc_menu_button.service_version) {
-        *service = &context->nte_esc_menu_button;
-        return StatusV1(ANOMALY_STATUS_V1_OK);
-    }
     if (id == ANOMALY_SIGNATURE_SERVICE_V3_ID && minimum_version == ANOMALY_SIGNATURE_SERVICE_V3_VERSION) {
         *service = &context->signature_v3;
         return StatusV1(ANOMALY_STATUS_V1_OK);
@@ -3758,20 +3488,6 @@ AnomalyStatusV1 ANOMALY_CALL QueryServiceV1(
     if (id == ANOMALY_INPUT_SERVICE_V1_ID &&
         minimum_version <= context->input_service.service_version) {
         *service = &context->input_service;
-        return StatusV1(ANOMALY_STATUS_V1_OK);
-    }
-    if (id == ANOMALY_UE5_AHUD_SERVICE_V1_ID) {
-        if (minimum_version > ANOMALY_UE5_AHUD_SERVICE_V1_VERSION) {
-            return StatusV1(
-                ANOMALY_STATUS_V1_UNAVAILABLE,
-                "requested AHUD version is not available");
-        }
-        if (QueryAhudServiceV1() == nullptr) {
-            return StatusV1(
-                ANOMALY_STATUS_V1_UNAVAILABLE,
-                "AHUD service is not ready");
-        }
-        *service = &context->ahud;
         return StatusV1(ANOMALY_STATUS_V1_OK);
     }
     if (id == ANOMALY_UI_SERVICE_V1_ID) {
@@ -4116,8 +3832,7 @@ PluginManager::PluginManager(
        lifecycle_ledger_(std::make_shared<anomaly::ResourceLedger>()),
       platform_services_(CreatePlatformServices(
           memory_services_, lifecycle_ledger_, std::move(hook_backend))),
-      ipc_registry_(std::make_unique<anomaly::IpcRegistry>(std::move(ipc_post))),
-      nte_esc_menu_buttons_(std::make_shared<NteEscMenuButtonRegistry>()) {
+      ipc_registry_(std::make_unique<anomaly::IpcRegistry>(std::move(ipc_post))) {
     if (g_manager != nullptr || g_process_quarantined) {
         throw std::logic_error("only one PluginManager may be active at a time");
     }
@@ -4135,12 +3850,6 @@ PluginManager::~PluginManager() {
     enablement_file_watcher_.Stop();
     SavePersistentUiWindowState(true);
     UnloadAll();
-    if (host_nte_esc_menu_scope_ != nullptr) {
-        static_cast<void>(host_nte_esc_menu_scope_->BeginStop(std::chrono::seconds(1)));
-        static_cast<void>(host_nte_esc_menu_scope_->RevokeAll());
-        host_nte_esc_menu_button_ = {};
-        host_nte_esc_menu_scope_.reset();
-    }
     // A quarantined generation can still be executing inside its DLL.  Retain
     // the broker too, so that a late callback cannot dereference a stale
     // service context while the process is winding down.
@@ -4215,241 +3924,6 @@ void PluginManager::RunPluginLoadStep(std::function<void()> operation) {
 
 void PluginManager::Log(AnomalyCoreLogLevelV1 level, std::string message) {
     LogImpl(level, std::move(message), {}, 0);
-}
-
-void PluginManager::SetNteEscMenuHostAction(std::function<void()> action) noexcept {
-    try {
-        std::scoped_lock lock(nte_esc_menu_buttons_->mutex);
-        nte_esc_menu_buttons_->host_action = std::move(action);
-    } catch (...) {
-    }
-}
-
-bool PluginManager::InstallDefaultNteEscMenuButton(
-    const std::span<const std::uint8_t> png_bytes) noexcept {
-    if (host_nte_esc_menu_scope_ != nullptr || png_bytes.empty() ||
-        png_bytes.size() > kMaximumNteEscMenuButtonIconBytes ||
-        png_bytes.size() < kPngSignature.size() ||
-        !std::ranges::equal(kPngSignature, png_bytes.first(kPngSignature.size()))) {
-        return false;
-    }
-    try {
-        auto scope = std::make_shared<anomaly::PluginScope>(
-            lifecycle_ledger_, "anomaly.host.nte-esc-menu", 1);
-        const AnomalyNteEscMenuButtonSpecV1 spec{
-            sizeof(spec), ANOMALY_NTE_ESC_MENU_BUTTON_V1_NONE,
-            {"anomaly.management", std::string_view("anomaly.management").size()},
-            {"Anomaly", std::string_view("Anomaly").size()},
-            ANOMALY_NTE_ESC_MENU_BUTTON_ICON_V1_PNG, 0,
-            {png_bytes.data(), png_bytes.size()}};
-        AnomalyGenerationHandleV1 handle{};
-        const AnomalyStatusV1 status = RegisterNteEscMenuButton(
-            scope, &spec, ExpandAnomalyFromNteEscMenu, nullptr, &handle);
-        if (status.code != ANOMALY_STATUS_V1_OK) {
-            static_cast<void>(scope->BeginStop(std::chrono::milliseconds::zero()));
-            static_cast<void>(scope->RevokeAll());
-            return false;
-        }
-        host_nte_esc_menu_scope_ = std::move(scope);
-        host_nte_esc_menu_button_ = handle;
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-AnomalyStatusV1 PluginManager::RegisterNteEscMenuButton(
-    const std::shared_ptr<anomaly::PluginScope>& scope,
-    const AnomalyNteEscMenuButtonSpecV1* spec,
-    const AnomalyNteEscMenuButtonCallbackV1 callback, void* callback_user,
-    AnomalyGenerationHandleV1* handle) noexcept {
-    if (handle != nullptr) *handle = {};
-    if (scope == nullptr || spec == nullptr || spec->struct_size < sizeof(*spec) ||
-        spec->flags != ANOMALY_NTE_ESC_MENU_BUTTON_V1_NONE || callback == nullptr ||
-        handle == nullptr || spec->id.data == nullptr || spec->id.size == 0 ||
-        spec->id.size > 128 || spec->label.data == nullptr || spec->label.size == 0 ||
-        spec->label.size > 256 || spec->reserved != 0 ||
-        (spec->icon_format != ANOMALY_NTE_ESC_MENU_BUTTON_ICON_V1_NONE &&
-            spec->icon_format != ANOMALY_NTE_ESC_MENU_BUTTON_ICON_V1_PNG) ||
-        spec->icon_bytes.size > kMaximumNteEscMenuButtonIconBytes ||
-        (spec->icon_format == ANOMALY_NTE_ESC_MENU_BUTTON_ICON_V1_NONE &&
-            spec->icon_bytes.size != 0) ||
-        (spec->icon_format == ANOMALY_NTE_ESC_MENU_BUTTON_ICON_V1_PNG &&
-            (spec->icon_bytes.data == nullptr ||
-                spec->icon_bytes.size < kPngSignature.size() ||
-                !std::equal(
-                    kPngSignature.begin(), kPngSignature.end(), spec->icon_bytes.data)))) {
-        return StatusV1(ANOMALY_STATUS_V1_INVALID_ARGUMENT);
-    }
-    const std::string_view id(spec->id.data, spec->id.size);
-    const std::string_view label(spec->label.data, spec->label.size);
-    if (id.find('\0') != std::string_view::npos || label.find('\0') != std::string_view::npos) {
-        return StatusV1(ANOMALY_STATUS_V1_INVALID_ARGUMENT);
-    }
-    try {
-        auto registration = std::make_shared<NteEscMenuButtonRegistry::Registration>();
-        registration->scope = scope;
-        registration->id = std::string(id);
-        registration->label = std::string(label);
-        registration->icon_format = spec->icon_format;
-        if (spec->icon_bytes.size != 0) {
-            registration->icon_bytes.assign(
-                spec->icon_bytes.data, spec->icon_bytes.data + spec->icon_bytes.size);
-        }
-        registration->callback = callback;
-        registration->callback_user = callback_user;
-        std::scoped_lock lock(nte_esc_menu_buttons_->mutex);
-        const bool duplicate = std::ranges::any_of(
-            nte_esc_menu_buttons_->registrations, [&](const auto& entry) {
-                return entry.second != nullptr &&
-                    entry.second->active.load(std::memory_order_acquire) &&
-                    entry.second->scope->Owner() == scope->Owner() &&
-                    entry.second->id == id;
-            });
-        if (duplicate) {
-            return StatusV1(
-                ANOMALY_STATUS_V1_CONFLICT,
-                "NTE ESC menu button id is already registered");
-        }
-        registration->token = nte_esc_menu_buttons_->next_handle_id++;
-        registration->sequence = nte_esc_menu_buttons_->next_sequence++;
-        const std::weak_ptr<NteEscMenuButtonRegistry> weak_registry = nte_esc_menu_buttons_;
-        const std::weak_ptr<NteEscMenuButtonRegistry::Registration> weak_registration =
-            registration;
-        registration->ledger_token = scope->Register(
-            anomaly::PluginResourceKind::NteEscMenuButton,
-            "nte-esc-menu-button:" + registration->id,
-            [weak_registry, weak_registration] {
-                const auto registration = weak_registration.lock();
-                if (registration == nullptr) return;
-                registration->active.store(false, std::memory_order_release);
-                const auto registry = weak_registry.lock();
-                if (registry == nullptr) return;
-                std::scoped_lock registration_lock(registry->mutex);
-                registry->registrations.erase(registration->token);
-            });
-        if (registration->ledger_token == 0) {
-            return StatusV1(ANOMALY_STATUS_V1_UNAVAILABLE, "plugin scope is stopping");
-        }
-        nte_esc_menu_buttons_->registrations.emplace(registration->token, registration);
-        *handle = {registration->token, scope->Generation()};
-        return StatusV1(ANOMALY_STATUS_V1_OK);
-    } catch (...) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_FAILED,
-            "NTE ESC menu button registration failed");
-    }
-}
-
-AnomalyStatusV1 PluginManager::UnregisterNteEscMenuButton(
-    const std::shared_ptr<anomaly::PluginScope>& scope,
-    const AnomalyGenerationHandleV1 handle) noexcept {
-    if (scope == nullptr || handle.id == 0 || handle.generation != scope->Generation()) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_NOT_FOUND,
-            "NTE ESC menu button handle is stale");
-    }
-    std::shared_ptr<NteEscMenuButtonRegistry::Registration> registration;
-    {
-        std::scoped_lock lock(nte_esc_menu_buttons_->mutex);
-        const auto found = nte_esc_menu_buttons_->registrations.find(handle.id);
-        if (found != nte_esc_menu_buttons_->registrations.end()) registration = found->second;
-    }
-    if (registration == nullptr || registration->scope != scope) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_NOT_FOUND,
-            "NTE ESC menu button handle is stale");
-    }
-    return scope->Release(registration->ledger_token)
-        ? StatusV1(ANOMALY_STATUS_V1_OK)
-        : StatusV1(
-              ANOMALY_STATUS_V1_NOT_FOUND,
-              "NTE ESC menu button handle is stale");
-}
-
-std::vector<anomaly::NteEscMenuButtonSnapshot> PluginManager::NteEscMenuButtons() const {
-    struct Entry final {
-        anomaly::NteEscMenuButtonSnapshot snapshot;
-        std::uint64_t sequence{};
-    };
-    std::vector<Entry> entries;
-    {
-        std::scoped_lock lock(nte_esc_menu_buttons_->mutex);
-        entries.reserve(nte_esc_menu_buttons_->registrations.size());
-        for (const auto& [token, registration] : nte_esc_menu_buttons_->registrations) {
-            if (registration == nullptr ||
-                !registration->active.load(std::memory_order_acquire)) {
-                continue;
-            }
-            entries.push_back({{{token, registration->scope->Generation()},
-                registration->id, registration->label, registration->icon_format,
-                registration->icon_bytes}, registration->sequence});
-        }
-    }
-    std::ranges::sort(entries, {}, &Entry::sequence);
-    std::vector<anomaly::NteEscMenuButtonSnapshot> result;
-    result.reserve(entries.size());
-    for (auto& entry : entries) result.push_back(std::move(entry.snapshot));
-    return result;
-}
-
-AnomalyStatusV1 PluginManager::InvokeNteEscMenuButton(
-    const AnomalyGenerationHandleV1 handle) noexcept {
-    std::shared_ptr<NteEscMenuButtonRegistry::Registration> registration;
-    {
-        std::scoped_lock lock(nte_esc_menu_buttons_->mutex);
-        const auto found = nte_esc_menu_buttons_->registrations.find(handle.id);
-        if (found != nte_esc_menu_buttons_->registrations.end()) registration = found->second;
-    }
-    if (registration == nullptr ||
-        handle.generation != registration->scope->Generation() ||
-        !registration->active.load(std::memory_order_acquire)) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_NOT_FOUND,
-            "NTE ESC menu button handle is stale");
-    }
-    auto lease = registration->scope->AcquireCallback(handle.generation);
-    if (!lease) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_UNAVAILABLE,
-            "NTE ESC menu button owner is stopping");
-    }
-    std::uint32_t result{};
-    try {
-        ScopedPluginCallback callback_scope(
-            registration->scope, registration->scope->Generation(), false);
-        result = registration->callback(registration->callback_user, handle);
-    } catch (...) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_FAILED,
-            "NTE ESC menu button callback raised an exception");
-    }
-    if (result == ANOMALY_NTE_ESC_MENU_BUTTON_RESULT_V1_NONE) {
-        return StatusV1(ANOMALY_STATUS_V1_OK);
-    }
-    if (result != ANOMALY_NTE_ESC_MENU_BUTTON_RESULT_V1_EXPAND_ANOMALY) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_INVALID_ARGUMENT,
-            "NTE ESC menu button returned an unknown result");
-    }
-    std::function<void()> host_action;
-    {
-        std::scoped_lock lock(nte_esc_menu_buttons_->mutex);
-        host_action = nte_esc_menu_buttons_->host_action;
-    }
-    if (!host_action) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_UNAVAILABLE,
-            "Anomaly management UI is not ready");
-    }
-    try {
-        host_action();
-        return StatusV1(ANOMALY_STATUS_V1_OK);
-    } catch (...) {
-        return StatusV1(
-            ANOMALY_STATUS_V1_FAILED,
-            "Anomaly management UI action failed");
-    }
 }
 
 void PluginManager::LogPlugin(
@@ -4667,11 +4141,6 @@ bool PluginManager::Activate(LoadedPlugin& plugin) {
     plugin.service_context.notifications = {
         sizeof(AnomalyNotificationsServiceV1), ANOMALY_NOTIFICATIONS_SERVICE_V1_VERSION,
         &plugin.service_context, PostNotificationV1, DismissNotificationV1};
-    plugin.service_context.nte_esc_menu_button = {
-        sizeof(AnomalyNteEscMenuButtonServiceV1),
-        ANOMALY_NTE_ESC_MENU_BUTTON_SERVICE_V1_VERSION,
-        &plugin.service_context,
-        RegisterNteEscMenuButtonV1, UnregisterNteEscMenuButtonV1};
     plugin.service_context.signature = {
         sizeof(AnomalySignatureServiceV1), ANOMALY_SIGNATURE_SERVICE_V1_VERSION,
         &plugin.service_context, ResolveSignatureV1};
@@ -4706,12 +4175,6 @@ bool PluginManager::Activate(LoadedPlugin& plugin) {
         &plugin.service_context,
         InputSnapshotV1, WasPressedV1, RegisterHotkeyV1, ReleaseHotkeyV1, InputCaptureStateV1,
         InputMouseDeltaV1};
-    if (plugin.service_context.ahud_state == nullptr) {
-        plugin.service_context.ahud_state = std::make_shared<AhudProxyState>();
-    }
-    plugin.service_context.ahud = {
-        sizeof(AnomalyUe5AhudServiceV1), ANOMALY_UE5_AHUD_SERVICE_V1_VERSION,
-        &plugin.service_context, SubscribeAhudV1, UnsubscribeAhudV1};
     plugin.service_context.ui = &plugin.ui_proxy;
     plugin.host_api = {
         sizeof(AnomalyHostApiV1), ANOMALY_PLUGIN_API_V1_MAJOR, ANOMALY_PLUGIN_API_V1_MINOR,
@@ -6660,8 +6123,6 @@ PluginRuntimeDiagnosticsSnapshot PluginManager::DiagnosticsSnapshot() const {
                     plugin.service_context.commands.service_version, true},
                 ServiceCandidate{ANOMALY_NOTIFICATIONS_SERVICE_V1_ID,
                     plugin.service_context.notifications.service_version, true},
-                ServiceCandidate{ANOMALY_NTE_ESC_MENU_BUTTON_SERVICE_V1_ID,
-                    plugin.service_context.nte_esc_menu_button.service_version, true},
                 ServiceCandidate{ANOMALY_SIGNATURE_SERVICE_V1_ID,
                     plugin.service_context.signature_v3.service_version, true},
                 ServiceCandidate{ANOMALY_HOOK_SERVICE_V1_ID,
@@ -6717,9 +6178,6 @@ PluginRuntimeDiagnosticsSnapshot PluginManager::DiagnosticsSnapshot() const {
                         break;
                     case anomaly::PluginResourceKind::Ipc:
                         ++diagnostics.resources.ipc_resources;
-                        break;
-                    case anomaly::PluginResourceKind::NteEscMenuButton:
-                        ++diagnostics.resources.nte_esc_menu_buttons;
                         break;
                     default:
                         break;
@@ -6830,7 +6288,6 @@ std::string PluginManager::DiagnosticsJson() const {
             ",\"fonts\":" + std::to_string(resources.fonts) +
             ",\"textures\":" + std::to_string(resources.textures) +
             ",\"hotkeys\":" + std::to_string(resources.hotkeys) +
-            ",\"nteEscMenuButtons\":" + std::to_string(resources.nte_esc_menu_buttons) +
             "},\"queuedTasks\":" + std::to_string(platform.queued_tasks) +
             ",\"callbacks\":{\"updateSlow\":" +
                 std::to_string(plugin.update_metrics.slow_calls) +

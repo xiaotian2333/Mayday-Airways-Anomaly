@@ -7,7 +7,6 @@
 #include "anomaly/plugin_enablement.hpp"
 #include "anomaly/input_service.hpp"
 #include "anomaly/ipc_registry.hpp"
-#include "anomaly/nte_esc_menu_button.hpp"
 #include "anomaly/plugin_scope.hpp"
 #include "anomaly/plugin_shadow_store.hpp"
 #include "anomaly/pattern_service.hpp"
@@ -39,7 +38,6 @@ namespace ue5mem {
 
 struct UiResourceWorkerGate;
 struct PluginCacheOwnerLease;
-struct NteEscMenuButtonRegistry;
 
 struct PluginUsageObservation {
     std::string id;
@@ -74,7 +72,6 @@ struct PluginResourceCountsView {
     std::size_t fonts{};
     std::size_t textures{};
     std::size_t hotkeys{};
-    std::size_t nte_esc_menu_buttons{};
 };
 
 struct PluginScopedCallbackMetricsView {
@@ -220,9 +217,6 @@ public:
     void Draw(void* imgui_context);
     void SetImGuiContext(void* imgui_context) noexcept;
     void SetUiService(const AnomalyUiServiceV1* service);
-    void SetNteEscMenuHostAction(std::function<void()> action) noexcept;
-    [[nodiscard]] bool InstallDefaultNteEscMenuButton(
-        std::span<const std::uint8_t> png_bytes) noexcept;
     // Must be set before LoadAll; locale and plugin catalogs are frozen per generation.
     void SetTranslator(std::shared_ptr<const anomaly::Translator> translator) noexcept;
     // Render ingress publishes host-normalized state. Persistent input state is
@@ -289,18 +283,6 @@ public:
         std::string_view plugin_id,
         std::uint64_t generation);
 
-    [[nodiscard]] AnomalyStatusV1 RegisterNteEscMenuButton(
-        const std::shared_ptr<anomaly::PluginScope>& scope,
-        const AnomalyNteEscMenuButtonSpecV1* spec,
-        AnomalyNteEscMenuButtonCallbackV1 callback, void* callback_user,
-        AnomalyGenerationHandleV1* handle) noexcept;
-    [[nodiscard]] AnomalyStatusV1 UnregisterNteEscMenuButton(
-        const std::shared_ptr<anomaly::PluginScope>& scope,
-        AnomalyGenerationHandleV1 handle) noexcept;
-    [[nodiscard]] AnomalyStatusV1 InvokeNteEscMenuButton(
-        AnomalyGenerationHandleV1 handle) noexcept;
-    [[nodiscard]] std::vector<anomaly::NteEscMenuButtonSnapshot>
-        NteEscMenuButtons() const;
 
 private:
     struct LoadedPlugin;
@@ -351,9 +333,6 @@ private:
         std::make_shared<anomaly::ResourceLedger>();
     std::unique_ptr<anomaly::ScopedPlatformServices> platform_services_;
     std::unique_ptr<anomaly::IpcRegistry> ipc_registry_;
-    std::shared_ptr<NteEscMenuButtonRegistry> nte_esc_menu_buttons_;
-    std::shared_ptr<anomaly::PluginScope> host_nte_esc_menu_scope_;
-    AnomalyGenerationHandleV1 host_nte_esc_menu_button_{};
     std::vector<std::unique_ptr<LoadedPlugin>> plugins_;
     std::vector<std::unique_ptr<LoadedPlugin>> quarantined_plugins_;
     mutable std::mutex events_mutex_;

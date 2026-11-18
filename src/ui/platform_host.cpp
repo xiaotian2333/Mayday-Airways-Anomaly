@@ -12,7 +12,6 @@
 #include "anomaly/plugin_scope.hpp"
 #include "anomaly/ui_resource_decoder.hpp"
 #include "anomaly/ui_resource_registry.hpp"
-#include "anomaly/ue5_nte_adapter.hpp"
 #include "anomaly/mayday_adapter.hpp"
 #include "plugin_manager.hpp"
 
@@ -9102,7 +9101,6 @@ void RunPlatform(
             } else {
                 try {
                     if (plugin_service_published) {
-                        plugins.SetNteEscMenuHostAction({});
                         plugins.SetUiService(nullptr);
                         plugin_service_published = false;
                     }
@@ -9278,7 +9276,6 @@ void RunPlatform(
         plugin_context_published = true;
         plugins.SetImGuiContext(ImGui::GetCurrentContext());
         plugin_service_published = true;
-        plugins.SetNteEscMenuHostAction(anomaly::RequestHostUiManagementExpansion);
         plugins.SetUiService(anomaly::HostUiServiceTable());
     }
     // Match the embedded renderer: the native host remains available while
