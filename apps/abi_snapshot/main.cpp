@@ -1367,7 +1367,6 @@ std::string BuildSnapshot() {
         ANOMALY_INPUT_SERVICE_V1_VERSION, "AnomalyInputServiceV1", false);
     AppendService(output, ANOMALY_LOCALIZATION_SERVICE_V1_ID,
         ANOMALY_LOCALIZATION_SERVICE_V1_VERSION, "AnomalyLocalizationServiceV1", false);
-    AppendService(output, ANOMALY_MODS_SERVICE_V1_ID, ANOMALY_MODS_SERVICE_V1_VERSION, "AnomalyModsServiceV1", false);
     AppendService(output, ANOMALY_MAYDAY_MONEY_SERVICE_V1_ID,
         ANOMALY_MAYDAY_MONEY_SERVICE_V1_VERSION, "AnomalyMaydayMoneyServiceV1", false);
     AppendService(output, ANOMALY_MAYDAY_FREECAM_SERVICE_V1_ID,

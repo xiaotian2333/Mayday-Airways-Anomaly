@@ -13,5 +13,4 @@
 #include "anomaly/sdk/services/json.h"
 #include "anomaly/sdk/services/profile.h"
 #include "anomaly/sdk/services/mayday.h"
-#include "anomaly/sdk/services/mods.h"
 #include "anomaly/sdk/plugin.h"

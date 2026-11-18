@@ -346,21 +346,6 @@ LauncherConfigurationLoadResult LoadLauncherConfiguration(
             const std::string language = document.at("language").get<std::string>();
             if (!language.empty()) result.configuration.language = language;
         }
-        if (document.contains("view") && document.at("view").is_object()) {
-            const auto& view = document.at("view");
-            LauncherViewSettings& settings = result.configuration.view;
-            settings.mods_grid = view.value("modsGrid", settings.mods_grid);
-            settings.mods_by_folder = view.value("modsByFolder", settings.mods_by_folder);
-            settings.mods_pagination =
-                view.value("modsPagination", settings.mods_pagination);
-            settings.mods_page_size = LauncherNearestPageSize(
-                view.value("modsPageSize", settings.mods_page_size));
-            settings.browse_sort = view.value("browseSort", settings.browse_sort);
-            settings.browse_category =
-                view.value("browseCategory", settings.browse_category);
-            settings.browse_hide_mature =
-                view.value("browseHideMature", settings.browse_hide_mature);
-        }
         if (document.contains("artwork") && document.at("artwork").is_object()) {
             const auto& artwork = document.at("artwork");
             LauncherThemeArtwork& target = result.configuration.artwork;
@@ -438,15 +423,6 @@ LauncherConfigurationSaveResult SaveLauncherConfiguration(
                 {"windowBackground", HexColorText(configuration.custom_colors.window_background)},
                 {"childBackground", HexColorText(configuration.custom_colors.child_background)},
                 {"border", HexColorText(configuration.custom_colors.border)},
-            }},
-            {"view", {
-                {"modsGrid", configuration.view.mods_grid},
-                {"modsByFolder", configuration.view.mods_by_folder},
-                {"modsPagination", configuration.view.mods_pagination},
-                {"modsPageSize", configuration.view.mods_page_size},
-                {"browseSort", configuration.view.browse_sort},
-                {"browseCategory", configuration.view.browse_category},
-                {"browseHideMature", configuration.view.browse_hide_mature},
             }},
             {"update", {
                 {"autoCheck", configuration.update.auto_check},

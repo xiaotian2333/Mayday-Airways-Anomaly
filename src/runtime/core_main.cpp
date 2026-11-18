@@ -347,11 +347,10 @@ bool WriteDiagnosticsSummary(
             ? context->repository_diagnostics
             : anomaly::SerializeRepositoryCoordinatorSnapshotJson(
                   context->repository->Snapshot());
-        const std::string pak_mods{"null"};  // Mayday：无 UE5 pak 体系
         output << "{\"schemaVersion\":1,\"runtimeVersion\":\""
                << ANOMALY_SDK_VERSION_STRING << "\",\"runtimeState\":\""
                << runtime_state << "\",\"profile\":"
-               << context->profile_diagnostics << ",\"pakMods\":" << pak_mods
+               << context->profile_diagnostics
                << ",\"repository\":" << repository
                << ",\"plugins\":"
                << context->plugin_stop_diagnostics << "}\n";

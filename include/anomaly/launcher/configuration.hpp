@@ -32,34 +32,6 @@ struct LauncherThemeArtwork final {
 [[nodiscard]] bool IsCustomLauncherBackground(PlatformUiPalette palette,
     std::string_view background_path, bool enabled);
 
-// How the launcher lays out its own pages. These are choices about this window -- the mods
-// grid, its pager and the download page filters -- so they are stored with the rest of the
-// launcher configuration instead of in a second file next to the payload.
-// The page sizes the settings page offers. The value is stored as one of them: an older build let the
-// size be any number from 1 to 200 through a slider, and a stored 134 would otherwise surface in a
-// settings box that only lists four choices.
-inline constexpr std::array<int, 4> kLauncherPageSizes{10, 20, 50, 100};
-
-[[nodiscard]] inline int LauncherNearestPageSize(const int value) noexcept {
-    int nearest = kLauncherPageSizes.front();
-    for (const int size : kLauncherPageSizes) {
-        if (std::abs(size - value) < std::abs(nearest - value)) nearest = size;
-    }
-    return nearest;
-}
-
-struct LauncherViewSettings final {
-    // The grid is the default view, and it lists every mod at once unless pagination is asked
-    // for: a page of covers is easy to scroll, and a pager over it only gets in the way.
-    bool mods_grid{true};
-    bool mods_by_folder{};
-    bool mods_pagination{false};
-    int mods_page_size{10};
-    std::string browse_sort{"default"};
-    std::string browse_category;
-    bool browse_hide_mature{true};
-};
-
 // Whether the launcher looks for a newer release on its own. It is the user's answer to the one
 // question an update check asks -- whether this window may talk to the network unasked -- so it is
 // stored with the launcher configuration rather than assumed, and a launcher that has never stored
@@ -91,7 +63,6 @@ struct LauncherConfiguration final {
     // the launcher's choices: the in-game shell keeps its own theme files untouched.
     LauncherThemeArtwork artwork;
     anomaly::PlatformUiCustomColors custom_colors;
-    LauncherViewSettings view;
     LauncherUpdateSettings update;
 
     [[nodiscard]] LauncherClientConfiguration& Selected() noexcept { return game; }

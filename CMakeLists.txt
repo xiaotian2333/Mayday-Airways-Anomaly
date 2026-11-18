@@ -387,7 +387,6 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/schemas/repository-index.schema.json"
     "${CMAKE_SOURCE_DIR}/logo-header.png"
     "${CMAKE_SOURCE_DIR}/logo.png"
-    "${CMAKE_SOURCE_DIR}/apps/launcher/assets/mod-placeholder.png"
     "${CMAKE_SOURCE_DIR}/apps/launcher/assets/afdian-sponsor.png"
     "${CMAKE_SOURCE_DIR}/apps/launcher/assets/kofi.png"
     "${CMAKE_SOURCE_DIR}/apps/launcher/AnomalyLauncher.ico")
@@ -523,12 +522,8 @@ target_link_libraries(anomaly_internal_memory_services PUBLIC ue5mem_memory)
 
 
 # AdapterServiceRegistry：插件可见的服务表注册中心（通用设施）
-# pak_mod_catalog/mod_group_names：mod 目录枚举；Mayday 的 Unity 语义 mod 模型
-# 适配完成前先原样保留保构建
 add_library(anomaly_adapter_services STATIC
-    src/services/adapter_service_registry.cpp
-    src/services/pak_mod_catalog.cpp
-    src/services/mod_group_names.cpp)
+    src/services/adapter_service_registry.cpp)
 target_include_directories(anomaly_adapter_services PUBLIC include)
 target_compile_definitions(
     anomaly_adapter_services PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -968,6 +963,7 @@ target_link_libraries(
     anomaly_plugin_shadow
     anomaly_plugin_dependency_resolver
     anomaly_plugin_enablement
+    anomaly_adapter_services
     anomaly_websocket_server
     anomaly_repository_coordinator
     anomaly_crash_reporter
