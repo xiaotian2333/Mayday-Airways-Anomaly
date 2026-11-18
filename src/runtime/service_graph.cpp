@@ -8,6 +8,7 @@
 #include <exception>
 #include <future>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -1062,8 +1063,11 @@ private:
                 std::scoped_lock lock(mutex_);
                 return nodes_[index].descriptor;
             }();
-            std::atomic<DWORD> callback_error{ERROR_SUCCESS};
-            const auto callback = [this, index, &callback_error] {
+            // 错误码与完成标志都放在堆上并由回调按值持有：stop 执行器超时返回
+            // 后回调仍在域线程运行，引用栈上变量的捕获会写入已销毁的栈帧。
+            const auto callback_error = std::make_shared<std::atomic<DWORD>>(ERROR_SUCCESS);
+            const auto callback_done = std::make_shared<std::atomic_bool>(false);
+            const auto callback = [this, index, callback_error, callback_done] {
                 {
                     std::scoped_lock lock(mutex_);
                     nodes_[index].stop_thread_id =
@@ -1072,8 +1076,9 @@ private:
                 try {
                     nodes_[index].descriptor.stop();
                 } catch (...) {
-                    callback_error.store(ExceptionError(), std::memory_order_release);
+                    callback_error->store(ExceptionError(), std::memory_order_release);
                 }
+                callback_done->store(true, std::memory_order_release);
             };
             try {
                 if (affinity_executors_.stop && descriptor.affinity != ServiceAffinity::Any) {
@@ -1082,7 +1087,11 @@ private:
                     nodes_[index].stop_queue_delay =
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::steady_clock::now() - stop_started);
-                    error = callback_error.load(std::memory_order_acquire);
+                    // stop 执行器不回传错误码；回调尚未置完成标志说明它在超时
+                    // 后仍在域线程运行，此时不得按成功落账。
+                    error = callback_done->load(std::memory_order_acquire)
+                        ? callback_error->load(std::memory_order_acquire)
+                        : ERROR_TIMEOUT;
                 } else {
                     descriptor.stop();
                     std::scoped_lock lock(mutex_);

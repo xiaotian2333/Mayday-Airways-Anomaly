@@ -33,6 +33,19 @@ bool LoadOriginalDwmapi() {
     return true;
 }
 
+// UTF-8 诊断文本按 MultiByteToWideChar 正确转宽字符；按字节 widen 会让
+// 包含非 ASCII（例如中文路径）的消息变成乱码。
+std::wstring Utf8ToWide(const std::string& text) {
+    if (text.empty()) return {};
+    const int length = MultiByteToWideChar(
+        CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    if (length <= 0) return {};
+    std::wstring wide(static_cast<std::size_t>(length), L'\0');
+    MultiByteToWideChar(
+        CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), length);
+    return wide;
+}
+
 DWORD WINAPI BootstrapThread(void*) {
     const auto runtime_root = ModuleDirectory(g_proxy_module) / L"Anomaly";
     const auto log_directory = runtime_root / L"logs";
@@ -41,8 +54,7 @@ DWORD WINAPI BootstrapThread(void*) {
     });
     if (!selected.Ok()) {
         OutputDebugStringW(
-            (L"Anomaly: Runtime launch failed: " +
-             std::wstring(selected.message.begin(), selected.message.end()) + L"\n")
+            (L"Anomaly: Runtime launch failed: " + Utf8ToWide(selected.message) + L"\n")
                 .c_str());
         return ERROR_INVALID_STATE;
     }
@@ -84,7 +96,15 @@ BOOL WINAPI DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(module);
         if (!LoadOriginalDwmapi()) return FALSE;
         const HANDLE thread = CreateThread(nullptr, 0, BootstrapThread, nullptr, 0, nullptr);
-        if (thread != nullptr) CloseHandle(thread);
+        if (thread != nullptr) {
+            CloseHandle(thread);
+        } else {
+            // 线程创建失败时 Core 永远不会启动，至少留下一条诊断痕迹。
+            OutputDebugStringW(
+                (L"Anomaly: bootstrap thread creation failed error=" +
+                 std::to_wstring(GetLastError()) + L"\n")
+                    .c_str());
+        }
     } else if (reason == DLL_PROCESS_DETACH && reserved == nullptr && g_original_dwmapi != nullptr) {
         FreeLibrary(g_original_dwmapi);
         g_original_dwmapi = nullptr;

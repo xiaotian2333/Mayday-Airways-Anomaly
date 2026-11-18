@@ -119,12 +119,19 @@ std::filesystem::path ModuleDirectory(HMODULE module) {
     return ModulePath(module).parent_path();
 }
 
+// 文件 fallback 双写共用一把临界区：并发追加时保证文件行不交错，文件侧与
+// 结构化 logger 对同一事件的顺序一致。mutex 为常量表达式构造，不含动态初始化。
+// 双写是有意保留的早期诊断通道：结构化 logger 尚未就绪或自身失败时，
+// anomaly-runtime.log 仍是唯一的现场记录，不做单点收敛。
+std::mutex g_runtime_log_mutex;
+
 void RuntimeLog(
     const std::shared_ptr<CoreContext>& context,
     anomaly::LogLevel level,
     std::string event_id,
     std::string message,
     anomaly::LogThreadDomain thread_domain = anomaly::LogThreadDomain::Lifecycle) {
+    std::scoped_lock lock(g_runtime_log_mutex);
     std::ofstream(context->log_directory / L"anomaly-runtime.log", std::ios::app)
         << "pid=" << GetCurrentProcessId() << ' ' << message << '\n';
     if (context->logger == nullptr) return;
@@ -451,6 +458,11 @@ DWORD InitializeCore(const std::shared_ptr<CoreContext>& context, std::stop_toke
     }
 
     context->config = anomaly::AnalyzerConfig::Load(context->runtime_root / L"anomaly.ini");
+    // 组合根注入具体游戏的默认 Profile 标识：游戏无关的 config 模块不再携带
+    // "mayday" 字面量；anomaly.ini 显式配置（Profiles.Game）仍然优先。
+    if (context->config.game_id.empty()) {
+        context->config.game_id = "mayday";
+    }
     for (const auto& diagnostic : context->config.diagnostics) {
         RuntimeLog(
             context, anomaly::LogLevel::Warning, "config.invalid_value",

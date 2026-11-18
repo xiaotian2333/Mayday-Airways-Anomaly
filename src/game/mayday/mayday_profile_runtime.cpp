@@ -102,6 +102,9 @@ struct MaydayAdapter::Impl {
     std::thread probe_worker;
     std::atomic<bool> started{false};
     std::atomic<bool> stopping{false};
+    // 探测线程退出标志：Stop 在 RevokePublished 前等待它，确保“发现
+    // GameAssembly → 发布服务”的整段流程结束后才回收服务表。
+    std::atomic<bool> probe_done{false};
 
     Il2CppTableV1 table{};
     std::atomic<bool> table_ready{false};
@@ -213,9 +216,10 @@ struct MaydayAdapter::Impl {
     // getter 被 IL2CPP 裁剪，覆盖状态不可读，设置走 DevOverrideWeather /
     // DevClearOverride（存在）。
     LogSink log_sink;
-    int weather_logged_step{0};        // 同一失败步骤的日志只打一次
+    int weather_logged_step{0};        // 同一失败步骤的日志只打一次（resolve_mutex 保护）
     std::atomic<void*> weather_published{nullptr};
-    bool weather_resolved{false};
+    // 诊断 JSON 在 resolve_mutex 外无锁读取，改用 atomic 消除良性数据竞争。
+    std::atomic<bool> weather_resolved{false};
     bool weather_time_locked{false};   // 宿主记录的锁定意图（换局后可能失效）
     // dev 系列属性 getter 被 IL2CPP 裁剪，覆盖状态不可读：由宿主记录设置
     // 意图供插件 UI 回显（换局后可能失效）。
@@ -444,6 +448,8 @@ void MaydayAdapter::Impl::ProbeWorker() {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
+    // 退出前置位停止等待标志（含发布完成与停止中止两条退出路径）。
+    probe_done.store(true, std::memory_order_release);
 }
 
 bool MaydayAdapter::Impl::ResolveExports(const HMODULE game_assembly) {
@@ -846,7 +852,7 @@ bool MaydayAdapter::Impl::ResolveWeather() {
         }
         return false;
     };
-    if (weather_resolved) return true;
+    if (weather_resolved.load(std::memory_order_acquire)) return true;
     if (class_from_name == nullptr || class_get_method == nullptr ||
         class_get_field == nullptr || field_get_offset == nullptr ||
         field_static_get_value == nullptr || runtime_invoke == nullptr ||
@@ -932,7 +938,7 @@ bool MaydayAdapter::Impl::ResolveWeather() {
         }
     }
     kind_values = parsed;
-    weather_resolved = true;
+    weather_resolved.store(true, std::memory_order_release);
     weather_resolve_step.store(8, std::memory_order_release);
     if (log_sink != nullptr && weather_logged_step != 8) {
         weather_logged_step = 8;
@@ -1461,6 +1467,10 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetActive(
     if (active != 0) {
         {
             std::scoped_lock lock(impl->resolve_mutex);
+            // shutdown 检查必须与 hook 安装同锁：Stop 的拆卸段持有 resolve_mutex
+            // 拆除 hook，若在锁外判断 shutdown，拆卸释放后在途调用会重新装回 hook，
+            // Impl 析构后游戏线程解引用悬垂的 freecam_owner。
+            if (impl->freecam_shutdown) return MoneyStatus("status.unavailable");
             if (!impl->ResolveFreecam()) {
                 return MoneyStatus(impl->fc_error_key != nullptr
                     ? impl->fc_error_key : "status.freecam_symbols");
@@ -2396,10 +2406,14 @@ bool MaydayAdapter::Stop(std::chrono::milliseconds timeout) noexcept {
         impl_->pause_menu_hook_shutdown = true;
         impl_->TeardownPauseMenuHook();
     }
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (impl_->probe_worker.joinable() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        break;  // 轮询线程 500ms 一醒；析构兜底 join
+    // 等探测线程走完当前轮次（含全部 Publish）再回收服务表：旧的“只 sleep
+    // 一次”兜底允许 RevokePublished 之后探测线程仍发布新服务，服务表会残留
+    // 悬垂表项。等待上限 2 秒；超时后仍继续拆卸，Impl 析构会 join 兜底。
+    const auto probe_deadline = std::chrono::steady_clock::now() +
+        (std::min)(timeout, std::chrono::milliseconds(2000));
+    while (!impl_->probe_done.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < probe_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     {
         std::unique_lock lock(impl_->freecam_state_mutex);
@@ -2412,23 +2426,32 @@ bool MaydayAdapter::Stop(std::chrono::milliseconds timeout) noexcept {
         }
         impl_->freecam_shutdown = true;
     }
-    if (impl_->hook_installed && impl_->hook_backend != nullptr) {
-        static_cast<void>(impl_->hook_backend->Disable(impl_->look_update_target));
-        const auto drain_deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-        while (impl_->freecam_in_callback.load(std::memory_order_acquire) != 0 &&
-               std::chrono::steady_clock::now() < drain_deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    bool hook_removed{true};
+    {
+        // freecam hook 的安装路径持 resolve_mutex（FreecamSetActive），拆卸
+        // 也必须在同一把锁下进行；hook_installed 由该锁保护。
+        std::scoped_lock lock(impl_->resolve_mutex);
+        if (impl_->hook_installed && impl_->hook_backend != nullptr) {
+            hook_removed = impl_->hook_backend->Disable(impl_->look_update_target);
+            const auto drain_deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+            while (impl_->freecam_in_callback.load(std::memory_order_acquire) != 0 &&
+                   std::chrono::steady_clock::now() < drain_deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            hook_removed = impl_->hook_backend->Remove(impl_->look_update_target) &&
+                hook_removed;
+            impl_->freecam_owner.store(nullptr, std::memory_order_release);
+            static_cast<void>(impl_->hook_backend->Uninitialize());
+            impl_->hook_backend.reset();
+            impl_->hook_installed = false;
         }
-        static_cast<void>(impl_->hook_backend->Remove(impl_->look_update_target));
-        impl_->freecam_owner.store(nullptr, std::memory_order_release);
-        static_cast<void>(impl_->hook_backend->Uninitialize());
-        impl_->hook_backend.reset();
-        impl_->hook_installed = false;
     }
     impl_->RevokePublished();
-    static_cast<void>(ClearTickCallback(std::chrono::seconds(2)));
-    return true;
+    // tick 回调未在预算内排空说明游戏线程仍在执行回调：失败透传给调用方
+    // （core_main 走 stop_deferred 分支），不按成功落账。
+    const bool tick_drained = ClearTickCallback(std::chrono::seconds(2));
+    return tick_drained && hook_removed;
 }
 
 void MaydayAdapter::SetTickCallback(TickCallback callback) {
@@ -2487,7 +2510,7 @@ std::string MaydayAdapter::DiagnosticsJson() const {
          << ",\"weatherServicePublished\":"
          << (impl_->weather_published.load(std::memory_order_acquire) != nullptr ? "true" : "false")
          << ",\"weatherResolved\":"
-         << (impl_->weather_resolved ? "true" : "false")
+         << (impl_->weather_resolved.load(std::memory_order_acquire) ? "true" : "false")
          << ",\"weatherResolveStep\":" << impl_->weather_resolve_step.load(std::memory_order_acquire)
          << ",\"inputBlockHooks\":"
          << (impl_->input_hook_installed.load(std::memory_order_acquire) ? "true" : "false")
@@ -2535,7 +2558,9 @@ bool MaydayProfileRuntime::Start(std::stop_token stop_token) {
 
 bool MaydayProfileRuntime::Stop(std::chrono::milliseconds timeout) noexcept {
     if (impl_->adapter != nullptr) {
-        static_cast<void>(impl_->adapter->Stop(timeout));
+        // 适配层停止失败（tick 回调/hook 拆卸超时）透传给调用方，让
+        // core_main 的 stop_deferred 分支可以按真实结果处理。
+        return impl_->adapter->Stop(timeout);
     }
     return true;
 }

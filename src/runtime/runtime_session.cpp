@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <system_error>
@@ -58,12 +59,17 @@ public:
                         : affinity == ServiceAffinity::Render
                             ? ExecutionDomain::Render
                             : ExecutionDomain::Worker;
-                    DWORD result = ERROR_SUCCESS;
+                    // 结果必须由堆上的共享状态承载：Invoke 超时返回后回调仍在
+                    // 域线程运行，引用栈上局部变量的捕获会写入已销毁的栈帧。
+                    // shared_ptr 按值捕获让两边的生命周期互不依赖。
+                    const auto result = std::make_shared<DWORD>(ERROR_SUCCESS);
                     const DWORD invoke_result = dispatchers_.Invoke(
                         domain,
-                        [&] { result = callback(stop_token); },
+                        [result, callback, stop_token] {
+                            *result = callback(stop_token);
+                        },
                         std::chrono::seconds(30));
-                    return invoke_result == ERROR_SUCCESS ? result : invoke_result;
+                    return invoke_result == ERROR_SUCCESS ? *result : invoke_result;
                 },
                 [this](ServiceAffinity affinity, std::function<void()> callback) {
                     if (!callback) return;

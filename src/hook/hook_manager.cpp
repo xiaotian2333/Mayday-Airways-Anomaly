@@ -163,7 +163,13 @@ bool HookManager::EnableOwner(std::string_view owner, std::uint64_t generation) 
     for (HookRecord* hook : pending) {
         if (!backend_->QueueEnable(hook->target)) queued_all = false;
     }
-    if (!backend_->ApplyQueued() || !queued_all) return false;
+    if (!backend_->ApplyQueued() || !queued_all) {
+        // 漂移边界：入队成功且已应用的那部分 hook 此时已实际生效，而 enabled
+        // 标志只在全部成功时统一置位，记录可能落后于实际状态。逐项回读对账
+        // 需要 backend 的查询接口（当前没有）；Remove/Disable 路径逐 hook
+        // Disable 会把整组拉回一致，漂移不会跨代累积。
+        return false;
+    }
     for (HookRecord* hook : pending) hook->enabled = true;
     return true;
 }
@@ -182,7 +188,12 @@ bool HookManager::DisableOwner(std::string_view owner, std::uint64_t generation)
     for (HookRecord* hook : pending) {
         if (!backend_->QueueDisable(hook->target)) queued_all = false;
     }
-    if (!backend_->ApplyQueued() || !queued_all) return false;
+    if (!backend_->ApplyQueued() || !queued_all) {
+        // 漂移边界：与 EnableOwner 对称——记录可能领先于实际状态（部分 hook
+        // 实际仍处于使能态）。重试 DisableOwner 会按记录重新入队全部待禁用
+        // 项，直到 backend 全部接受后标志才统一翻转。
+        return false;
+    }
     for (HookRecord* hook : pending) hook->enabled = false;
     return true;
 }
