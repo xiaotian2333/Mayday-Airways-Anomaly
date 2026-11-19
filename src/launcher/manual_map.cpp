@@ -5,6 +5,8 @@
 
 #include <TlHelp32.h>
 #include <Psapi.h>
+#include <softpub.h>
+#include <wintrust.h>
 #include <winternl.h>
 
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <cstring>
 #include <cwctype>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -23,6 +26,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -930,19 +934,102 @@ bool RelocateImage(
     return true;
 }
 
+// 启动器以管理员权限运行，而游戏目录常常可被低完整性进程写入（Steam 次级库、绿色版、用户自选目录）。
+// 把未校验的同名 DLL 载入启动器，等于把“能写游戏目录”变成“管理员代码执行”，所以游戏目录里的副本
+// 必须通过 Authenticode 校验且签名者是微软才参与解析。校验失败不是错误：继续按 core 目录和 System32
+// 查找，注入仍然可用。
+bool IsMicrosoftSignedBinary(const std::filesystem::path& path) {
+    WINTRUST_FILE_INFO file_info{};
+    file_info.cbStruct = sizeof(file_info);
+    file_info.pcwszFilePath = path.c_str();
+
+    WINTRUST_DATA trust_data{};
+    trust_data.cbStruct = sizeof(trust_data);
+    trust_data.dwUIChoice = WTD_UI_NONE;
+    trust_data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trust_data.dwUnionChoice = WTD_CHOICE_FILE;
+    trust_data.pFile = &file_info;
+    trust_data.dwStateAction = WTD_STATEACTION_VERIFY;
+    // 离线环境也要能启动：只读本地缓存，避免吊销查询把已经签名的系统模块判成不可用。
+    trust_data.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+    GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    const LONG trust = WinVerifyTrust(nullptr, &policy, &trust_data);
+    trust_data.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(nullptr, &policy, &trust_data);
+    if (trust != ERROR_SUCCESS) return false;
+
+    HCERTSTORE store{};
+    HCRYPTMSG message{};
+    DWORD encoding{};
+    DWORD content{};
+    DWORD format{};
+    if (CryptQueryObject(
+            CERT_QUERY_OBJECT_FILE, path.c_str(), CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+            CERT_QUERY_FORMAT_FLAG_BINARY, 0, &encoding, &content, &format, &store, &message,
+            nullptr) == FALSE) {
+        return false;
+    }
+    const auto close = [&store, &message] {
+        if (store != nullptr) CertCloseStore(store, 0);
+        if (message != nullptr) CryptMsgClose(message);
+    };
+
+    DWORD signer_size{};
+    if (CryptMsgGetParam(message, CMSG_SIGNER_INFO_PARAM, 0, nullptr, &signer_size) == FALSE ||
+        signer_size < sizeof(CMSG_SIGNER_INFO)) {
+        close();
+        return false;
+    }
+    std::vector<std::byte> signer_buffer(signer_size);
+    if (CryptMsgGetParam(
+            message, CMSG_SIGNER_INFO_PARAM, 0, signer_buffer.data(), &signer_size) == FALSE) {
+        close();
+        return false;
+    }
+    const auto* signer = reinterpret_cast<const CMSG_SIGNER_INFO*>(signer_buffer.data());
+    CERT_INFO certificate_info{};
+    certificate_info.Issuer = signer->Issuer;
+    certificate_info.SerialNumber = signer->SerialNumber;
+    PCCERT_CONTEXT certificate = CertFindCertificateInStore(
+        store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, CERT_FIND_SUBJECT_CERT,
+        &certificate_info, nullptr);
+    if (certificate == nullptr) {
+        close();
+        return false;
+    }
+
+    wchar_t subject[256]{};
+    const DWORD subject_length = CertGetNameStringW(
+        certificate, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, subject,
+        static_cast<DWORD>(std::size(subject)));
+    CertFreeCertificateContext(certificate);
+    close();
+    if (subject_length <= 1 || subject_length > std::size(subject)) return false;
+    const std::wstring_view name(subject, subject_length - 1);
+    return name.find(L"Microsoft") != std::wstring_view::npos;
+}
+
 // Which copy of a dependency to use, in the order that keeps a manual map out of the target's loader: the
 // copy the target itself ships and loads (its own loader has already accepted that file), then a copy
 // beside the core, then the system one. Resolving locally from that same file is what makes the RVA it
-// contributes correct.
+// contributes correct. The target's own copy is the one this process is about to execute, so it is only
+// accepted with a Microsoft signature -- see IsMicrosoftSignedBinary.
 std::filesystem::path DependencyCopy(
     const std::filesystem::path& target_directory, const std::filesystem::path& image_directory,
     std::wstring_view name) {
     std::error_code error;
-    for (const auto& directory : {target_directory, image_directory}) {
-        if (directory.empty()) continue;
-        const auto candidate = directory / std::filesystem::path(name);
-        if (std::filesystem::is_regular_file(candidate, error) && !error) {
-            return candidate;
+    if (!target_directory.empty()) {
+        const auto target_copy = target_directory / std::filesystem::path(name);
+        if (std::filesystem::is_regular_file(target_copy, error) && !error &&
+            IsMicrosoftSignedBinary(target_copy)) {
+            return target_copy;
+        }
+    }
+    if (!image_directory.empty()) {
+        const auto image_copy = image_directory / std::filesystem::path(name);
+        if (std::filesystem::is_regular_file(image_copy, error) && !error) {
+            return image_copy;
         }
     }
     return {};

@@ -676,27 +676,37 @@ void SelectPendingResizeQueue(
 
 enum class ResizeQueueAdoption : std::uint8_t {
     Invalid,
+    // 插件代还持有设备对象，接管要等它释放；这不是终局错误。
+    Busy,
     Preserved,
     Changed,
 };
 
-bool InvalidatePluginUiDevice(EmbeddedState& state) noexcept {
-    if (!state.plugin_ui_device_active) return true;
+enum class PluginUiDeviceChange : std::uint8_t {
+    Done,
+    Busy,
+    Failed,
+};
+
+PluginUiDeviceChange InvalidatePluginUiDevice(EmbeddedState& state) noexcept {
+    if (!state.plugin_ui_device_active) return PluginUiDeviceChange::Done;
     std::unique_lock plugin_lock(*state.plugin_mutex, std::try_to_lock);
-    if (!plugin_lock.owns_lock()) return false;
+    if (!plugin_lock.owns_lock()) return PluginUiDeviceChange::Busy;
     if (state.plugins != nullptr) state.plugins->OnUiDeviceLost();
     state.plugin_ui_device_active = false;
-    return true;
+    return PluginUiDeviceChange::Done;
 }
 
-bool RebuildPluginUiDevice(EmbeddedState& state) noexcept {
-    if (!state.platform_ui_initialized) return true;
+PluginUiDeviceChange RebuildPluginUiDevice(EmbeddedState& state) noexcept {
+    if (!state.platform_ui_initialized) return PluginUiDeviceChange::Done;
     std::unique_lock plugin_lock(*state.plugin_mutex, std::try_to_lock);
-    if (!plugin_lock.owns_lock() || state.plugins == nullptr) return false;
+    if (!plugin_lock.owns_lock()) return PluginUiDeviceChange::Busy;
+    if (state.plugins == nullptr) return PluginUiDeviceChange::Failed;
     // Keep the flag set on an acknowledgement failure so ReleaseGraphics can
     // invalidate the generation before destroying the backend objects.
     state.plugin_ui_device_active = true;
-    return state.plugins->OnUiDeviceRebuilt();
+    return state.plugins->OnUiDeviceRebuilt() ? PluginUiDeviceChange::Done
+                                             : PluginUiDeviceChange::Failed;
 }
 
 ResizeQueueAdoption AdoptPendingResizeQueue(EmbeddedState& state) noexcept {
@@ -710,7 +720,9 @@ ResizeQueueAdoption AdoptPendingResizeQueue(EmbeddedState& state) noexcept {
         return ResizeQueueAdoption::Preserved;
     }
     if (state.dx12_initialized) {
-        if (!InvalidatePluginUiDevice(state)) return ResizeQueueAdoption::Invalid;
+        if (InvalidatePluginUiDevice(state) == PluginUiDeviceChange::Busy) {
+            return ResizeQueueAdoption::Busy;
+        }
         state.shader_descriptors.ReleaseReserved();
         ImGui_ImplDX12_Shutdown();
         state.dx12_initialized = false;
@@ -721,15 +733,19 @@ ResizeQueueAdoption AdoptPendingResizeQueue(EmbeddedState& state) noexcept {
     return ResizeQueueAdoption::Changed;
 }
 
-bool ReconfigureFramesAfterResize(
+PluginUiDeviceChange ReconfigureFramesAfterResize(
     EmbeddedState& state,
     const DXGI_SWAP_CHAIN_DESC& description,
     bool force_renderer_reconfigure) {
     const bool frame_layout_changed = description.BufferCount != state.frames.size() ||
         description.BufferDesc.Format != state.render_target_format;
-    if (!frame_layout_changed && !force_renderer_reconfigure) return true;
+    if (!frame_layout_changed && !force_renderer_reconfigure) {
+        return PluginUiDeviceChange::Done;
+    }
     if (state.dx12_initialized) {
-        if (!InvalidatePluginUiDevice(state)) return false;
+        if (InvalidatePluginUiDevice(state) == PluginUiDeviceChange::Busy) {
+            return PluginUiDeviceChange::Busy;
+        }
         state.shader_descriptors.ReleaseReserved();
         ImGui_ImplDX12_Shutdown();
         state.dx12_initialized = false;
@@ -743,12 +759,16 @@ bool ReconfigureFramesAfterResize(
         heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         heap_description.NumDescriptors = description.BufferCount;
         if (description.BufferCount == 0 || FAILED(state.device->CreateDescriptorHeap(
-                &heap_description, IID_PPV_ARGS(&state.render_target_heap)))) return false;
+                &heap_description, IID_PPV_ARGS(&state.render_target_heap)))) {
+            return PluginUiDeviceChange::Failed;
+        }
 
         state.frames.resize(description.BufferCount);
         for (auto& frame : state.frames) {
             if (FAILED(state.device->CreateCommandAllocator(
-                    D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frame.allocator)))) return false;
+                    D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&frame.allocator)))) {
+                return PluginUiDeviceChange::Failed;
+            }
         }
     }
 
@@ -762,28 +782,32 @@ bool ReconfigureFramesAfterResize(
     init_info.UserData = &state;
     init_info.SrvDescriptorAllocFn = AllocateSrv;
     init_info.SrvDescriptorFreeFn = FreeSrv;
-    if (!ImGui_ImplDX12_Init(&init_info)) return false;
+    if (!ImGui_ImplDX12_Init(&init_info)) return PluginUiDeviceChange::Failed;
     state.dx12_initialized = true;
     state.render_target_format = description.BufferDesc.Format;
     return RebuildPluginUiDevice(state);
 }
 
-bool RebuildBackBuffersAfterResize(
+PluginUiDeviceChange RebuildBackBuffersAfterResize(
     EmbeddedState& state, bool force_renderer_reconfigure = false) {
     if (state.render_api == EmbeddedRenderApi::D3D11) {
         // Only the render target view needs rebuilding; there is no descriptor
         // heap and no per-frame context to reconfigure.
-        if (state.source_swap_chain == nullptr || state.d3d11_device == nullptr) return false;
+        if (state.source_swap_chain == nullptr || state.d3d11_device == nullptr) {
+            return PluginUiDeviceChange::Failed;
+        }
         ID3D11Texture2D* back_buffer{};
         if (FAILED(state.source_swap_chain->GetBuffer(0, IID_PPV_ARGS(&back_buffer))) ||
             back_buffer == nullptr) {
             Release(back_buffer);
-            return false;
+            return PluginUiDeviceChange::Failed;
         }
         const HRESULT created = state.d3d11_device->CreateRenderTargetView(
             back_buffer, nullptr, &state.d3d11_render_target);
         Release(back_buffer);
-        if (FAILED(created) || state.d3d11_render_target == nullptr) return false;
+        if (FAILED(created) || state.d3d11_render_target == nullptr) {
+            return PluginUiDeviceChange::Failed;
+        }
         RECT output_rect{};
         if (state.window != nullptr && GetClientRect(state.window, &output_rect)) {
             const LONG width = (std::max)(0L, output_rect.right - output_rect.left);
@@ -791,14 +815,23 @@ bool RebuildBackBuffersAfterResize(
             state.selected_area =
                 static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
         }
-        return true;
+        return PluginUiDeviceChange::Done;
     }
     if (state.source_swap_chain == nullptr || state.device == nullptr ||
-        state.render_target_heap == nullptr) return false;
+        state.render_target_heap == nullptr) return PluginUiDeviceChange::Failed;
     DXGI_SWAP_CHAIN_DESC description{};
-    if (FAILED(state.source_swap_chain->GetDesc(&description)) ||
-        !ReconfigureFramesAfterResize(
-            state, description, force_renderer_reconfigure)) return false;
+    if (FAILED(state.source_swap_chain->GetDesc(&description))) {
+        return PluginUiDeviceChange::Failed;
+    }
+    const PluginUiDeviceChange reconfigured = ReconfigureFramesAfterResize(
+        state, description, force_renderer_reconfigure);
+    if (reconfigured != PluginUiDeviceChange::Done) return reconfigured;
+    // 上一次尝试可能已经让插件代收到 device-lost、但还没走到设备重建
+    // （例如重试时帧布局已经稳定，Reconfigure 提前返回）。这里补上。
+    if (state.platform_ui_initialized && !state.plugin_ui_device_active) {
+        const PluginUiDeviceChange rebuilt = RebuildPluginUiDevice(state);
+        if (rebuilt != PluginUiDeviceChange::Done) return rebuilt;
+    }
 
     auto render_target = state.render_target_heap->GetCPUDescriptorHandleForHeapStart();
     const UINT increment = state.device->GetDescriptorHandleIncrementSize(
@@ -808,7 +841,7 @@ bool RebuildBackBuffersAfterResize(
         if (FAILED(state.source_swap_chain->GetBuffer(
                 index, IID_PPV_ARGS(&frame.back_buffer)))) {
             for (auto& acquired : state.frames) Release(acquired.back_buffer);
-            return false;
+            return PluginUiDeviceChange::Failed;
         }
         frame.render_target = render_target;
         state.device->CreateRenderTargetView(
@@ -822,7 +855,7 @@ bool RebuildBackBuffersAfterResize(
         state.selected_area =
             static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
     }
-    return true;
+    return PluginUiDeviceChange::Done;
 }
 
 void UpdateMenuCursor(EmbeddedState& state, bool active) {
@@ -871,8 +904,23 @@ std::uint64_t SwapChainArea(IDXGISwapChain* swap_chain) {
     return static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height);
 }
 
+bool SharesOutputWindow(
+    IDXGISwapChain* left, IDXGISwapChain* right) noexcept {
+    DXGI_SWAP_CHAIN_DESC left_description{};
+    DXGI_SWAP_CHAIN_DESC right_description{};
+    return left != nullptr && right != nullptr &&
+        SUCCEEDED(left->GetDesc(&left_description)) &&
+        SUCCEEDED(right->GetDesc(&right_description)) &&
+        left_description.OutputWindow != nullptr &&
+        left_description.OutputWindow == right_description.OutputWindow;
+}
+
 bool PreferSwapChain(const EmbeddedState& state, IDXGISwapChain* candidate) {
     if (state.source_swap_chain == candidate) return false;
+    // 同一窗口上的新链通常是游戏重建的结果（分辨率/全屏切换、设备重建）：
+    // 旧链已经不再 Present，继续画在它上面就是永久黑屏。面积启发式只应该
+    // 决定不同窗口之间的取舍。
+    if (SharesOutputWindow(state.source_swap_chain, candidate)) return true;
     if (state.window == nullptr || !IsWindow(state.window) || !IsWindowVisible(state.window)) return true;
     const std::uint64_t candidate_area = SwapChainArea(candidate);
     return candidate_area > state.selected_area + state.selected_area / 4;
@@ -1573,6 +1621,7 @@ namespace anomaly::embedded {
 bool ReleaseGraphics(
     EmbeddedState& state, RendererLifecycle final_state, bool force_release) {
     state.renderer = final_state;
+    state.resize_rebuild_deferred = false;
     if (!state.frame_aux.Release()) return false;
     if (state.imgui_context != nullptr &&
         ImGui::GetCurrentContext() != state.imgui_context) {
@@ -1714,8 +1763,38 @@ void RenderEmbedded(IDXGISwapChain* swap_chain, UINT flags) {
     PerformanceTimer setup_timer(
         state->performance, EmbeddedPerformanceStage::RenderSetup, sampled);
     const RendererLifecycle lifecycle = state->renderer.load();
-    if (lifecycle == RendererLifecycle::ResizePending ||
-        lifecycle == RendererLifecycle::Stopping || lifecycle == RendererLifecycle::Stopped) return;
+    if (lifecycle == RendererLifecycle::ResizePending) {
+        // 没有 deferred 标记时 Present 只可能是与并发 ResizeBuffers 撞上，
+        // 保持不触碰任何一侧。deferred 表示 resize 已成功、只是插件代占用了
+        // 设备对象，这里重试接管。
+        if (!state->resize_rebuild_deferred ||
+            swap_chain != state->source_swap_chain) return;
+        const ResizeQueueAdoption queue = AdoptPendingResizeQueue(*state);
+        if (queue == ResizeQueueAdoption::Busy) return;
+        if (queue == ResizeQueueAdoption::Invalid) {
+            state->resize_rebuild_deferred = false;
+            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::Cold, true));
+            return;
+        }
+        const bool queue_changed = queue == ResizeQueueAdoption::Changed;
+        if (queue_changed) {
+            BindPresentationQueue(state->source_swap_chain, state->render_queue);
+        }
+        const PluginUiDeviceChange rebuilt =
+            RebuildBackBuffersAfterResize(*state, queue_changed);
+        if (rebuilt == PluginUiDeviceChange::Busy) return;
+        state->resize_rebuild_deferred = false;
+        if (rebuilt != PluginUiDeviceChange::Done) {
+            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::Cold, true));
+            return;
+        }
+        // 补上 AfterResize 无法完成的证据交接：下一次 Present 重新做像素探针。
+        RearmSmokeProbeAfterResize(state->pixel_probe.policy);
+        state->renderer = RendererLifecycle::Ready;
+        return;
+    }
+    if (lifecycle == RendererLifecycle::Stopping ||
+        lifecycle == RendererLifecycle::Stopped) return;
     if (lifecycle == RendererLifecycle::Ready && state->source_swap_chain != swap_chain) {
         if (!PreferSwapChain(*state, swap_chain)) return;
         // A failed release means the previous UI/device generation is still
@@ -1827,6 +1906,9 @@ void RenderEmbedded(IDXGISwapChain* swap_chain, UINT flags) {
     const auto frame_begin_started = sampled ? std::chrono::steady_clock::now()
                                              : std::chrono::steady_clock::time_point{};
     UpdateMenuCursor(*state, anomaly::HostUiMenusCaptureMouse());
+    // Window-thread messages were only recorded there; applying them here, on
+    // the thread that owns the ImGui context, keeps the IO queue single-writer.
+    FlushEmbeddedImGuiInput(*state);
     ImGui_ImplWin32_NewFrame();
     if (!state->input_installed) FeedPolledInput(*state);
     ImGui::NewFrame();
@@ -2030,6 +2112,7 @@ bool BeforeResize(
     if (!state->frame_aux.Release(100)) return false;
     SelectPendingResizeQueue(
         *state, present_queue_count, present_queues, validate_present_queues);
+    state->resize_rebuild_deferred = false;
     state->renderer = RendererLifecycle::ResizePending;
     if (!ReleaseBackBuffersForResize(*state)) {
         // An invalid ResizeBuffers1 queue set is terminal for this renderer
@@ -2056,8 +2139,17 @@ bool AfterResize(bool affected, HRESULT result) {
     bool queue_changed{};
     if (SUCCEEDED(result)) {
         const ResizeQueueAdoption queue = AdoptPendingResizeQueue(*state);
+        if (queue == ResizeQueueAdoption::Busy) {
+            // Buffers 已经 resize 成功，失败点只是插件代还占着设备对象。
+            // 保留 ResizePending 并让下一次 Present 重试，不能释放整代渲染器：
+            // 那会让覆盖层在本次进程内永久消失。
+            state->resize_rebuild_deferred = true;
+            return false;
+        }
         if (queue == ResizeQueueAdoption::Invalid) {
-            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::Stopped, true));
+            // 队列集确实不可用：销毁当前代，下一次 Present 用新链重新初始化。
+            state->resize_rebuild_deferred = false;
+            static_cast<void>(ReleaseGraphics(*state, RendererLifecycle::Cold, true));
             return false;
         }
         queue_changed = queue == ResizeQueueAdoption::Changed;
@@ -2065,13 +2157,22 @@ bool AfterResize(bool affected, HRESULT result) {
     } else {
         ClearPendingResizeQueue(*state);
     }
-    if (RebuildBackBuffersAfterResize(*state, queue_changed)) {
+    const PluginUiDeviceChange rebuilt =
+        RebuildBackBuffersAfterResize(*state, queue_changed);
+    if (rebuilt == PluginUiDeviceChange::Done) {
+        state->resize_rebuild_deferred = false;
         // Keep a successful Resize gated until the bridge has published its
         // callback. That establishes the coordinator's Resize epoch before a
         // post-Resize Present is allowed to complete the next pixel probe.
         if (FAILED(result)) state->renderer = RendererLifecycle::Ready;
         return SUCCEEDED(result);
     }
+    if (rebuilt == PluginUiDeviceChange::Busy) {
+        // 帧布局重配走到插件代时再次遇到占用；同样留给下一次 Present。
+        state->resize_rebuild_deferred = true;
+        return false;
+    }
+    state->resize_rebuild_deferred = false;
     static_cast<void>(ReleaseGraphics(
         *state, SUCCEEDED(result) ? RendererLifecycle::Cold : RendererLifecycle::DeviceLost,
         true));

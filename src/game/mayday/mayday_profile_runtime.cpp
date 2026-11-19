@@ -606,6 +606,17 @@ void MaydayAdapter::Impl::ProbeWorker() {
     }
     // 退出前置位停止等待标志（含发布完成与停止中止两条退出路径）。
     probe_done.store(true, std::memory_order_release);
+    // 首次发布之后转为低频维护线程：输入阻断与暂停菜单 Hook 的 il2cpp 解析、
+    // MinHook 安装和失败重试都留在本线程。Present 回调只驱动插件 tick，不再
+    // 遍历程序集；解析失败时 Ensure* 自己按 1 秒节奏重试。
+    while (!stopping.load(std::memory_order_acquire)) {
+        static_cast<void>(EnsureInputBlockHook());
+        static_cast<void>(EnsurePauseMenuHook());
+        for (int slice = 0;
+             slice < 10 && !stopping.load(std::memory_order_acquire); ++slice) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
 }
 
 bool MaydayAdapter::Impl::ResolveExports(const HMODULE game_assembly) {
@@ -3715,9 +3726,8 @@ bool MaydayAdapter::ClearTickCallback(std::chrono::seconds timeout) noexcept {
 }
 
 void MaydayAdapter::OnFrame(double delta_seconds) {
-    // 覆盖层输入阻断与暂停菜单入口只安装一次；hook 内部实时读取菜单状态。
-    static_cast<void>(impl_->EnsureInputBlockHook());
-    static_cast<void>(impl_->EnsurePauseMenuHook());
+    // Hook 安装与 il2cpp 扫描由探测/维护线程推进；渲染线程只读取已发布的
+    // 状态并驱动插件 tick，不在 Present 中遍历程序集或安装 Hook。
     TickCallback callback;
     {
         std::scoped_lock lock(impl_->tick_mutex);

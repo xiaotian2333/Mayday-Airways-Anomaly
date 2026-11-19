@@ -46,10 +46,31 @@ std::atomic<int> g_severity_milli{600};      // 强度千分比
 std::atomic<bool> g_dirty{false};
 std::atomic<bool> g_save_scheduled{false};
 std::atomic<int> g_kind_values[kWeatherKindCount]{{-1}, {-1}, {-1}, {-1}, {-1}, {-1}};
-bool g_kind_values_fetched{};                // 仅 UI 线程访问
+bool g_kind_values_fetched{};                // 仅 Update 访问
+// Update 发布的状态快照；Draw 只读。游戏服务调用集中在 Update，
+// Render 的绘制路径不再查询或写入游戏状态。
+AnomalyMaydayWeatherStateV1 g_cached_state{};
+bool g_state_valid{};
+bool g_state_published{};
 std::string g_status;
 bool g_service_logged{};                     // 服务附加日志只打一次
 std::chrono::steady_clock::time_point g_last_state_fail_log{};
+
+enum class WeatherCommandKind : std::uint32_t {
+    None,
+    SetTime,
+    SetTimeLocked,
+    SetWeatherOverride,
+};
+
+struct WeatherCommand {
+    WeatherCommandKind kind{WeatherCommandKind::None};
+    float hours{};
+    int locked{};
+    int override_active{};
+};
+
+WeatherCommand g_pending_command{};
 
 void PluginLog(const AnomalyCoreLogLevelV1 level, const std::string& message) {
     if (g_core == nullptr || g_core->log == nullptr) return;
@@ -224,17 +245,19 @@ void LoadSettings() {
     static_cast<void>(g_json->release(g_json->user, root));
 }
 
-void ApplyTimeDraft(const float draft_hours) {
-    const AnomalyStatusV1 status = g_weather->set_time(g_weather->user, draft_hours);
-    if (!Succeeded(status)) SetStatusFromService(status);
+void QueueTimeDraft(const float hours) {
+    g_pending_command = {
+        WeatherCommandKind::SetTime, hours, 0, 0};
 }
 
-void ApplyWeatherOverride(const bool active) {
-    const AnomalyStatusV1 status = g_weather->set_weather_override(
-        g_weather->user, active ? 1 : 0,
-        g_kind_index.load(std::memory_order_relaxed),
-        static_cast<float>(g_severity_milli.load(std::memory_order_relaxed)) / 1000.0f);
-    if (!Succeeded(status)) SetStatusFromService(status);
+void QueueTimeLocked(const int locked) {
+    g_pending_command = {
+        WeatherCommandKind::SetTimeLocked, 0.0f, locked, 0};
+}
+
+void QueueWeatherOverride(const bool active) {
+    g_pending_command = {
+        WeatherCommandKind::SetWeatherOverride, 0.0f, 0, active ? 1 : 0};
 }
 
 bool ServiceHasField(std::size_t struct_size, std::size_t offset) noexcept {
@@ -323,11 +346,63 @@ void ANOMALY_CALL Unload(void*) {
     g_status.clear();
     g_service_logged = false;
     g_kind_values_fetched = false;
+    g_cached_state = {};
+    g_state_valid = false;
+    g_state_published = false;
+    g_pending_command = {};
 }
 
 void ANOMALY_CALL Update(void*, double) {
     // 宿主的 dev 覆盖与时钟锁定由游戏侧机制维持，无需每帧重申。
     QueryServices();
+    if (g_weather == nullptr) return;
+    static_cast<void>(FetchKindValues());
+
+    const WeatherCommand command = g_pending_command;
+    g_pending_command = {};
+    AnomalyStatusV1 command_status{ANOMALY_STATUS_V1_OK, 0, {}};
+    switch (command.kind) {
+    case WeatherCommandKind::SetTime:
+        command_status = g_weather->set_time(g_weather->user, command.hours);
+        break;
+    case WeatherCommandKind::SetTimeLocked:
+        command_status =
+            g_weather->set_time_locked(g_weather->user, command.locked);
+        break;
+    case WeatherCommandKind::SetWeatherOverride:
+        command_status = g_weather->set_weather_override(
+            g_weather->user, command.override_active,
+            g_kind_index.load(std::memory_order_relaxed),
+            static_cast<float>(g_severity_milli.load(std::memory_order_relaxed)) /
+                1000.0f);
+        break;
+    case WeatherCommandKind::None:
+        break;
+    }
+    if (!Succeeded(command_status)) SetStatusFromService(command_status);
+
+    AnomalyMaydayWeatherStateV1 state{};
+    state.struct_size = sizeof(state);
+    const AnomalyStatusV1 state_status = g_weather->get_state(g_weather->user, &state);
+    if (Succeeded(state_status)) {
+        g_cached_state = state;
+        g_state_valid = true;
+        g_state_published = true;
+        g_status.clear();
+        return;
+    }
+    g_state_valid = false;
+    // 首次失败也要让界面可用：时间滑块与种类按钮不依赖当前状态，
+    // 和改造前一样允许用户在进入飞行前先排好值。
+    g_state_published = true;
+    SetStatusFromService(state_status);
+    // 失败原因限流写日志（5 秒一条），便于在宿主日志流里诊断。
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_last_state_fail_log > std::chrono::seconds(5)) {
+        g_last_state_fail_log = now;
+        PluginLog(ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+                  "weather: get_state failed: " + g_status);
+    }
 }
 
 void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
@@ -337,29 +412,19 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     anomaly::sdk::UiWindow window(ui, title, &open);
     if (!window) return;
 
-    QueryServices();
-    if (g_weather == nullptr) {
+    if (!g_state_published) {
         ui->text(ui->user, anomaly::sdk::StringView(
-            g_localizer.Text("status.unavailable",
-                             "The game is not ready yet. Enter a flight first.")));
+            g_status.empty()
+                ? g_localizer.Text("status.unavailable",
+                                   "The game is not ready yet. Enter a flight first.")
+                : g_status));
         return;
     }
-    FetchKindValues();
-
-    AnomalyMaydayWeatherStateV1 state{};
-    state.struct_size = sizeof(state);
-    const AnomalyStatusV1 state_status = g_weather->get_state(g_weather->user, &state);
-    const bool state_ok = Succeeded(state_status);
-    if (!state_ok) {
-        SetStatusFromService(state_status);
+    const AnomalyMaydayWeatherStateV1 state = g_cached_state;
+    const bool state_ok = g_state_valid;
+    if (!state_ok && !g_status.empty()) {
+        // 失败状态显示在控件上方；控件本身仍可排队，等状态恢复后生效。
         ui->text(ui->user, anomaly::sdk::StringView(g_status));
-        // 失败原因限流写日志（5 秒一条），便于在宿主日志流里诊断。
-        const auto now = std::chrono::steady_clock::now();
-        if (now - g_last_state_fail_log > std::chrono::seconds(5)) {
-            g_last_state_fail_log = now;
-            PluginLog(ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
-                      "weather: get_state failed: " + g_status);
-        }
     }
 
     // ---- 状态区 ----
@@ -402,7 +467,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     const std::string set_time_label =
         g_localizer.Text("time.set", "Set time of day");
     if (ui->button(ui->user, anomaly::sdk::StringView(set_time_label), 0.0f, 0.0f)) {
-        ApplyTimeDraft(draft_hours);
+        QueueTimeDraft(draft_hours);
     }
     if (state_ok) {
         int locked = state.time_locked;
@@ -410,9 +475,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
             g_localizer.Text("time.lock", "Lock time (freeze the clock)");
         if (ui->checkbox(ui->user, anomaly::sdk::StringView(lock_label), &locked) != 0 &&
             locked != state.time_locked) {
-            const AnomalyStatusV1 status =
-                g_weather->set_time_locked(g_weather->user, locked);
-            if (!Succeeded(status)) SetStatusFromService(status);
+            QueueTimeLocked(locked);
         }
     }
 
@@ -430,7 +493,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
         MarkSettingsDirty();
         // 锁定中拖动强度立即重申，无需再点种类按钮。
         if (state_ok && state.override_active != 0) {
-            ApplyWeatherOverride(true);
+            QueueWeatherOverride(true);
         }
     }
     // 种类按钮 3 + 3 两行；点击即选中，若锁定中立即重新应用。
@@ -446,7 +509,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
             g_kind_index.store(index, std::memory_order_relaxed);
             MarkSettingsDirty();
             if (state_ok && state.override_active != 0) {
-                ApplyWeatherOverride(true);
+                QueueWeatherOverride(true);
             }
         }
     }
@@ -458,7 +521,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
                 ui->user, anomaly::sdk::StringView(lock_label),
                 &override_active) != 0 &&
             override_active != state.override_active) {
-            ApplyWeatherOverride(override_active != 0);
+            QueueWeatherOverride(override_active != 0);
         }
     }
 
