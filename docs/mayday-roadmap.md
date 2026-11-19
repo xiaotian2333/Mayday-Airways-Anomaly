@@ -13,6 +13,9 @@
 - [x] 内建服务 `mayday.money`：金币/债务读写（il2cpp 线程附加、原始值参数封送、差额债务语义）
 - [x] 内建插件 `plugins/money`：金币修改面板（本地化、`check_plugin_i18n.ps1` 通过），实机读写验证通过
 - [x] 内建服务与插件 `mayday.freecam`：自由镜头（主线程接管相机、原始鼠标增量）
+- [x] 内建服务与插件 `mayday.weather`：时间/天气调节与锁定
+- [x] 内建服务与插件 `mayday.combat`：自动棒球棍（主线程触发、只攻击队友、Mirror
+      `CmdUse` 协议包、服务端命中判定期间的静默瞄准）
 - [x] 覆盖层输入隔离：InputSystem 按钮/滚轮、UGUI `EventSystem` 与指针缓存
 - [x] 暂停菜单「Anomaly」入口，等价 Insert 热键
 - [x] 启动器：Mayday 单游戏配置、`MaydayAirways.exe` 进程识别、Steam 启动并附加、代理模式

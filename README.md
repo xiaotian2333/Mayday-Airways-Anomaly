@@ -22,9 +22,11 @@
 ## 状态
 
 - 通用基础设施完整保留（见 roadmap 表格）
-- Mayday 适配层：il2cpp 导出探测（`mayday.il2cpp`）、金币/债务服务（`mayday.money`）
+- Mayday 适配层：il2cpp 导出探测（`mayday.il2cpp`）、金币/债务服务（`mayday.money`）、
+  气象/时间服务（`mayday.weather`）与自动棒球棍服务（`mayday.combat`）
 - D3D12 Present hook + 内嵌 ImGui 管理界面
-- 内建插件：`Money`（金币/债务）与 `Freecam`（自由镜头）
+- 内建插件：`Money`（金币/债务）、`Freecam`（自由镜头）、`Weather`（气象/时间）与
+  `Auto Bat`（自动棒球棍）
 - 覆盖层展开时阻断 Unity InputSystem 与 UGUI 输入；暂停菜单提供「Anomaly」入口
 - 已清理上游游戏专用插件、服务、资源、工具与文档
 

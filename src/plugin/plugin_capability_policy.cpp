@@ -11,7 +11,7 @@ struct ServiceCapabilityMapping {
     std::string_view capability;
 };
 
-constexpr std::array<std::string_view, 26> kKnownCapabilities{
+constexpr std::array<std::string_view, 27> kKnownCapabilities{
     "commands",
     "configuration",
     "diagnostics",
@@ -21,6 +21,7 @@ constexpr std::array<std::string_view, 26> kKnownCapabilities{
     "interop-hook",
     "interop-patch",
     "interop-signature",
+    "mayday-combat",
     "mayday-freecam",
     "mayday-money",
     "mayday-weather",
@@ -40,7 +41,7 @@ constexpr std::array<std::string_view, 26> kKnownCapabilities{
     "websocket",
 };
 
-constexpr std::array<ServiceCapabilityMapping, 24> kServiceCapabilities{{
+constexpr std::array<ServiceCapabilityMapping, 25> kServiceCapabilities{{
     {"anomaly.plugin-state", "configuration"},
     {"anomaly.config", "configuration"},
     {"anomaly.storage", "storage"},
@@ -57,6 +58,7 @@ constexpr std::array<ServiceCapabilityMapping, 24> kServiceCapabilities{{
     {"mayday.money", "mayday-money"},
     {"mayday.freecam", "mayday-freecam"},
     {"mayday.weather", "mayday-weather"},
+    {"mayday.combat", "mayday-combat"},
     {"anomaly.ui", "ui"},
     {"anomaly.localization", "ui"},
     {"anomaly.window", "ui-window"},

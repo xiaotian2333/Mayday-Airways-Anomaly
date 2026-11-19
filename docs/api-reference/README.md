@@ -43,8 +43,11 @@
 | `anomaly.mods` | 1 | `mods` |
 | `mayday.money` | 1 | `mayday-money` |
 | `mayday.freecam` | 1 | `mayday-freecam` |
+| `mayday.weather` | 1 | `mayday-weather` |
+| `mayday.combat` | 1 | `mayday-combat` |
 
-`mayday.money` 和 `mayday.freecam` 的 C 定义在 `include/anomaly/sdk/services/mayday.h`。
+`mayday.money`、`mayday.freecam`、`mayday.weather` 与 `mayday.combat` 的 C 定义在
+`include/anomaly/sdk/services/mayday.h`。
 
 ## ABI 约定
 

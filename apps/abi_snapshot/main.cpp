@@ -1317,6 +1317,39 @@ std::string BuildSnapshot() {
          {"set_time_locked", offsetof(AnomalyMaydayWeatherServiceV1, set_time_locked)},
          {"set_weather_override", offsetof(AnomalyMaydayWeatherServiceV1, set_weather_override)},
          {"get_kind_value", offsetof(AnomalyMaydayWeatherServiceV1, get_kind_value)}},
+        false);
+    AppendStruct(
+        output,
+        "AnomalyMaydayCombatStateV1",
+        sizeof(AnomalyMaydayCombatStateV1),
+        alignof(AnomalyMaydayCombatStateV1),
+        {{"struct_size", offsetof(AnomalyMaydayCombatStateV1, struct_size)},
+         {"enabled", offsetof(AnomalyMaydayCombatStateV1, enabled)},
+         {"in_flight", offsetof(AnomalyMaydayCombatStateV1, in_flight)},
+         {"holding_bat", offsetof(AnomalyMaydayCombatStateV1, holding_bat)},
+         {"has_target", offsetof(AnomalyMaydayCombatStateV1, has_target)},
+         {"target_distance_mm", offsetof(AnomalyMaydayCombatStateV1, target_distance_mm)},
+         {"max_range_mm", offsetof(AnomalyMaydayCombatStateV1, max_range_mm)},
+         {"attack_interval_ms", offsetof(AnomalyMaydayCombatStateV1, attack_interval_ms)},
+         {"host_mode", offsetof(AnomalyMaydayCombatStateV1, host_mode)},
+         {"gyro_enabled", offsetof(AnomalyMaydayCombatStateV1, gyro_enabled)},
+         {"crew_count", offsetof(AnomalyMaydayCombatStateV1, crew_count)},
+         {"last_swing_result", offsetof(AnomalyMaydayCombatStateV1, last_swing_result)},
+         {"last_result", offsetof(AnomalyMaydayCombatStateV1, last_result)},
+         {"attacks_sent", offsetof(AnomalyMaydayCombatStateV1, attacks_sent)}},
+        false);
+    AppendStruct(
+        output,
+        "AnomalyMaydayCombatServiceV1",
+        sizeof(AnomalyMaydayCombatServiceV1),
+        alignof(AnomalyMaydayCombatServiceV1),
+        {{"struct_size", offsetof(AnomalyMaydayCombatServiceV1, struct_size)},
+         {"service_version", offsetof(AnomalyMaydayCombatServiceV1, service_version)},
+         {"user", offsetof(AnomalyMaydayCombatServiceV1, user)},
+         {"set_options", offsetof(AnomalyMaydayCombatServiceV1, set_options)},
+         {"set_enabled", offsetof(AnomalyMaydayCombatServiceV1, set_enabled)},
+         {"set_gyro_enabled", offsetof(AnomalyMaydayCombatServiceV1, set_gyro_enabled)},
+         {"get_state", offsetof(AnomalyMaydayCombatServiceV1, get_state)}},
         true);
     output.append("  },\n");
 
@@ -1374,7 +1407,9 @@ std::string BuildSnapshot() {
     AppendService(output, ANOMALY_MAYDAY_FREECAM_SERVICE_V1_ID,
         ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION, "AnomalyMaydayFreecamServiceV1", false);
     AppendService(output, ANOMALY_MAYDAY_WEATHER_SERVICE_V1_ID,
-        ANOMALY_MAYDAY_WEATHER_SERVICE_V1_VERSION, "AnomalyMaydayWeatherServiceV1", true);
+        ANOMALY_MAYDAY_WEATHER_SERVICE_V1_VERSION, "AnomalyMaydayWeatherServiceV1", false);
+    AppendService(output, ANOMALY_MAYDAY_COMBAT_SERVICE_V1_ID,
+        ANOMALY_MAYDAY_COMBAT_SERVICE_V1_VERSION, "AnomalyMaydayCombatServiceV1", true);
     output.append("  ]\n");
     output.append("}\n");
     return output;

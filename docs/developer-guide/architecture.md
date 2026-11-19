@@ -13,7 +13,7 @@ flowchart TD
     Graph --> Plugins["插件宿主与 PluginScope"]
     Graph --> Adapter["Mayday Adapter (il2cpp)"]
     Session --> Render["D3D12 Bridge 与 ImGui UI"]
-    Adapter --> Services["mayday.money / mayday.freecam / mayday.il2cpp"]
+    Adapter --> Services["mayday.money / mayday.freecam / mayday.weather / mayday.combat / mayday.il2cpp"]
     Plugins --> Services
 ```
 
@@ -53,6 +53,11 @@ ServiceGraph、Catalog、Scope 或 HookManager 锁时调用插件代码。
 - 宿主等待 `GameAssembly.dll` 加载后解析 il2cpp 导出函数。
 - 类、方法和字段按名称在运行时解析并校验；失败时对应服务返回 `UNAVAILABLE`。
 - `mayday.money` 读写 `Mayday.GameState` 的 Mirror SyncVar；`mayday.freecam` 在主线程接管相机。
+- `mayday.weather` 走 `WorldEnvironment` 锚点时钟与 `WorldManager` 的 dev 覆盖。
+- `mayday.combat` 在 `PlayerInteractor.Update` 主线程钩子里选择队友并发送 `CmdUse`
+  Mirror Command（不锁定 NPC 乘客）；`BatItem.ServerUseOnce` 钩子在服务端命中判定
+  期间临时朝向目标，渲染帧不改变视角。远端房间由房主校验瞄准，因此只选择前方
+  45° 锥体内的队友。
 - 覆盖层展开时阻断 InputSystem 按钮、滚轮与 UGUI `EventSystem` 输入。
 
 ## 变更规则

@@ -1285,6 +1285,16 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Weather")
     target_compile_options(anomaly_builtin_weather PRIVATE /utf-8)
 
+    # Mayday 内建插件：自动棒球棍。手持棒球棍时自动锁定攻击范围内最近的
+    # 乘客，以 Mirror Command 形式发送使用请求；服务端命中判定期间临时朝向
+    # 目标，画面视角不动。il2cpp/钩子细节由宿主 mayday.combat 服务封装。
+    anomaly_add_plugin(anomaly_builtin_autobat
+        SOURCES plugins/autobat/plugin.cpp
+        MANIFEST plugins/autobat/manifest.json
+        PACKAGE_NAME Autobat
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Autobat")
+    target_compile_options(anomaly_builtin_autobat PRIVATE /utf-8)
+
     if(ANOMALY_BUILD_TEST_FIXTURES)
         add_executable(anomaly_ui_overlay_fixture
             apps/test_host/ui_overlay_fixture.cpp src/plugin/plugin_manager.cpp)
