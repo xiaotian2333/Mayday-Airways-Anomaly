@@ -663,7 +663,7 @@ target_include_directories(anomaly_manual_map PUBLIC include)
 target_compile_definitions(
     anomaly_manual_map PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anomaly_manual_map PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /EHsc /utf-8>)  # 源码与公共头含中文注释
-target_link_libraries(anomaly_manual_map PUBLIC Advapi32 Psapi)
+target_link_libraries(anomaly_manual_map PUBLIC Advapi32 Psapi wintrust crypt32)
 
 # The launcher's own injection and proxy paths are self-contained. The old official-launcher
 # game-hook DLL is not part of this build.
@@ -724,7 +724,7 @@ add_library(anomaly_artifact_bundle STATIC src/repository/artifact_bundle.cpp)
 target_include_directories(anomaly_artifact_bundle PUBLIC include)
 target_compile_definitions(
     anomaly_artifact_bundle PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_artifact_bundle PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_artifact_bundle PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码含中文注释
 target_link_libraries(anomaly_artifact_bundle PUBLIC anomaly_artifact_crypto anomaly_plugin_package)
 
 add_library(anomaly_repository_index STATIC src/repository/repository_index.cpp)

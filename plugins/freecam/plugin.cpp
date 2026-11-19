@@ -44,8 +44,12 @@ std::atomic<float> g_speed{kDefaultSpeed};
 std::atomic<float> g_sensitivity{kDefaultSensitivity};
 std::atomic<bool> g_dirty{false};
 std::atomic<bool> g_save_scheduled{false};
-bool g_active{};
-bool g_capture_mode{};
+std::atomic<bool> g_active{false};
+std::atomic<bool> g_capture_mode{false};
+// Draw 只记录用户意图；真正的服务调用和相机接管在 Update 里执行，
+// 避免在 Render 的绘制路径里安装 Hook 或等待解析。
+std::atomic<bool> g_pending_toggle{false};
+std::atomic<bool> g_rebind_requested{false};
 std::uint8_t g_previous_keys[32]{};
 std::string g_status;
 
@@ -427,7 +431,16 @@ void ANOMALY_CALL Update(void*, double) {
     AnomalyInputSnapshotV1 snapshot{};
     snapshot.struct_size = sizeof(snapshot);
     if (!Succeeded(g_input->snapshot(g_input->user, &snapshot))) return;
-    if (g_capture_mode) {
+    // Draw 排队的开关与重绑请求在这里执行：相机接管需要解析 il2cpp 并安装
+    // Hook，不能在绘制路径里同步等待。
+    if (g_pending_toggle.exchange(false, std::memory_order_acq_rel)) {
+        Toggle();
+    }
+    if (g_rebind_requested.exchange(false, std::memory_order_acq_rel)) {
+        g_capture_mode.store(false, std::memory_order_relaxed);
+        StartCapture(snapshot);
+    }
+    if (g_capture_mode.load(std::memory_order_relaxed)) {
         DetectBinding(snapshot);
         return;
     }
@@ -496,7 +509,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
         ? g_localizer.Text("button.disable", "Disable free camera")
         : g_localizer.Text("button.enable", "Enable free camera");
     if (ui->button(ui->user, anomaly::sdk::StringView(toggle_label), -1.0f, 0.0f)) {
-        Toggle();
+        g_pending_toggle.store(true, std::memory_order_release);
     }
 
     const std::string hotkey_label = g_localizer.Text("hotkey.label", "Toggle hotkey");
@@ -506,14 +519,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     ui->same_line(ui->user, 0.0f, -1.0f);
     const std::string rebind_label = g_localizer.Text("hotkey.rebind", "Rebind");
     if (ui->button(ui->user, anomaly::sdk::StringView(rebind_label), 0.0f, 0.0f)) {
-        g_capture_mode = false;
-        if (g_input != nullptr) {
-            AnomalyInputSnapshotV1 snapshot{};
-            snapshot.struct_size = sizeof(snapshot);
-            if (Succeeded(g_input->snapshot(g_input->user, &snapshot))) {
-                StartCapture(snapshot);
-            }
-        }
+        g_rebind_requested.store(true, std::memory_order_release);
     }
     if (g_capture_mode) {
         ui->text(ui->user, anomaly::sdk::StringView(

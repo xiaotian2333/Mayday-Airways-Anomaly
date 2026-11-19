@@ -257,6 +257,8 @@ public:
         anomaly::UiResourceHandle handle) noexcept;
 
     [[nodiscard]] std::vector<PluginView> Plugins() const;
+    // Reads the immutable snapshot published by the serialized plugin domain.
+    // Render and diagnostics never walk the live generation containers.
     [[nodiscard]] PluginRuntimeDiagnosticsSnapshot DiagnosticsSnapshot() const;
     [[nodiscard]] std::string DiagnosticsJson() const;
     [[nodiscard]] std::vector<std::string> Events() const;
@@ -320,6 +322,13 @@ private:
     void ApplyQueuedEnablementReload();
     void LoadPersistentUiWindowState();
     void SavePersistentUiWindowState(bool force = false) noexcept;
+    // Both run only inside the serialized plugin domain: the host gate covers
+    // every generation mutation, so the built snapshot describes one instant.
+    [[nodiscard]] PluginRuntimeDiagnosticsSnapshot BuildDiagnosticsSnapshot() const;
+    void PublishDiagnosticsSnapshot() noexcept;
+    // Refreshes callback counters published to the diagnostics surface without
+    // rebuilding the snapshot on every 10 ms maintenance tick.
+    void RefreshDiagnosticsSnapshotIfDue() noexcept;
 
     std::filesystem::path root_;
     std::filesystem::path plugin_directory_;
@@ -353,6 +362,12 @@ private:
     std::atomic_bool plugin_load_step_in_progress_{};
     mutable std::mutex pending_package_changes_mutex_;
     std::vector<std::string> pending_package_changes_;
+    // The published snapshot is the only cross-thread read path into the
+    // generation containers. It is rebuilt inside the serialized domain and
+    // swapped under this small mutex, never mutated in place.
+    mutable std::mutex published_diagnostics_mutex_;
+    std::shared_ptr<const PluginRuntimeDiagnosticsSnapshot> published_diagnostics_;
+    std::chrono::steady_clock::time_point published_diagnostics_at_{};
     anomaly::PluginEnablementStore enablement_store_;
     std::filesystem::path ui_window_state_file_;
     mutable std::mutex ui_window_state_mutex_;

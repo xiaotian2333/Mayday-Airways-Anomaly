@@ -92,6 +92,7 @@ void ClearInputMailbox(
     mailbox.mouse_position_published = false;
     mailbox.reset_pending = true;
     mailbox.reset_reason = reason;
+    mailbox.imgui_events.clear();
 }
 
 void UpdateModifiers(anomaly::InputFrameState& frame) noexcept {
@@ -344,6 +345,24 @@ void RecordRawMouseDelta(EmbeddedInputMailbox& mailbox, LPARAM lparam) noexcept 
     mailbox.raw_mouse_delta_y += static_cast<float>(mouse.lLastY);
 }
 
+// Input that Render has not consumed yet is bounded: a stalled frame loop must
+// not turn a held key into unbounded queue growth. Once the cap is reached new
+// events are dropped, exactly as a backlogged UI would ignore them.
+constexpr std::size_t kMaximumQueuedImGuiEvents = 4096;
+
+void QueueEmbeddedImGuiInput(
+    EmbeddedState& state, const EmbeddedImGuiInputKind kind, const UINT message,
+    const WPARAM wparam, const LPARAM lparam) noexcept {
+    try {
+        std::scoped_lock lock(state.input_mailbox.mutex);
+        auto& events = state.input_mailbox.imgui_events;
+        if (events.size() >= kMaximumQueuedImGuiEvents) return;
+        events.push_back({kind, message, wparam, lparam});
+    } catch (...) {
+        // WndProc must not let an allocation failure unwind into the game.
+    }
+}
+
 LRESULT ForwardToGameWindowProc(
     EmbeddedState* state, HWND window, UINT message, WPARAM wparam, LPARAM lparam) noexcept {
     return state != nullptr && state->original_window_proc != nullptr
@@ -365,7 +384,7 @@ LRESULT CALLBACK EmbeddedWindowProc(HWND window, UINT message, WPARAM wparam, LP
         RecordEmbeddedInputMessage(*state, message, wparam, lparam);
     }
     if (state != nullptr && state->renderer.load() == RendererLifecycle::Ready &&
-        ImGui::GetCurrentContext() != nullptr) {
+        state->imgui_context != nullptr) {
         // A locked window remains visible while menus are collapsed, but it
         // never owns input. The menu gate therefore precedes all ImGui flags.
         const bool menus_expanded = !anomaly::HostUiMenusCollapsed();
@@ -393,9 +412,12 @@ LRESULT CALLBACK EmbeddedWindowProc(HWND window, UINT message, WPARAM wparam, LP
             return TRUE;
         }
 
+        // ImGui 的输入队列由 Render 线程在 NewFrame 之前消费。窗口过程这里只入队，
+        // 绝不直接调用 ImGui_ImplWin32_WndProcHandler：Unity 的窗口线程与 Present
+        // 线程并发时，直调会同时改写 ImGui IO 和帧状态。
         if (capture_mouse && (mouse_message || raw_mouse)) {
-            static_cast<void>(ImGui_ImplWin32_WndProcHandler(
-                window, message, wparam, lparam));
+            QueueEmbeddedImGuiInput(
+                *state, EmbeddedImGuiInputKind::WndProcMessage, message, wparam, lparam);
         }
         if (capture_mouse && mouse_message) {
             return TRUE;
@@ -414,12 +436,16 @@ LRESULT CALLBACK EmbeddedWindowProc(HWND window, UINT message, WPARAM wparam, LP
         const bool forward_clipboard = clipboard_message && capture_text;
         if (forward_keyboard || forward_text || forward_clipboard ||
             focus_message) {
-            static_cast<void>(ImGui_ImplWin32_WndProcHandler(
-                window, message, wparam, lparam));
+            QueueEmbeddedImGuiInput(
+                *state, EmbeddedImGuiInputKind::WndProcMessage, message, wparam, lparam);
             if (forward_text && message == WM_UNICHAR) {
-                QueueUnicodeCharacter(wparam, ImGui::GetIO());
+                QueueEmbeddedImGuiInput(
+                    *state, EmbeddedImGuiInputKind::UnicodeCharacter, message, wparam, lparam);
             }
-            if (forward_clipboard && message == WM_PASTE) QueueClipboardText(ImGui::GetIO());
+            if (forward_clipboard && message == WM_PASTE) {
+                QueueEmbeddedImGuiInput(
+                    *state, EmbeddedImGuiInputKind::ClipboardPaste, message, wparam, lparam);
+            }
         }
 
         LRESULT ime_result{};
@@ -454,6 +480,35 @@ void RecordEmbeddedInputMessage(
     } catch (...) {
         // WndProc must not allow synchronization failures to unwind into the
         // game. A subsequent Render frame will reconcile physical input.
+    }
+}
+
+void FlushEmbeddedImGuiInput(EmbeddedState& state) noexcept {
+    if (state.imgui_context == nullptr) return;
+    std::vector<EmbeddedImGuiInput> events;
+    try {
+        std::scoped_lock lock(state.input_mailbox.mutex);
+        events.swap(state.input_mailbox.imgui_events);
+    } catch (...) {
+        return;
+    }
+    if (events.empty()) return;
+    // Render owns the context: EnsureEmbeddedGraphics makes it current before
+    // the first frame, and teardown clears both before Render stops.
+    if (ImGui::GetCurrentContext() != state.imgui_context) return;
+    for (const EmbeddedImGuiInput& event : events) {
+        switch (event.kind) {
+        case EmbeddedImGuiInputKind::WndProcMessage:
+            static_cast<void>(ImGui_ImplWin32_WndProcHandler(
+                state.window, event.message, event.wparam, event.lparam));
+            break;
+        case EmbeddedImGuiInputKind::UnicodeCharacter:
+            QueueUnicodeCharacter(event.wparam, ImGui::GetIO());
+            break;
+        case EmbeddedImGuiInputKind::ClipboardPaste:
+            QueueClipboardText(ImGui::GetIO());
+            break;
+        }
     }
 }
 

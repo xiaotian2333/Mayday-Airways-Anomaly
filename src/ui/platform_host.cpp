@@ -573,8 +573,6 @@ constexpr float kPlatformTabBarReserve = 82.0f;
 constexpr float kPlatformGloballyCollapsedWidth = 132.0f;
 constexpr float kPlatformInitialShellWidth = 1180.0f;
 constexpr float kPlatformInitialShellHeight = 700.0f;
-constexpr float kPlatformStandardShellWidth = 900.0f;
-constexpr float kPlatformStandardShellHeight = 600.0f;
 constexpr float kPlatformMinimumShellWidth = 760.0f;
 constexpr float kPlatformMinimumShellHeight = 500.0f;
 constexpr float kPlatformMaximumShellWidth = 1560.0f;
@@ -1373,12 +1371,12 @@ public:
                     management_window_scope_, management_window_)) {
                 if (!window->open) anomaly::SetHostUiMenusCollapsed(true);
                 if (window->width > 0.0F && window->height > 0.0F) {
-                    management_shell_expanded_size_ = {window->width, window->height};
-                    if (window->width < kPlatformInitialShellWidth ||
-                        window->height < kPlatformStandardShellHeight) {
-                        management_shell_expanded_size_ = {
-                            kPlatformInitialShellWidth, kPlatformInitialShellHeight};
-                    }
+                    // 已保存尺寸按注册表的最小尺寸校验，而不是按首次启动尺寸：
+                    // 900x600 这类合法的小窗口必须跨会话保留。首启通告的 1x1
+                    // 临时态在 Draw 里不会回写，因此这里不会看到它。
+                    management_shell_expanded_size_ = {
+                        (std::max)(window->width, kPlatformMinimumShellWidth),
+                        (std::max)(window->height, kPlatformMinimumShellHeight)};
                 }
             }
         }
@@ -1806,7 +1804,10 @@ public:
             phase_started = measure ? std::chrono::steady_clock::now()
                                     : std::chrono::steady_clock::time_point{};
         }
-        if (!shell_collapsed && !ManagementShellCollapsed()) {
+        // 首启通告把窗口压成 1x1 作为卡片的父窗口，折叠态也只显示标题条：
+        // 两者都不是用户调整的尺寸，不能回写持久化状态。否则接受通告后主界面
+        // 会缩到最小，下一次启动也读回这个错误尺寸。
+        if (!notice_pending && !shell_collapsed && !ManagementShellCollapsed()) {
             float width{};
             float height{};
             ui->get_window_size(ui->user, &width, &height);
@@ -1826,7 +1827,9 @@ public:
                 management_window_scope_, management_window_,
                 management_shell_expanded_size_.x, management_shell_expanded_size_.y));
         }
-        if (!globally_collapsed) management_shell_apply_initial_size_ = false;
+        // 通告期间窗口被压成 1x1，初始尺寸还没有真正应用；保留这个标志，
+        // 否则接受通告后主界面会停在被约束到的最小尺寸。
+        if (!globally_collapsed && !notice_pending) management_shell_apply_initial_size_ = false;
         management_shell_was_collapsed_ = shell_collapsed;
         management_shell_ui_scale_ = ui_scale;
         ui->end_window(ui->user);

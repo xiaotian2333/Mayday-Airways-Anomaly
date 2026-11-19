@@ -251,9 +251,25 @@ struct PixelProbeState {
     bool pending{};
 };
 
-// WndProc only records host input here. Render consumes the mailbox after
-// ImGui::NewFrame, which keeps hotkey dispatch and PluginManager access out of
-// the window-procedure thread.
+// 窗口过程可能运行在 Unity 自己的线程上，而 ImGui 的输入队列只在 Render 线程上被消费。
+// 消息先按到达顺序进入这里，由 Render 线程在 ImGui_ImplWin32_NewFrame 之前统一重放，
+// 避免窗口线程与 NewFrame 并发改写 ImGui IO。
+enum class EmbeddedImGuiInputKind : std::uint8_t {
+    WndProcMessage,
+    UnicodeCharacter,
+    ClipboardPaste,
+};
+
+struct EmbeddedImGuiInput {
+    EmbeddedImGuiInputKind kind{EmbeddedImGuiInputKind::WndProcMessage};
+    UINT message{};
+    WPARAM wparam{};
+    LPARAM lparam{};
+};
+
+// WndProc only records host input here. Render consumes the mailbox on its own
+// thread, which keeps hotkey dispatch and PluginManager access out of the
+// window-procedure thread.
 struct EmbeddedInputMailbox {
     std::mutex mutex;
     anomaly::InputFrameState frame;
@@ -270,6 +286,7 @@ struct EmbeddedInputMailbox {
     bool mouse_position_published{};
     bool reset_pending{};
     anomaly::InputResetReason reset_reason{anomaly::InputResetReason::None};
+    std::vector<EmbeddedImGuiInput> imgui_events;
 };
 
 using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
@@ -356,6 +373,9 @@ struct EmbeddedState {
     ID3D12CommandQueue* render_queue{};
     ID3D12CommandQueue* pending_resize_queue{};
     bool pending_resize_queue_valid{true};
+    // ResizeBuffers 已成功，但插件代仍持有设备对象；下一次 Present 重试接管，
+    // 而不是把覆盖层永久置为 Stopped。
+    std::atomic_bool resize_rebuild_deferred{false};
     IDXGISwapChain* source_swap_chain{};
     IDXGISwapChain3* swap_chain{};
     ID3D12Device* device{};
@@ -427,6 +447,9 @@ inline constexpr std::uint64_t kRendererHookGeneration = 1;
 [[nodiscard]] bool RestoreEmbeddedInput(EmbeddedState& state) noexcept;
 void RecordEmbeddedInputMessage(
     EmbeddedState& state, UINT message, WPARAM wparam, LPARAM lparam) noexcept;
+// Replays window-thread ImGui input on Render, immediately before
+// ImGui_ImplWin32_NewFrame. Never call it from the window procedure.
+void FlushEmbeddedImGuiInput(EmbeddedState& state) noexcept;
 // These are called on Render while the existing PluginManager mutex is held.
 // The mailbox keeps their input collection independent from WndProc.
 [[nodiscard]] bool PublishEmbeddedInputFrame(EmbeddedState& state) noexcept;

@@ -131,8 +131,13 @@ ArtifactBundleResult CreateArtifactBundle(
         std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
             return left.relative < right.relative;
         });
-        std::filesystem::create_directories(output_file.parent_path(), error);
-        if (error) return Failure(ArtifactBundleError::IoFailure, "bundle output directory failed");
+        // 不带目录的 `--output out.anomaly-package` 是帮助里给出的用法；
+        // MSVC 对空路径调 create_directories 会返回 ERROR_PATH_NOT_FOUND。
+        const std::filesystem::path output_parent = output_file.parent_path();
+        if (!output_parent.empty()) {
+            std::filesystem::create_directories(output_parent, error);
+            if (error) return Failure(ArtifactBundleError::IoFailure, "bundle output directory failed");
+        }
         const auto temporary = output_file.wstring() + L".tmp-" + std::to_wstring(GetCurrentProcessId());
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         output.write(kMagic.data(), kMagic.size());
