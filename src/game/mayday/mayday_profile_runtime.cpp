@@ -62,8 +62,8 @@ struct Quat {
     float w;
 };
 
-// 自动棒球棍的目标快照：object 是 Passenger 对象，chest 是游戏
-// BatItem.ChestOf 返回的命中点，distance_mm 用于 UI 与就近选择。
+// 自动棒球棍的目标快照：object 是队友 PlayerNet 对象，chest 是
+// PlayerNet.ChestPosition 返回的命中点，distance_mm 用于 UI 与就近选择。
 struct CombatTarget {
     void* object{};
     Vec3 chest{};
@@ -276,12 +276,27 @@ struct MaydayAdapter::Impl {
     std::atomic<bool> combat_enabled{false};
     std::atomic<std::int32_t> combat_max_range_mm{0};
     std::atomic<std::int32_t> combat_interval_ms{0};
+    std::atomic<std::int32_t> combat_crew_cone_deg{0};
     std::atomic<bool> combat_in_flight{false};
     std::atomic<bool> combat_holding_bat{false};
     std::atomic<bool> combat_has_target{false};
     std::atomic<std::int32_t> combat_target_distance_mm{-1};
+    std::atomic<std::int32_t> combat_host_mode{0};
+    std::atomic<std::int32_t> combat_crew_count{0};
+    std::atomic<bool> combat_gyro_enabled{false};
+    std::atomic<bool> gyro_initialized{false};
+    std::chrono::steady_clock::time_point gyro_last{};
+    float gyro_base_yaw{};
+    float gyro_spin_degrees{};
+    std::atomic<std::int32_t> combat_last_swing_result{0};
     std::atomic<std::int32_t> combat_last_result{0};
     std::atomic<std::uint32_t> combat_attacks_sent{0};
+    bool combat_mode_logged{false};
+    std::int32_t combat_logged_host_mode{-1};
+    std::chrono::steady_clock::time_point combat_last_result_log{};
+    std::chrono::steady_clock::time_point combat_last_send_log{};
+    std::chrono::steady_clock::time_point gyro_net_last{};
+    float gyro_net_spin_degrees{};
     bool combat_resolved{false};
     bool combat_hooks_installed{false};
     std::atomic<bool> combat_shutdown{false};
@@ -289,29 +304,34 @@ struct MaydayAdapter::Impl {
     std::atomic<int> combat_in_callback{0};
     std::unique_ptr<HookBackend> combat_hook_backend;
     std::chrono::steady_clock::time_point combat_last_attack{};
-    std::chrono::steady_clock::time_point combat_last_scan{};
     CombatTarget combat_target{};   // 主线程专属：最近一次扫描结果
+    void* combat_pending_aim_target{};  // 主线程专属：本次 CmdUse 要静默瞄准的队友
     static std::atomic<Impl*> combat_owner;
     void* player_net_class{};
     void* player_inventory_class{};
     void* bat_item_class{};
-    void* passenger_class{};
+    void* player_avatar_class{};
     void* interaction_registry_class{};
     void* player_interactor_class{};
+    void* network_server_class{};
     void* get_local{};
+    void* get_avatar{};
+    void* get_avatar_rig{};
+    void* get_net_transform{};
     void* get_inventory{};
     void* get_held{};
     void* get_interactor{};
     void* get_eye_position{};
+    void* get_aim_direction{};
     void* get_chest_position{};
     void* get_is_seated{};
     void* get_is_stunned{};
     void* get_network_is_dead{};
-    void* passenger_all_field{};
-    void* passenger_on_board{};
-    void* passenger_is_carried{};
+    void* get_network_server_active{};
+    void* player_all_field{};
     void* bat_server_use_once{};
-    void* bat_chest_of{};
+    void* bat_rpc_swing_user_code{};
+    void* bat_get_holder{};
     void* interact_ref_of{};
     void* interactor_update{};
     void* interactor_cmd_use{};
@@ -321,7 +341,30 @@ struct MaydayAdapter::Impl {
     void* combat_update_original{};
     void* combat_bat_target{};
     void* combat_bat_original{};
-    // 乘客列表方法在首次枚举时按实例类型解析（主线程专属，无锁）。
+    void* combat_swing_target{};
+    void* combat_swing_original{};
+    bool combat_swing_hook_created{false};
+    void* network_transform_class{};
+    void* network_transform_base_class{};
+    void* net_broadcast_method{};
+    void* net_broadcast_target{};
+    void* net_broadcast_original{};
+    void* net_transform_target_field{};
+    std::size_t net_transform_target_offset{};
+    bool net_broadcast_hook_created{false};
+    // BatItem 的挥击结果字段（Prefab 序列化值，运行时按字段名读取）。
+    void* swing_whiff_field{};
+    std::size_t swing_whiff_offset{};
+    void* swing_pax_field{};
+    std::size_t swing_pax_offset{};
+    void* swing_crew_field{};
+    std::size_t swing_crew_offset{};
+    void* swing_whoosh_field{};
+    std::size_t swing_whoosh_offset{};
+    // 房主模式下用于重置服务端挥击冷却（远端房间无法修改房主对象）。
+    void* next_swing_field{};
+    std::size_t next_swing_offset{};
+    // 队友列表方法在首次枚举时按实例类型解析（主线程专属，无锁）。
     void* combat_list_class{};
     void* combat_list_count{};
     void* combat_list_item{};
@@ -434,8 +477,11 @@ struct MaydayAdapter::Impl {
     static AnomalyStatusV1 ANOMALY_CALL WeatherGetKindValue(
         void* user, std::int32_t kind_index, std::int32_t* out_value);
     static AnomalyStatusV1 ANOMALY_CALL CombatSetOptions(
-        void* user, std::int32_t max_range_mm, std::int32_t attack_interval_ms);
+        void* user, std::int32_t max_range_mm, std::int32_t attack_interval_ms,
+        std::int32_t crew_cone_deg);
     static AnomalyStatusV1 ANOMALY_CALL CombatSetEnabled(void* user, std::int32_t enabled);
+    static AnomalyStatusV1 ANOMALY_CALL CombatSetGyroEnabled(
+        void* user, std::int32_t enabled);
     static AnomalyStatusV1 ANOMALY_CALL CombatGetState(
         void* user, AnomalyMaydayCombatStateV1* out_state);
 
@@ -480,17 +526,20 @@ struct MaydayAdapter::Impl {
     bool InvokeBool(void* method, void* object, bool* out_value);
     bool InvokeVoidArg(void* method, void* object, void* argument);
     void* InvokeObject(void* method, void* object);
-    bool InvokeVec3Arg(void* method, void* argument, Vec3* out_value);
     [[nodiscard]] bool ClassDerivesFrom(void* klass, void* base) const;
 
     // 自动棒球棍的主线程钩子与目标选择。
     static void ANOMALY_CALL InteractorUpdateThunk(void* self);
     static void ANOMALY_CALL BatUseOnceThunk(
         void* self, void* player, void* target, const Vec3* hit_point);
+    static void ANOMALY_CALL BatRpcSwingThunk(void* self, std::uint8_t result);
+    static void ANOMALY_CALL NetTransformBroadcastThunk(void* self);
     void HandleInteractorUpdate(void* self);
     void HandleBatUseOnce(void* self, void* player, void* target, const Vec3* hit_point);
+    void HandleBatRpcSwing(void* self, std::uint8_t result);
+    void HandleNetTransformBroadcast(void* self);
     void UpdateCombat(void* self);
-    bool FindNearestPassenger(void* local, CombatTarget* out_target);
+    bool FindNearestCrewmate(void* local, CombatTarget* out_target);
     bool BuildInteractRef(void* target, CombatInteractRef* out_ref);
     bool EnsureCombatHooks();
     void TeardownCombatHooks() noexcept;
@@ -498,6 +547,9 @@ struct MaydayAdapter::Impl {
     static void ANOMALY_CALL PlayerLookUpdateThunk(void* self);
     void HandleLookUpdate(void* self);
     bool EnsureFreecamHook();
+    void* FindCameraRig(void* local);
+    void ApplyGyro();
+    void RestoreGyro();
     bool ActivateFreecam(void* local, void* look);
     bool DeactivateFreecam();
     // 玩家对象已失效（换局/重生）时丢弃现场，禁止再触碰旧指针。
@@ -869,14 +921,17 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherGetKindValue(
 
 // ---- 自动棒球棍服务实现 ----
 AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatSetOptions(
-    void* user, std::int32_t max_range_mm, std::int32_t attack_interval_ms) {
+    void* user, std::int32_t max_range_mm, std::int32_t attack_interval_ms,
+    std::int32_t crew_cone_deg) {
     auto* const impl = static_cast<Impl*>(user);
     if (impl == nullptr || max_range_mm < 100 || max_range_mm > 10000 ||
-        attack_interval_ms < 100 || attack_interval_ms > 5000) {
+        attack_interval_ms < 10 || attack_interval_ms > 1000 ||
+        crew_cone_deg < 1 || crew_cone_deg > 180) {
         return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
     }
     impl->combat_max_range_mm.store(max_range_mm, std::memory_order_release);
     impl->combat_interval_ms.store(attack_interval_ms, std::memory_order_release);
+    impl->combat_crew_cone_deg.store(crew_cone_deg, std::memory_order_release);
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
 
@@ -888,7 +943,8 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatSetEnabled(
     if (enabled != 0) {
         if (!impl->ResolveCombat()) return CombatStatus("status.combat_no_symbols");
         if (impl->combat_max_range_mm.load(std::memory_order_acquire) <= 0 ||
-            impl->combat_interval_ms.load(std::memory_order_acquire) <= 0) {
+            impl->combat_interval_ms.load(std::memory_order_acquire) <= 0 ||
+            impl->combat_crew_cone_deg.load(std::memory_order_acquire) <= 0) {
             return CombatStatus("status.combat_no_options");
         }
         if (!impl->EnsureCombatHooks()) {
@@ -899,6 +955,33 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatSetEnabled(
     if (enabled == 0) {
         impl->combat_has_target.store(false, std::memory_order_release);
         impl->combat_target_distance_mm.store(-1, std::memory_order_release);
+    }
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatSetGyroEnabled(
+    void* user, std::int32_t enabled) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    std::scoped_lock lock(impl->resolve_mutex);
+    if (enabled != 0) {
+        if (impl->combat_shutdown.load(std::memory_order_acquire)) {
+            return CombatStatus("status.failed");
+        }
+        if (!impl->ResolveCombat()) {
+            return CombatStatus("status.combat_no_symbols");
+        }
+        if (impl->get_local_rig == nullptr || impl->get_avatar == nullptr ||
+            impl->get_avatar_rig == nullptr) {
+            return CombatStatus("status.combat_gyro_unavailable");
+        }
+        if (!impl->EnsureCombatHooks()) {
+            return CombatStatus("status.combat_gyro_hook_failed");
+        }
+        impl->gyro_initialized.store(false, std::memory_order_release);
+        impl->combat_gyro_enabled.store(true, std::memory_order_release);
+    } else {
+        impl->combat_gyro_enabled.store(false, std::memory_order_release);
     }
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
@@ -923,6 +1006,14 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatGetState(
         impl->combat_max_range_mm.load(std::memory_order_acquire);
     out_state->attack_interval_ms =
         impl->combat_interval_ms.load(std::memory_order_acquire);
+    out_state->host_mode =
+        impl->combat_host_mode.load(std::memory_order_acquire);
+    out_state->gyro_enabled =
+        impl->combat_gyro_enabled.load(std::memory_order_acquire) ? 1 : 0;
+    out_state->crew_count =
+        impl->combat_crew_count.load(std::memory_order_acquire);
+    out_state->last_swing_result =
+        impl->combat_last_swing_result.load(std::memory_order_acquire);
     out_state->last_result =
         impl->combat_last_result.load(std::memory_order_acquire);
     out_state->attacks_sent =
@@ -964,7 +1055,7 @@ void MaydayAdapter::Impl::PublishWeatherService() {
 void MaydayAdapter::Impl::PublishCombatService() {
     combat_service = {
         sizeof(AnomalyMaydayCombatServiceV1), kCombatServiceVersion, this,
-        CombatSetOptions, CombatSetEnabled, CombatGetState};
+        CombatSetOptions, CombatSetEnabled, CombatSetGyroEnabled, CombatGetState};
     if (ProcessAdapterServices().Publish(
             kCombatServiceId, kCombatServiceVersion, &combat_service)) {
         combat_published.store(&combat_service, std::memory_order_release);
@@ -1150,19 +1241,33 @@ bool MaydayAdapter::Impl::ResolveCombat() {
     player_net_class = class_from_name(image, "Mayday", "PlayerNet");
     player_inventory_class = class_from_name(image, "Mayday", "PlayerInventory");
     bat_item_class = class_from_name(image, "Mayday.Passengers", "BatItem");
-    passenger_class = class_from_name(image, "Mayday.Passengers", "Passenger");
+    if (player_rig_class == nullptr) {
+        player_rig_class = class_from_name(image, "Mayday.Players", "PlayerRig");
+    }
+    player_avatar_class =
+        class_from_name(image, "Mayday.Players", "PlayerAvatar");
     interaction_registry_class = class_from_name(image, "Mayday", "InteractionRegistry");
     player_interactor_class = class_from_name(image, "Mayday", "PlayerInteractor");
     if (player_net_class == nullptr || player_inventory_class == nullptr ||
-        bat_item_class == nullptr || passenger_class == nullptr ||
+        bat_item_class == nullptr ||
         interaction_registry_class == nullptr || player_interactor_class == nullptr) {
         return false;
+    }
+    if (player_rig_class != nullptr) {
+        if (get_local_rig == nullptr) {
+            get_local_rig = class_get_method(player_rig_class, "get_Local", 0);
+        }
+        get_avatar = class_get_method(player_rig_class, "get_Avatar", 0);
+    }
+    if (player_avatar_class != nullptr) {
+        get_avatar_rig = class_get_method(player_avatar_class, "get_Rig", 0);
     }
 
     get_local = class_get_method(player_net_class, "get_Local", 0);
     get_inventory = class_get_method(player_net_class, "get_Inventory", 0);
     get_interactor = class_get_method(player_net_class, "get_Interactor", 0);
     get_eye_position = class_get_method(player_net_class, "get_EyePosition", 0);
+    get_aim_direction = class_get_method(player_net_class, "get_AimDirection", 0);
     get_chest_position = class_get_method(player_net_class, "get_ChestPosition", 0);
     get_is_seated = class_get_method(player_net_class, "get_IsSeated", 0);
     get_is_stunned = class_get_method(player_net_class, "get_IsStunned", 0);
@@ -1173,10 +1278,30 @@ bool MaydayAdapter::Impl::ResolveCombat() {
     }
     get_held = class_get_method(player_inventory_class, "get_Held", 0);
     bat_server_use_once = class_get_method(bat_item_class, "ServerUseOnce", 3);
-    bat_chest_of = class_get_method(bat_item_class, "ChestOf", 1);
-    passenger_all_field = class_get_field(passenger_class, "All");
-    passenger_on_board = class_get_method(passenger_class, "get_IsOnBoardState", 0);
-    passenger_is_carried = class_get_method(passenger_class, "get_IsCarried", 0);
+    bat_rpc_swing_user_code =
+        class_get_method(bat_item_class, "UserCode_RpcSwing__Byte", 1);
+    bat_get_holder = class_get_method(bat_item_class, "get_Holder", 0);
+    swing_whiff_field = class_get_field(bat_item_class, "SwingWhiff");
+    swing_pax_field = class_get_field(bat_item_class, "SwingPax");
+    swing_crew_field = class_get_field(bat_item_class, "SwingCrew");
+    swing_whoosh_field = class_get_field(bat_item_class, "SwingWhoosh");
+    if (swing_whiff_field != nullptr) {
+        swing_whiff_offset = field_get_offset(swing_whiff_field);
+    }
+    if (swing_pax_field != nullptr) {
+        swing_pax_offset = field_get_offset(swing_pax_field);
+    }
+    if (swing_crew_field != nullptr) {
+        swing_crew_offset = field_get_offset(swing_crew_field);
+    }
+    if (swing_whoosh_field != nullptr) {
+        swing_whoosh_offset = field_get_offset(swing_whoosh_field);
+    }
+    next_swing_field = class_get_field(bat_item_class, "nextSwing");
+    if (next_swing_field != nullptr) {
+        next_swing_offset = field_get_offset(next_swing_field);
+    }
+    player_all_field = class_get_field(player_net_class, "All");
     interact_ref_of = class_get_method(interaction_registry_class, "RefOf", 1);
     interactor_update = class_get_method(player_interactor_class, "Update", 0);
     interactor_cmd_use = class_get_method(player_interactor_class, "CmdUse", 4);
@@ -1185,13 +1310,19 @@ bool MaydayAdapter::Impl::ResolveCombat() {
     std::size_t assembly_count{};
     void** const assemblies = domain_get_assemblies(domain, &assembly_count);
     void* core_image{};
+    void* mirror_image{};
+    void* mirror_components_image{};
     for (std::size_t i = 0; assemblies != nullptr && i < assembly_count; ++i) {
         void* const candidate = assembly_get_image(assemblies[i]);
         if (candidate == nullptr) continue;
         const char* const name = image_get_name(candidate);
-        if (name != nullptr && std::strcmp(name, "UnityEngine.CoreModule.dll") == 0) {
+        if (name == nullptr) continue;
+        if (std::strcmp(name, "UnityEngine.CoreModule.dll") == 0) {
             core_image = candidate;
-            break;
+        } else if (std::strcmp(name, "Mirror.dll") == 0) {
+            mirror_image = candidate;
+        } else if (std::strcmp(name, "Mirror.Components.dll") == 0) {
+            mirror_components_image = candidate;
         }
     }
     if (core_image == nullptr) return false;
@@ -1212,11 +1343,45 @@ bool MaydayAdapter::Impl::ResolveCombat() {
     if (transform_set_euler == nullptr) {
         transform_set_euler = class_get_method(transform_class, "set_eulerAngles", 1);
     }
+    if (mirror_image != nullptr) {
+        network_server_class = class_from_name(mirror_image, "Mirror", "NetworkServer");
+        if (network_server_class != nullptr) {
+            get_network_server_active =
+                class_get_method(network_server_class, "get_active", 0);
+        }
+    }
+    if (mirror_components_image != nullptr) {
+        network_transform_class = class_from_name(
+            mirror_components_image, "Mirror", "NetworkTransformUnreliable");
+        network_transform_base_class = class_from_name(
+            mirror_components_image, "Mirror", "NetworkTransformBase");
+        if (network_transform_class != nullptr) {
+            net_broadcast_method =
+                class_get_method(network_transform_class, "UpdateClientBroadcast", 0);
+            if (net_broadcast_method != nullptr) {
+                net_broadcast_target =
+                    *reinterpret_cast<void**>(net_broadcast_method);
+            }
+            void* const field_class = network_transform_base_class != nullptr
+                ? network_transform_base_class : network_transform_class;
+            net_transform_target_field = class_get_field(field_class, "target");
+            if (net_transform_target_field != nullptr) {
+                net_transform_target_offset =
+                    field_get_offset(net_transform_target_field);
+            }
+        }
+    }
+    if (player_rig_class != nullptr) {
+        get_net_transform =
+            class_get_method(player_rig_class, "get_NetTransform", 0);
+    }
 
     combat_update_target = interactor_update != nullptr
         ? *reinterpret_cast<void**>(interactor_update) : nullptr;
     combat_bat_target = bat_server_use_once != nullptr
         ? *reinterpret_cast<void**>(bat_server_use_once) : nullptr;
+    combat_swing_target = bat_rpc_swing_user_code != nullptr
+        ? *reinterpret_cast<void**>(bat_rpc_swing_user_code) : nullptr;
 
     struct NamedHandle { const char* name; void* handle; };
     const NamedHandle required[] = {
@@ -1224,14 +1389,14 @@ bool MaydayAdapter::Impl::ResolveCombat() {
         {"player.get_Inventory", get_inventory},
         {"player.get_Interactor", get_interactor},
         {"player.get_EyePosition", get_eye_position},
+        {"player.get_AimDirection", get_aim_direction},
+        {"player.get_ChestPosition", get_chest_position},
         {"player.ViewTransform", player_view_field},
         {"player.get_eulerAngles", transform_get_euler},
         {"player.set_eulerAngles", transform_set_euler},
+        {"player.All", player_all_field},
         {"inventory.get_Held", get_held},
         {"bat.ServerUseOnce", bat_server_use_once},
-        {"bat.ChestOf", bat_chest_of},
-        {"passenger.All", passenger_all_field},
-        {"passenger.get_IsOnBoardState", passenger_on_board},
         {"registry.RefOf", interact_ref_of},
         {"interactor.Update", interactor_update},
         {"interactor.CmdUse", interactor_cmd_use},
@@ -1260,7 +1425,8 @@ bool MaydayAdapter::Impl::ResolveCombat() {
     combat_resolved = true;
     if (log_sink != nullptr) {
         log_sink("combat.resolved",
-                 "PlayerNet/BatItem/Passenger/InteractionRegistry resolved");
+                 std::string("PlayerNet/BatItem/crew list/InteractionRegistry resolved netspin=") +
+                 (net_broadcast_target != nullptr ? "1" : "0"));
     }
     return true;
 }
@@ -1516,20 +1682,6 @@ void* MaydayAdapter::Impl::InvokeObject(void* method, void* object) {
     return exception == nullptr ? result : nullptr;
 }
 
-bool MaydayAdapter::Impl::InvokeVec3Arg(
-    void* method, void* argument, Vec3* out_value) {
-    if (method == nullptr || argument == nullptr || out_value == nullptr ||
-        object_unbox == nullptr) {
-        return false;
-    }
-    void* params[] = {argument};
-    void* exception{};
-    void* const boxed = runtime_invoke(method, nullptr, params, &exception);
-    if (exception != nullptr || boxed == nullptr) return false;
-    *out_value = *static_cast<Vec3*>(object_unbox(boxed));
-    return true;
-}
-
 bool MaydayAdapter::Impl::ClassDerivesFrom(void* klass, void* base) const {
     if (klass == nullptr || base == nullptr || class_get_parent == nullptr) return false;
     for (void* current = klass; current != nullptr; current = class_get_parent(current)) {
@@ -1632,15 +1784,12 @@ void MaydayAdapter::Impl::HandleLookUpdate(void* self) {
     // 激活期间跳过原 Update：否则它会把相机拉回玩家头部。
 }
 
-bool MaydayAdapter::Impl::ActivateFreecam(void* local, void* look) {
-    fc_error_key = nullptr;
-    if (local == nullptr || look == nullptr) {
-        fc_error_key = "status.not_in_flight";
-        return false;
-    }
+void* MaydayAdapter::Impl::FindCameraRig(void* local) {
+    if (local == nullptr) return nullptr;
     void* exception{};
     void* camera_rig{};
-    if (camera_rig_field != nullptr && camera_rig_offset > 0 && camera_rig_offset < 0x1000) {
+    if (camera_rig_field != nullptr && camera_rig_offset > 0 &&
+        camera_rig_offset < 0x1000) {
         camera_rig = *reinterpret_cast<void**>(
             reinterpret_cast<std::uint8_t*>(local) + camera_rig_offset);
     }
@@ -1650,7 +1799,8 @@ bool MaydayAdapter::Impl::ActivateFreecam(void* local, void* look) {
         void* const camera = *reinterpret_cast<void**>(
             reinterpret_cast<std::uint8_t*>(local) + view_camera_offset);
         if (camera != nullptr) {
-            camera_rig = runtime_invoke(component_get_transform, camera, nullptr, &exception);
+            camera_rig = runtime_invoke(
+                component_get_transform, camera, nullptr, &exception);
             if (exception != nullptr) exception = nullptr;
         }
     }
@@ -1660,22 +1810,104 @@ bool MaydayAdapter::Impl::ActivateFreecam(void* local, void* look) {
     }
     if (camera_rig == nullptr && get_view_camera != nullptr &&
         component_get_transform != nullptr) {
-        void* const camera = runtime_invoke(get_view_camera, local, nullptr, &exception);
+        void* const camera =
+            runtime_invoke(get_view_camera, local, nullptr, &exception);
         if (exception != nullptr) exception = nullptr;
         if (camera != nullptr) {
-            camera_rig = runtime_invoke(component_get_transform, camera, nullptr, &exception);
+            camera_rig = runtime_invoke(
+                component_get_transform, camera, nullptr, &exception);
             if (exception != nullptr) exception = nullptr;
         }
     }
     if (camera_rig == nullptr && camera_get_main != nullptr &&
         component_get_transform != nullptr) {
-        void* const camera = runtime_invoke(camera_get_main, nullptr, nullptr, &exception);
+        void* const camera =
+            runtime_invoke(camera_get_main, nullptr, nullptr, &exception);
         if (exception != nullptr) exception = nullptr;
         if (camera != nullptr) {
-            camera_rig = runtime_invoke(component_get_transform, camera, nullptr, &exception);
+            camera_rig = runtime_invoke(
+                component_get_transform, camera, nullptr, &exception);
             if (exception != nullptr) exception = nullptr;
         }
     }
+    return camera_rig;
+}
+
+void MaydayAdapter::Impl::ApplyGyro() {
+    if (!combat_gyro_enabled.load(std::memory_order_acquire) ||
+        get_local_rig == nullptr || get_avatar == nullptr ||
+        get_avatar_rig == nullptr || object_get_class == nullptr ||
+        class_get_method == nullptr || transform_get_euler == nullptr ||
+        transform_set_euler == nullptr) {
+        return;
+    }
+    void* const local = InvokeObject(get_local_rig, nullptr);
+    if (local == nullptr) return;
+    void* const avatar = InvokeObject(get_avatar, local);
+    if (avatar == nullptr) return;
+    void* const avatar_rig = InvokeObject(get_avatar_rig, avatar);
+    if (avatar_rig == nullptr) return;
+    void* const avatar_class = object_get_class(avatar_rig);
+    if (avatar_class == nullptr) return;
+    void* const get_root = class_get_method(avatar_class, "get_Root", 0);
+    if (get_root == nullptr) return;
+    void* const root = InvokeObject(get_root, avatar_rig);
+    if (root == nullptr) return;
+    // 只旋转视觉 Avatar 根节点；PlayerRig/CharacterController 根节点
+    // 一旦被强制旋转会破坏移动和相机，必须避开。
+    if (component_get_transform != nullptr) {
+        void* const body_root = InvokeObject(component_get_transform, local);
+        if (root == body_root) return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (!gyro_initialized.load(std::memory_order_acquire)) {
+        Vec3 euler{};
+        if (!InvokeVec3(transform_get_euler, root, &euler)) return;
+        gyro_base_yaw = euler.y;
+        gyro_spin_degrees = 0.0f;
+        gyro_last = now;
+        gyro_initialized.store(true, std::memory_order_release);
+    }
+    float delta = std::chrono::duration<float>(now - gyro_last).count();
+    gyro_last = now;
+    delta = std::clamp(delta, 0.0f, 0.25f);
+    // 0.1 秒一圈 = 3600 度/秒；只转身体模型，相机和移动完全不受影响。
+    gyro_spin_degrees = std::fmod(gyro_spin_degrees + delta * 3600.0f, 360.0f);
+    Vec3 target{0.0f, gyro_base_yaw + gyro_spin_degrees, 0.0f};
+    static_cast<void>(InvokeVoidArg(transform_set_euler, root, &target));
+}
+
+void MaydayAdapter::Impl::RestoreGyro() {
+    if (!gyro_initialized.exchange(false, std::memory_order_acq_rel)) return;
+    if (get_local_rig == nullptr || get_avatar == nullptr ||
+        get_avatar_rig == nullptr || object_get_class == nullptr ||
+        class_get_method == nullptr || transform_set_euler == nullptr) {
+        return;
+    }
+    void* const local = InvokeObject(get_local_rig, nullptr);
+    if (local == nullptr) return;
+    void* const avatar = InvokeObject(get_avatar, local);
+    if (avatar == nullptr) return;
+    void* const avatar_rig = InvokeObject(get_avatar_rig, avatar);
+    if (avatar_rig == nullptr) return;
+    void* const avatar_class = object_get_class(avatar_rig);
+    if (avatar_class == nullptr) return;
+    void* const get_root = class_get_method(avatar_class, "get_Root", 0);
+    if (get_root == nullptr) return;
+    void* const root = InvokeObject(get_root, avatar_rig);
+    if (root == nullptr) return;
+    Vec3 target{0.0f, gyro_base_yaw, 0.0f};
+    static_cast<void>(InvokeVoidArg(transform_set_euler, root, &target));
+}
+
+bool MaydayAdapter::Impl::ActivateFreecam(void* local, void* look) {
+    fc_error_key = nullptr;
+    if (local == nullptr || look == nullptr) {
+        fc_error_key = "status.not_in_flight";
+        return false;
+    }
+    void* const camera_rig = FindCameraRig(local);
     if (camera_rig == nullptr) {
         fc_error_key = "status.freecam_no_camera";
         return false;
@@ -1694,6 +1926,7 @@ bool MaydayAdapter::Impl::ActivateFreecam(void* local, void* look) {
     }
 
     // 只停玩家移动；PlayerLook 由 hook 跳过 Update，不需要改 enabled。
+    void* exception{};
     void* motor = runtime_invoke(get_motor, local, nullptr, &exception);
     if (exception != nullptr) motor = nullptr;
     bool motor_enabled = false;
@@ -1882,21 +2115,36 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetInput(
 std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::combat_owner{nullptr};
 
 void MaydayAdapter::Impl::UpdateCombat(void* self) {
-    if (!combat_enabled.load(std::memory_order_acquire) ||
-        combat_shutdown.load(std::memory_order_acquire)) {
-        return;
-    }
+    if (combat_shutdown.load(std::memory_order_acquire)) return;
     void* const local = InvokeObject(get_local, nullptr);
     if (local == nullptr) {
         combat_in_flight.store(false, std::memory_order_release);
         combat_holding_bat.store(false, std::memory_order_release);
         combat_has_target.store(false, std::memory_order_release);
         combat_target_distance_mm.store(-1, std::memory_order_release);
+        // 换局/重生后重新捕获新 Avatar 的基础朝向。
+        gyro_initialized.store(false, std::memory_order_release);
         return;
     }
     combat_in_flight.store(true, std::memory_order_release);
     // 服务器会为每个玩家的 PlayerInteractor 调用 Update；只处理本地玩家。
     if (InvokeObject(get_interactor, local) != self) return;
+
+    // 陀螺模式只旋转视觉 Avatar 根节点；相机、移动和控制器根节点不碰。
+    // 远端房间额外把旋转写进 NetworkTransform 的发送快照，让房主和其他
+    // 玩家看到旋转；房主模式下不伪造网络快照，避免本地服务端应用后卡住。
+    if (get_network_server_active != nullptr) {
+        bool host = false;
+        if (InvokeBool(get_network_server_active, nullptr, &host)) {
+            combat_host_mode.store(host ? 1 : 0, std::memory_order_release);
+        }
+    }
+    if (combat_gyro_enabled.load(std::memory_order_acquire)) {
+        ApplyGyro();
+    } else {
+        RestoreGyro();
+    }
+    if (!combat_enabled.load(std::memory_order_acquire)) return;
 
     bool seated = false;
     if (get_is_seated != nullptr && InvokeBool(get_is_seated, local, &seated) && seated) {
@@ -1924,19 +2172,17 @@ void MaydayAdapter::Impl::UpdateCombat(void* self) {
     }
 
     const auto now = std::chrono::steady_clock::now();
-    if (now - combat_last_scan >= std::chrono::milliseconds(100)) {
-        CombatTarget target;
-        if (FindNearestPassenger(local, &target)) {
-            combat_target = target;
-            combat_has_target.store(true, std::memory_order_release);
-            combat_target_distance_mm.store(
-                target.distance_mm, std::memory_order_release);
-        } else {
-            combat_target = {};
-            combat_has_target.store(false, std::memory_order_release);
-            combat_target_distance_mm.store(-1, std::memory_order_release);
-        }
-        combat_last_scan = now;
+    // 每次主线程 Update 都重新扫描；发送频率由 attack_interval_ms 控制。
+    CombatTarget target;
+    if (FindNearestCrewmate(local, &target)) {
+        combat_target = target;
+        combat_has_target.store(true, std::memory_order_release);
+        combat_target_distance_mm.store(
+            target.distance_mm, std::memory_order_release);
+    } else {
+        combat_target = {};
+        combat_has_target.store(false, std::memory_order_release);
+        combat_target_distance_mm.store(-1, std::memory_order_release);
     }
     if (!combat_has_target.load(std::memory_order_acquire)) return;
 
@@ -1945,7 +2191,9 @@ void MaydayAdapter::Impl::UpdateCombat(void* self) {
     if (now - combat_last_attack < interval) return;
 
     CombatInteractRef ref;
-    if (!BuildInteractRef(combat_target.object, &ref)) {
+    // 目标必须是非 Passenger 的 IInteractable，服务端才会走 SwingAtCrew；
+    // 手里的棒球棍本身满足条件，真正要打谁由服务端按瞄准方向选择。
+    if (!BuildInteractRef(held, &ref)) {
         combat_last_result.store(2, std::memory_order_release);
         combat_last_attack = now;
         return;
@@ -1954,76 +2202,160 @@ void MaydayAdapter::Impl::UpdateCombat(void* self) {
     std::uint8_t phase = 0;
     Vec3 hit_point = combat_target.chest;
     void* params[] = {&ref, &hit_point, &dt, &phase};
+    combat_pending_aim_target = combat_target.object;
+    // 房主模式下服务端对象就是本地持有的 BatItem：把 nextSwing 归零，
+    // 让滑块设置的高频请求真正进入 ServerUseOnce。远端房间无法修改房主
+    // 对象，仍受房主 0.8s 挥击冷却限制。
+    if (combat_host_mode.load(std::memory_order_acquire) == 1 &&
+        held != nullptr && next_swing_field != nullptr &&
+        next_swing_offset > 0 && next_swing_offset < 0x1000) {
+        *reinterpret_cast<double*>(
+            reinterpret_cast<std::uint8_t*>(held) + next_swing_offset) = 0.0;
+    }
     void* exception{};
     runtime_invoke(interactor_cmd_use, self, params, &exception);
     combat_last_attack = now;
-    if (exception == nullptr) {
+    if (exception != nullptr) {
+        combat_last_result.store(2, std::memory_order_release);
+        combat_pending_aim_target = nullptr;
+    } else {
         combat_last_result.store(1, std::memory_order_release);
         combat_attacks_sent.fetch_add(1, std::memory_order_acq_rel);
-    } else {
-        combat_last_result.store(2, std::memory_order_release);
+        // 远端房间没有本地服务端钩子消费该指针，立即清掉避免悬垂。
+        if (combat_host_mode.load(std::memory_order_acquire) == 0) {
+            combat_pending_aim_target = nullptr;
+        }
+    }
+    if (log_sink != nullptr &&
+        now - combat_last_send_log >= std::chrono::seconds(1)) {
+        combat_last_send_log = now;
+        log_sink("combat.attack",
+                 std::string("host=") +
+                 (combat_host_mode.load(std::memory_order_acquire) != 0 ? "1" : "0") +
+                 " crew=1 dist_mm=" + std::to_string(combat_target.distance_mm) +
+                 (exception == nullptr ? " sent" : " failed"));
     }
 }
 
-bool MaydayAdapter::Impl::FindNearestPassenger(
+bool MaydayAdapter::Impl::FindNearestCrewmate(
     void* local, CombatTarget* out_target) {
-    if (local == nullptr || out_target == nullptr || passenger_all_field == nullptr ||
-        bat_chest_of == nullptr || passenger_on_board == nullptr ||
-        object_get_class == nullptr || class_get_method == nullptr) {
+    if (local == nullptr || out_target == nullptr || player_all_field == nullptr ||
+        get_chest_position == nullptr || object_get_class == nullptr ||
+        class_get_method == nullptr || get_eye_position == nullptr) {
         return false;
     }
+
+    // 远端房间的命中判定在房主进程里执行：本地静默瞄准钩子不会运行，
+    // 服务端会按玩家自己的瞄准方向做扇形检查。先在本地判断当前是不是
+    // 房主；不是房主时只选择前向锥体内的队友，保证发出的攻击能命中。
+    bool host = false;
+    if (get_network_server_active != nullptr) {
+        bool active = false;
+        if (InvokeBool(get_network_server_active, nullptr, &active)) host = active;
+    }
+    combat_host_mode.store(host ? 1 : 0, std::memory_order_release);
+    const std::int32_t host_mode = host ? 1 : 0;
+    if (!combat_mode_logged || combat_logged_host_mode != host_mode) {
+        combat_mode_logged = true;
+        combat_logged_host_mode = host_mode;
+        if (log_sink != nullptr) {
+            log_sink("combat.mode", host
+                ? "hosting: silent aim active"
+                : "joined room: server aim cone limits targets");
+        }
+    }
+
+    // PlayerNet.All 在所有端登记玩家；只保留非本地、未死亡的队友。
     void* list = nullptr;
-    field_static_get_value(passenger_all_field, &list);
-    if (list == nullptr) return false;
+    field_static_get_value(player_all_field, &list);
+    if (list == nullptr) {
+        combat_crew_count.store(0, std::memory_order_release);
+        return false;
+    }
     void* const list_class = object_get_class(list);
-    if (list_class == nullptr) return false;
+    if (list_class == nullptr) {
+        combat_crew_count.store(0, std::memory_order_release);
+        return false;
+    }
     if (combat_list_count == nullptr || combat_list_item == nullptr ||
         combat_list_class != list_class) {
-        combat_list_count = class_get_method(list_class, "get_Count", 0);
-        combat_list_item = class_get_method(list_class, "get_Item", 1);
+        void* const count_method = class_get_method(list_class, "get_Count", 0);
+        void* const item_method = class_get_method(list_class, "get_Item", 1);
+        if (count_method == nullptr || item_method == nullptr) {
+            combat_crew_count.store(0, std::memory_order_release);
+            return false;
+        }
         combat_list_class = list_class;
-        if (combat_list_count == nullptr || combat_list_item == nullptr) return false;
+        combat_list_count = count_method;
+        combat_list_item = item_method;
     }
     std::int32_t count = 0;
-    if (!InvokeInt(combat_list_count, list, &count) || count <= 0) return false;
+    if (!InvokeInt(combat_list_count, list, &count) || count <= 0) {
+        combat_crew_count.store(0, std::memory_order_release);
+        return false;
+    }
+
     Vec3 eye{};
     if (!InvokeVec3(get_eye_position, local, &eye)) return false;
+
+    const bool use_cone = !host;
+    const float cone_deg = static_cast<float>(
+        combat_crew_cone_deg.load(std::memory_order_acquire));
+    Vec3 aim{};
+    const bool have_aim = use_cone && get_aim_direction != nullptr &&
+        InvokeVec3(get_aim_direction, local, &aim);
 
     const float max_range_m =
         static_cast<float>(combat_max_range_mm.load(std::memory_order_acquire)) /
         1000.0f;
     float best_squared = max_range_m * max_range_m;
     CombatTarget best;
+    std::int32_t visible_crew = 0;
+    constexpr float kRadiansToDegrees = 57.295779513082320876f;
     for (std::int32_t index = 0; index < count; ++index) {
         void* params[] = {&index};
         void* exception{};
-        void* const passenger =
+        void* const crewmate =
             runtime_invoke(combat_list_item, list, params, &exception);
-        if (exception != nullptr || passenger == nullptr) continue;
-        bool on_board = false;
-        if (!InvokeBool(passenger_on_board, passenger, &on_board) || !on_board) {
+        if (exception != nullptr || crewmate == nullptr || crewmate == local) {
             continue;
         }
-        if (passenger_is_carried != nullptr) {
-            bool carried = false;
-            if (InvokeBool(passenger_is_carried, passenger, &carried) && carried) {
-                continue;
-            }
+        bool dead = false;
+        if (get_network_is_dead != nullptr &&
+            InvokeBool(get_network_is_dead, crewmate, &dead) && dead) {
+            continue;
         }
+        ++visible_crew;
         Vec3 chest{};
-        if (!InvokeVec3Arg(bat_chest_of, passenger, &chest)) continue;
+        if (!InvokeVec3(get_chest_position, crewmate, &chest)) continue;
         const float dx = chest.x - eye.x;
         const float dy = chest.y - eye.y;
         const float dz = chest.z - eye.z;
         const float squared = dx * dx + dy * dy + dz * dz;
         if (!(squared <= best_squared)) continue;
+        if (use_cone && have_aim && cone_deg > 0.0f) {
+            // 与服务端 SwingAtCrew 一致：3D 角度、极近距离跳过检查。
+            if (squared > 0.0025f) {
+                const float aim_squared =
+                    aim.x * aim.x + aim.y * aim.y + aim.z * aim.z;
+                if (aim_squared > 1e-8f) {
+                    float cosine =
+                        (aim.x * dx + aim.y * dy + aim.z * dz) /
+                        std::sqrt(aim_squared * squared);
+                    cosine = std::clamp(cosine, -1.0f, 1.0f);
+                    const float angle = std::acos(cosine) * kRadiansToDegrees;
+                    if (angle > cone_deg) continue;
+                }
+            }
+        }
         best_squared = squared;
-        best.object = passenger;
+        best.object = crewmate;
         best.chest = chest;
         best.distance_mm = static_cast<std::int32_t>(
             std::lround(std::sqrt(squared) * 1000.0f));
         best.valid = true;
     }
+    combat_crew_count.store(visible_crew, std::memory_order_release);
     if (!best.valid) return false;
     *out_target = best;
     return true;
@@ -2079,15 +2411,22 @@ void MaydayAdapter::Impl::HandleBatUseOnce(
         return;
     }
     void* const target_class = object_get_class(target);
-    Vec3 point{};
-    bool have_point = false;
-    if (ClassDerivesFrom(target_class, passenger_class)) {
-        have_point = InvokeVec3Arg(bat_chest_of, target, &point);
-    } else if (ClassDerivesFrom(target_class, player_net_class) &&
-               get_chest_position != nullptr) {
-        have_point = InvokeVec3(get_chest_position, target, &point);
+    void* aim_target = nullptr;
+    if (target_class != nullptr &&
+        ClassDerivesFrom(target_class, player_net_class)) {
+        aim_target = target;
+    } else if (combat_pending_aim_target != nullptr) {
+        // CmdUse 的目标是手里的棒球棍（非 Passenger），真正要打的
+        // 队友由发起攻击时记录的 pending 指针提供。
+        aim_target = combat_pending_aim_target;
+        combat_pending_aim_target = nullptr;
     }
-    if (!have_point) {
+    if (aim_target == nullptr || get_chest_position == nullptr) {
+        original(self, player, target, hit_point);
+        return;
+    }
+    Vec3 point{};
+    if (!InvokeVec3(get_chest_position, aim_target, &point)) {
         original(self, player, target, hit_point);
         return;
     }
@@ -2120,6 +2459,142 @@ void MaydayAdapter::Impl::HandleBatUseOnce(
     }
     original(self, player, target, hit_point);
     static_cast<void>(InvokeVoidArg(transform_set_euler, view, &saved_euler));
+}
+
+void MaydayAdapter::Impl::HandleBatRpcSwing(void* self, std::uint8_t result) {
+    auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(
+        void*, std::uint8_t)>(combat_swing_original);
+    if (original != nullptr) original(self, result);
+
+    // RpcSwing 会广播所有玩家的挥击；只统计本地玩家手持的那把球棒。
+    void* const local = InvokeObject(get_local, nullptr);
+    if (local != nullptr && bat_get_holder != nullptr) {
+        void* const holder = InvokeObject(bat_get_holder, self);
+        if (holder != local) return;
+    }
+
+    // SwingWhiff/SwingPax/SwingCrew/SwingWhoosh 是 BatItem 的 prefab
+    // 序列化字段；按字段偏移读取实际值，避免把结果码写死在宿主里。
+    std::uint8_t whiff = 0;
+    std::uint8_t pax = 0;
+    std::uint8_t crew = 0;
+    std::uint8_t whoosh = 0;
+    const auto read_byte = [self](
+        void* field, std::size_t offset, std::uint8_t* out) {
+        if (self == nullptr || field == nullptr || out == nullptr ||
+            offset == 0 || offset >= 0x1000) {
+            return false;
+        }
+        *out = *reinterpret_cast<const std::uint8_t*>(
+            reinterpret_cast<const std::uint8_t*>(self) + offset);
+        return true;
+    };
+    static_cast<void>(read_byte(swing_whiff_field, swing_whiff_offset, &whiff));
+    static_cast<void>(read_byte(swing_pax_field, swing_pax_offset, &pax));
+    static_cast<void>(read_byte(swing_crew_field, swing_crew_offset, &crew));
+    static_cast<void>(read_byte(
+        swing_whoosh_field, swing_whoosh_offset, &whoosh));
+
+    // SwingAtCrew/SwingAtPassenger 的返回值就是协议里的结果码：
+    // 0=whiff，1=乘客命中，2=队友命中，3=特殊命中/挥空特效。
+    // prefab 上的 Swing* 字段在本作里读出来是 0，不能用来映射。
+    std::int32_t semantic = 0;
+    switch (result) {
+        case 0: semantic = 1; break;
+        case 1: semantic = 2; break;
+        case 2: semantic = 3; break;
+        case 3: semantic = 4; break;
+        default: break;
+    }
+    combat_last_swing_result.store(semantic, std::memory_order_release);
+
+    const auto now = std::chrono::steady_clock::now();
+    if (log_sink != nullptr &&
+        now - combat_last_result_log >= std::chrono::milliseconds(500)) {
+        combat_last_result_log = now;
+        log_sink("combat.swing",
+                 "result=" + std::to_string(result) +
+                 " whiff=" + std::to_string(whiff) +
+                 " pax=" + std::to_string(pax) +
+                 " crew=" + std::to_string(crew) +
+                 " whoosh=" + std::to_string(whoosh));
+    }
+}
+
+void MaydayAdapter::Impl::HandleNetTransformBroadcast(void* self) {
+    auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(void*)>(
+        net_broadcast_original);
+    if (original == nullptr) return;
+    if (!combat_gyro_enabled.load(std::memory_order_acquire) ||
+        combat_shutdown.load(std::memory_order_acquire) || self == nullptr) {
+        original(self);
+        return;
+    }
+    void* const local_rig =
+        get_local_rig != nullptr ? InvokeObject(get_local_rig, nullptr) : nullptr;
+    void* const local_net =
+        (local_rig != nullptr && get_net_transform != nullptr)
+        ? InvokeObject(get_net_transform, local_rig) : nullptr;
+    if (local_net == nullptr || local_net != self) {
+        original(self);
+        return;
+    }
+    // 房主模式的 CmdClientToServerSync 会在本地服务端应用到同一个根节点，
+    // 会把临时旋转固化下来；网络旋转先只在加入他人房间时启用。
+    bool host = false;
+    if (get_network_server_active != nullptr) {
+        bool active = false;
+        if (InvokeBool(get_network_server_active, nullptr, &active)) {
+            host = active;
+            combat_host_mode.store(host ? 1 : 0, std::memory_order_release);
+        }
+    }
+    if (host) {
+        original(self);
+        return;
+    }
+    if (component_get_transform == nullptr || transform_get_euler == nullptr ||
+        transform_set_euler == nullptr) {
+        original(self);
+        return;
+    }
+    void* transform{};
+    if (net_transform_target_field != nullptr &&
+        net_transform_target_offset > 0 && net_transform_target_offset < 0x1000) {
+        transform = *reinterpret_cast<void**>(
+            reinterpret_cast<std::uint8_t*>(self) + net_transform_target_offset);
+    }
+    if (transform == nullptr) {
+        transform = InvokeObject(component_get_transform, self);
+    }
+    if (transform == nullptr) {
+        original(self);
+        return;
+    }
+    Vec3 saved{};
+    if (!InvokeVec3(transform_get_euler, transform, &saved)) {
+        original(self);
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (gyro_net_last == std::chrono::steady_clock::time_point{}) {
+        gyro_net_last = now;
+        gyro_net_spin_degrees = 0.0f;
+    }
+    float delta = std::chrono::duration<float>(now - gyro_net_last).count();
+    gyro_net_last = now;
+    delta = std::clamp(delta, 0.0f, 0.25f);
+    gyro_net_spin_degrees =
+        std::fmod(gyro_net_spin_degrees + delta * 3600.0f, 360.0f);
+    Vec3 spun{saved.x, saved.y + gyro_net_spin_degrees, saved.z};
+    if (!InvokeVoidArg(transform_set_euler, transform, &spun)) {
+        original(self);
+        return;
+    }
+    // 原始 UpdateClientBroadcast 会把带旋转的快照发送给房主；随后立即
+    // 恢复本地根节点，移动/相机/渲染不受影响。
+    original(self);
+    static_cast<void>(InvokeVoidArg(transform_set_euler, transform, &saved));
 }
 
 bool MaydayAdapter::Impl::EnsureCombatHooks() {
@@ -2162,18 +2637,61 @@ bool MaydayAdapter::Impl::EnsureCombatHooks() {
         combat_hook_backend.reset();
         return false;
     }
+
+    // RpcSwing 结果只在客户端接收端可用；它是诊断/UI 反馈，安装失败
+    // 不影响自动攻击本身。
+    combat_swing_hook_created = false;
+    if (combat_swing_target != nullptr) {
+        const bool created_swing = combat_hook_backend->Create(
+            combat_swing_target,
+            reinterpret_cast<void*>(&Impl::BatRpcSwingThunk),
+            &combat_swing_original);
+        if (created_swing && combat_hook_backend->Enable(combat_swing_target)) {
+            combat_swing_hook_created = true;
+        } else {
+            if (created_swing) {
+                static_cast<void>(combat_hook_backend->Remove(combat_swing_target));
+            }
+            combat_swing_original = nullptr;
+        }
+    }
+
+    // 远端陀螺的 NetworkTransform 发送钩子；安装失败不影响自动攻击。
+    net_broadcast_hook_created = false;
+    if (net_broadcast_target != nullptr) {
+        const bool created_net = combat_hook_backend->Create(
+            net_broadcast_target,
+            reinterpret_cast<void*>(&Impl::NetTransformBroadcastThunk),
+            &net_broadcast_original);
+        if (created_net && combat_hook_backend->Enable(net_broadcast_target)) {
+            net_broadcast_hook_created = true;
+        } else {
+            if (created_net) {
+                static_cast<void>(combat_hook_backend->Remove(net_broadcast_target));
+            }
+            net_broadcast_original = nullptr;
+        }
+    }
+
     combat_hooks_installed = true;
     return true;
 }
 
 void MaydayAdapter::Impl::TeardownCombatHooks() noexcept {
     combat_enabled.store(false, std::memory_order_release);
+    combat_gyro_enabled.store(false, std::memory_order_release);
     if (!combat_hooks_installed || combat_hook_backend == nullptr) return;
     if (combat_update_target != nullptr) {
         static_cast<void>(combat_hook_backend->Disable(combat_update_target));
     }
     if (combat_bat_target != nullptr) {
         static_cast<void>(combat_hook_backend->Disable(combat_bat_target));
+    }
+    if (combat_swing_hook_created && combat_swing_target != nullptr) {
+        static_cast<void>(combat_hook_backend->Disable(combat_swing_target));
+    }
+    if (net_broadcast_hook_created && net_broadcast_target != nullptr) {
+        static_cast<void>(combat_hook_backend->Disable(net_broadcast_target));
     }
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
@@ -2183,12 +2701,22 @@ void MaydayAdapter::Impl::TeardownCombatHooks() noexcept {
     }
     static_cast<void>(combat_hook_backend->Remove(combat_update_target));
     static_cast<void>(combat_hook_backend->Remove(combat_bat_target));
+    if (combat_swing_hook_created && combat_swing_target != nullptr) {
+        static_cast<void>(combat_hook_backend->Remove(combat_swing_target));
+    }
+    if (net_broadcast_hook_created && net_broadcast_target != nullptr) {
+        static_cast<void>(combat_hook_backend->Remove(net_broadcast_target));
+    }
     combat_owner.store(nullptr, std::memory_order_release);
     static_cast<void>(combat_hook_backend->Uninitialize());
     combat_hook_backend.reset();
     combat_hooks_installed = false;
+    combat_swing_hook_created = false;
+    net_broadcast_hook_created = false;
     combat_update_original = nullptr;
     combat_bat_original = nullptr;
+    combat_swing_original = nullptr;
+    net_broadcast_original = nullptr;
 }
 
 void ANOMALY_CALL MaydayAdapter::Impl::InteractorUpdateThunk(void* self) {
@@ -2213,6 +2741,31 @@ void ANOMALY_CALL MaydayAdapter::Impl::BatUseOnceThunk(
     } catch (...) {
         // 静默瞄准失败时游戏仍需执行原始挥棒；HandleBatUseOnce 内部
         // 每条失败路径都已调用 original。
+    }
+    impl->combat_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::BatRpcSwingThunk(
+    void* self, std::uint8_t result) {
+    Impl* const impl = combat_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->combat_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        impl->HandleBatRpcSwing(self, result);
+    } catch (...) {
+        // 结果反馈失败不得影响游戏的挥击特效。
+    }
+    impl->combat_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::NetTransformBroadcastThunk(void* self) {
+    Impl* const impl = combat_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->combat_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        impl->HandleNetTransformBroadcast(self);
+    } catch (...) {
+        // 网络旋转失败不得影响玩家的网络变换同步。
     }
     impl->combat_in_callback.fetch_sub(1, std::memory_order_acq_rel);
 }

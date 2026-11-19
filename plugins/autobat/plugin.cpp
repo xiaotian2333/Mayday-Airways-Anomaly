@@ -10,6 +10,7 @@
 #include "anomaly/sdk/services/platform.h"
 #include "anomaly/sdk/services/ui.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -25,7 +26,7 @@ namespace {
 constexpr std::string_view kSchemaId = "autobat";
 constexpr std::uint32_t kSchemaVersion = 1;
 constexpr std::string_view kSchema =
-    R"json({"type":"object","additionalProperties":false,"required":["enabled"],"properties":{"enabled":{"type":"boolean"}}})json";
+    R"json({"type":"object","additionalProperties":false,"required":["enabled"],"properties":{"enabled":{"type":"boolean"},"attack_interval_ms":{"type":"integer","minimum":10,"maximum":1000},"gyro_enabled":{"type":"boolean"}}})json";
 constexpr std::string_view kProfileFile = "compatibility.profile.json";
 constexpr std::uint32_t kMinimumRangeMilli = 100;
 constexpr std::uint32_t kMinimumIntervalMs = 100;
@@ -40,13 +41,16 @@ anomaly::sdk::Localizer g_localizer;
 AnomalyGenerationHandleV1 g_config_schema{};
 
 std::atomic<bool> g_enabled{false};
+std::atomic<bool> g_gyro_enabled{false};
 std::atomic<bool> g_service_enabled{false};
+std::atomic<bool> g_gyro_service_enabled{false};
 std::atomic<bool> g_dirty{false};
 std::atomic<bool> g_save_scheduled{false};
 std::atomic<bool> g_options_applied{false};
 bool g_profile_ok{};
 std::int32_t g_max_range_mm{};
-std::int32_t g_attack_interval_ms{};
+std::atomic<std::int32_t> g_attack_interval_ms{100};
+std::int32_t g_crew_cone_deg{};
 bool g_service_logged{};
 std::string g_status;
 
@@ -95,6 +99,12 @@ void SetStatusFromService(const AnomalyStatusV1& status) {
     } else if (message == "status.combat_hook_failed") {
         LocalizedStatus("status.combat_hook_failed",
                         "Could not install the game swing or main-thread hooks.");
+    } else if (message == "status.combat_gyro_unavailable") {
+        LocalizedStatus("status.combat_gyro_unavailable",
+                        "This game build is missing the avatar symbols needed for gyro mode.");
+    } else if (message == "status.combat_gyro_hook_failed") {
+        LocalizedStatus("status.combat_gyro_hook_failed",
+                        "Could not install the main-thread hook for gyro mode.");
     } else {
         LocalizedStatus("status.failed", "Operation failed.");
     }
@@ -107,12 +117,20 @@ void SaveSettingsTask(void*, AnomalyGenerationHandleV1) {
         g_dirty.store(true, std::memory_order_release);
         return;
     }
-    const char* document = g_enabled.load(std::memory_order_acquire)
-        ? R"json({"enabled":true})json"
-        : R"json({"enabled":false})json";
+    char document[128]{};
+    const int written = std::snprintf(
+        document, sizeof(document),
+        "{\"enabled\":%s,\"attack_interval_ms\":%d,\"gyro_enabled\":%s}",
+        g_enabled.load(std::memory_order_acquire) ? "true" : "false",
+        g_attack_interval_ms.load(std::memory_order_acquire),
+        g_gyro_enabled.load(std::memory_order_acquire) ? "true" : "false");
+    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(document)) {
+        g_dirty.store(true, std::memory_order_release);
+        return;
+    }
     const AnomalyStatusV1 status = g_config->write_atomic(
         g_config->user, anomaly::sdk::StringView(kSchemaId), kSchemaVersion,
-        Bytes(std::string_view(document)));
+        Bytes(std::string_view(document, static_cast<std::size_t>(written))));
     if (!Succeeded(status)) g_dirty.store(true, std::memory_order_release);
 }
 
@@ -156,6 +174,28 @@ void LoadSettings() {
         g_enabled.store(value != 0, std::memory_order_release);
     }
     if (enabled.id != 0) static_cast<void>(g_json->release(g_json->user, enabled));
+    AnomalyGenerationHandleV1 interval{};
+    double interval_value = 0.0;
+    if (Succeeded(g_json->object_find(
+            g_json->user, root,
+            anomaly::sdk::StringView("attack_interval_ms"), &interval)) &&
+        Succeeded(g_json->number_value(g_json->user, interval, &interval_value)) &&
+        interval_value >= 10.0 && interval_value <= 1000.0) {
+        g_attack_interval_ms.store(
+            static_cast<std::int32_t>(interval_value + 0.5),
+            std::memory_order_release);
+    }
+    if (interval.id != 0) static_cast<void>(g_json->release(g_json->user, interval));
+    AnomalyGenerationHandleV1 gyro{};
+    std::int32_t gyro_value = 0;
+    if (Succeeded(g_json->object_find(
+            g_json->user, root,
+            anomaly::sdk::StringView("gyro_enabled"), &gyro)) &&
+        Succeeded(g_json->boolean_value(
+            g_json->user, gyro, &gyro_value))) {
+        g_gyro_enabled.store(gyro_value != 0, std::memory_order_release);
+    }
+    if (gyro.id != 0) static_cast<void>(g_json->release(g_json->user, gyro));
     static_cast<void>(g_json->release(g_json->user, root));
 }
 
@@ -173,15 +213,19 @@ bool LoadCompatibilityProfile() {
             return false;
         }
         const auto& profile = result.value();
-        const std::uint32_t range = profile.Value("swingRangeMilli", 10000u, 1u);
+        const std::uint32_t range = profile.Value("crewRangeMilli", 10000u, 1u);
         const std::uint32_t interval = profile.Value("attackIntervalMs", 5000u, 1u);
-        if (range < kMinimumRangeMilli || interval < kMinimumIntervalMs) {
+        const std::uint32_t cone = profile.Value("crewConeDeg", 180u, 1u);
+        if (range < kMinimumRangeMilli || interval < kMinimumIntervalMs ||
+            cone < 1u || cone > 180u) {
             LocalizedStatus("status.profile_invalid",
                             "The compatibility profile is invalid.");
             return false;
         }
         g_max_range_mm = static_cast<std::int32_t>(range);
-        g_attack_interval_ms = static_cast<std::int32_t>(interval);
+        g_attack_interval_ms.store(
+            static_cast<std::int32_t>(interval), std::memory_order_release);
+        g_crew_cone_deg = static_cast<std::int32_t>(cone);
         return true;
     } catch (const std::exception&) {
         LocalizedStatus("status.profile_invalid",
@@ -229,11 +273,13 @@ void QueryServices() {
     }
 }
 
-bool ApplyCompatibilityOptions() {
+bool ApplyCompatibilityOptions(const bool force = false) {
     if (g_combat == nullptr || !g_profile_ok) return false;
-    if (g_options_applied.load(std::memory_order_acquire)) return true;
+    if (!force && g_options_applied.load(std::memory_order_acquire)) return true;
     const AnomalyStatusV1 status = g_combat->set_options(
-        g_combat->user, g_max_range_mm, g_attack_interval_ms);
+        g_combat->user, g_max_range_mm,
+        g_attack_interval_ms.load(std::memory_order_acquire),
+        g_crew_cone_deg);
     if (!Succeeded(status)) {
         SetStatusFromService(status);
         return false;
@@ -268,6 +314,27 @@ bool SetCombatEnabled(const bool enabled) {
     return true;
 }
 
+bool SetGyroEnabled(const bool enabled) {
+    if (g_combat == nullptr) {
+        LocalizedStatus("status.waiting", "Waiting for the game combat service.");
+        return false;
+    }
+    const AnomalyStatusV1 status =
+        g_combat->set_gyro_enabled(g_combat->user, enabled ? 1 : 0);
+    if (!Succeeded(status)) {
+        SetStatusFromService(status);
+        PluginLog(ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+                  "autobat: set_gyro_enabled failed: " + g_status);
+        return false;
+    }
+    g_gyro_service_enabled.store(enabled, std::memory_order_release);
+    g_status.clear();
+    PluginLog(ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+              enabled ? "autobat: gyro mode enabled"
+                      : "autobat: gyro mode disabled");
+    return true;
+}
+
 std::string FormatInteger(const std::int32_t value) {
     char buffer[16]{};
     std::snprintf(buffer, sizeof(buffer), "%d", value);
@@ -277,6 +344,13 @@ std::string FormatInteger(const std::int32_t value) {
 std::string FormatCount(const std::uint32_t value) {
     char buffer[16]{};
     std::snprintf(buffer, sizeof(buffer), "%u", value);
+    return buffer;
+}
+
+std::string FormatSeconds(const std::int32_t milliseconds) {
+    char buffer[16]{};
+    std::snprintf(buffer, sizeof(buffer), "%.2f",
+                  static_cast<double>(milliseconds) / 1000.0);
     return buffer;
 }
 
@@ -301,7 +375,7 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
         g_config->register_schema == nullptr || g_config->read == nullptr ||
         g_config->write_atomic == nullptr || g_json->parse == nullptr ||
         g_json->object_find == nullptr || g_json->boolean_value == nullptr ||
-        g_json->release == nullptr) {
+        g_json->number_value == nullptr || g_json->release == nullptr) {
         return {ANOMALY_STATUS_V1_UNAVAILABLE, 0, {}};
     }
     const AnomalyStatusV1 schema_status = g_config->register_schema(
@@ -327,6 +401,10 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
     if (g_combat != nullptr && g_service_enabled.exchange(false, std::memory_order_acq_rel)) {
         static_cast<void>(g_combat->set_enabled(g_combat->user, 0));
     }
+    if (g_combat != nullptr &&
+        g_gyro_service_enabled.exchange(false, std::memory_order_acq_rel)) {
+        static_cast<void>(g_combat->set_gyro_enabled(g_combat->user, 0));
+    }
     if (g_dirty.load(std::memory_order_acquire)) {
         SaveSettingsTask(nullptr, {});
     }
@@ -348,7 +426,19 @@ void ANOMALY_CALL Unload(void*) {
 
 void ANOMALY_CALL Update(void*, double) {
     QueryServices();
-    if (!g_profile_ok || g_combat == nullptr) return;
+    if (g_combat == nullptr) return;
+    // 陀螺模式独立于自动挥棒，也不依赖兼容性 Profile。
+    if (g_gyro_enabled.load(std::memory_order_acquire)) {
+        if (!g_gyro_service_enabled.load(std::memory_order_acquire)) {
+            if (!SetGyroEnabled(true)) {
+                g_gyro_enabled.store(false, std::memory_order_release);
+                MarkSettingsDirty();
+            }
+        }
+    } else if (g_gyro_service_enabled.load(std::memory_order_acquire)) {
+        static_cast<void>(SetGyroEnabled(false));
+    }
+    if (!g_profile_ok) return;
     if (g_enabled.load(std::memory_order_acquire)) {
         if (!g_service_enabled.load(std::memory_order_acquire)) {
             if (!SetCombatEnabled(true)) {
@@ -387,6 +477,57 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
         }
     }
 
+    // 攻击间隔滑块：1.00s ~ 0.01s，内部按毫秒 1000 ~ 10 保存。
+    float interval_seconds =
+        static_cast<float>(g_attack_interval_ms.load(std::memory_order_acquire)) /
+        1000.0f;
+    const std::string interval_label =
+        g_localizer.Text("attack.interval", "Attack interval (seconds)");
+    if (ui->slider_float(
+            ui->user, anomaly::sdk::StringView(interval_label),
+            &interval_seconds, 0.01f, 1.0f) != 0) {
+        std::int32_t milliseconds = static_cast<std::int32_t>(
+            interval_seconds * 1000.0f + 0.5f);
+        milliseconds = std::clamp(milliseconds, 10, 1000);
+        g_attack_interval_ms.store(milliseconds, std::memory_order_release);
+        if (g_combat != nullptr) {
+            static_cast<void>(ApplyCompatibilityOptions(true));
+        }
+        MarkSettingsDirty();
+    }
+    const std::string interval_text = FormatSeconds(
+        g_attack_interval_ms.load(std::memory_order_acquire));
+    const std::string_view interval_args[]{interval_text};
+    ui->text(ui->user, anomaly::sdk::StringView(g_localizer.Format(
+        "attack.interval_value", "Current interval: {0} s",
+        std::span<const std::string_view>{interval_args})));
+
+    int gyro = g_gyro_enabled.load(std::memory_order_acquire) ? 1 : 0;
+    const std::string gyro_label =
+        g_localizer.Text("toggle.gyro", "Gyro mode");
+    if (ui->checkbox(ui->user, anomaly::sdk::StringView(gyro_label), &gyro) != 0 &&
+        gyro != (g_gyro_enabled.load(std::memory_order_acquire) ? 1 : 0)) {
+        if (gyro != 0) {
+            if (SetGyroEnabled(true)) {
+                g_gyro_enabled.store(true, std::memory_order_release);
+                MarkSettingsDirty();
+            }
+        } else {
+            static_cast<void>(SetGyroEnabled(false));
+            g_gyro_enabled.store(false, std::memory_order_release);
+            MarkSettingsDirty();
+        }
+    }
+    const std::string gyro_hint = g_localizer.Text(
+        "gyro.hint",
+        "Spins the avatar one full turn every 0.1 s; the camera and movement "
+        "stay fully usable.");
+    if (ui->text_wrapped != nullptr) {
+        ui->text_wrapped(ui->user, anomaly::sdk::StringView(gyro_hint));
+    } else {
+        ui->text(ui->user, anomaly::sdk::StringView(gyro_hint));
+    }
+
     if (g_combat == nullptr) {
         ui->text(ui->user, anomaly::sdk::StringView(
             g_localizer.Text("status.waiting", "Waiting for the game combat service.")));
@@ -413,36 +554,80 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
             ui->text(ui->user, anomaly::sdk::StringView(
                 g_localizer.Text("status.not_in_flight",
                                  "Enter a flight to use automatic swinging.")));
-        } else if (state.holding_bat == 0) {
-            ui->text(ui->user, anomaly::sdk::StringView(
-                g_localizer.Text("status.hold_bat",
-                                 "Hold the baseball bat first.")));
         } else {
-            const std::string range_cm = FormatInteger(
-                static_cast<std::int32_t>(state.max_range_mm / 10));
-            if (state.has_target != 0 && state.target_distance_mm >= 0) {
-                const std::string distance_cm = FormatInteger(
-                    static_cast<std::int32_t>(
-                        (state.target_distance_mm + 5) / 10));
-                const std::string_view arguments[]{distance_cm, range_cm};
-                const std::string line = g_localizer.Format(
-                    "status.target", "Target at {0} cm (range {1} cm).",
-                    std::span<const std::string_view>{arguments});
-                ui->text(ui->user, anomaly::sdk::StringView(line));
+            if (state.host_mode != 0) {
+                ui->text(ui->user, anomaly::sdk::StringView(
+                    g_localizer.Text("mode.host",
+                                     "Hosting: silent aim active.")));
             } else {
-                const std::string_view arguments[]{range_cm};
+                const std::string cone = FormatInteger(g_crew_cone_deg);
+                const std::string_view arguments[]{cone};
                 const std::string line = g_localizer.Format(
-                    "status.no_target", "No passenger within {0} cm.",
+                    "mode.remote",
+                    "Joined room: only crewmates in the front {0} degree cone are attacked.",
                     std::span<const std::string_view>{arguments});
                 ui->text(ui->user, anomaly::sdk::StringView(line));
             }
-            if (state.attacks_sent > 0) {
-                const std::string count = FormatCount(state.attacks_sent);
-                const std::string_view arguments[]{count};
-                const std::string line = g_localizer.Format(
-                    "stats.swings", "Swings sent: {0}",
-                    std::span<const std::string_view>{arguments});
-                ui->text(ui->user, anomaly::sdk::StringView(line));
+
+            if (state.holding_bat == 0) {
+                ui->text(ui->user, anomaly::sdk::StringView(
+                    g_localizer.Text("status.hold_bat",
+                                     "Hold the baseball bat first.")));
+            } else {
+                const std::string range_cm = FormatInteger(
+                    static_cast<std::int32_t>(state.max_range_mm / 10));
+                if (state.has_target != 0 && state.target_distance_mm >= 0) {
+                    const std::string distance_cm = FormatInteger(
+                        static_cast<std::int32_t>(
+                            (state.target_distance_mm + 5) / 10));
+                    const std::string_view arguments[]{distance_cm, range_cm};
+                    const std::string line = g_localizer.Format(
+                        "status.target",
+                        "Target crewmate at {0} cm (range {1} cm).",
+                        std::span<const std::string_view>{arguments});
+                    ui->text(ui->user, anomaly::sdk::StringView(line));
+                } else {
+                    const std::string_view arguments[]{range_cm};
+                    const std::string line = g_localizer.Format(
+                        "status.no_target", "No crewmate within {0} cm.",
+                        std::span<const std::string_view>{arguments});
+                    ui->text(ui->user, anomaly::sdk::StringView(line));
+                }
+                const std::string crewmates = FormatCount(
+                    static_cast<std::uint32_t>(state.crew_count));
+                const std::string_view passenger_args[]{crewmates};
+                ui->text(ui->user, anomaly::sdk::StringView(g_localizer.Format(
+                    "state.crew", "Crewmates visible: {0}",
+                    std::span<const std::string_view>{passenger_args})));
+                if (state.attacks_sent > 0) {
+                    const std::string count = FormatCount(state.attacks_sent);
+                    const std::string_view arguments[]{count};
+                    const std::string line = g_localizer.Format(
+                        "stats.swings", "Swings sent: {0}",
+                        std::span<const std::string_view>{arguments});
+                    ui->text(ui->user, anomaly::sdk::StringView(line));
+                }
+            }
+
+            switch (state.last_swing_result) {
+                case 1:
+                    ui->text(ui->user, anomaly::sdk::StringView(g_localizer.Text(
+                        "swing.whiff", "Last swing: whiff.")));
+                    break;
+                case 2:
+                    ui->text(ui->user, anomaly::sdk::StringView(g_localizer.Text(
+                        "swing.passenger", "Last swing: passenger hit.")));
+                    break;
+                case 3:
+                    ui->text(ui->user, anomaly::sdk::StringView(g_localizer.Text(
+                        "swing.crew", "Last swing: crew hit.")));
+                    break;
+                case 4:
+                    ui->text(ui->user, anomaly::sdk::StringView(g_localizer.Text(
+                        "swing.whoosh", "Last swing: whoosh.")));
+                    break;
+                default:
+                    break;
             }
         }
     }
@@ -450,10 +635,14 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     ui->separator(ui->user);
     const std::string help = g_localizer.Text(
         "help.text",
-        "While enabled, holding the bat automatically locks the nearest passenger "
-        "within the game's swing range and sends the use command as a protocol "
-        "packet. When you host the session, the camera turns toward the target "
-        "only while the server evaluates the swing, so the view never moves.");
+        "While enabled, holding the bat automatically locks the nearest other "
+        "crewmate within the game's crew swing range and sends the use command "
+        "as a protocol packet. The local player and NPC passengers are never "
+        "targeted. The attack interval can be adjusted from 0.01 to 1 second. "
+        "When you host the session, the camera turns toward the target only "
+        "while the server evaluates the swing, so the view never moves. When "
+        "you join someone else's room, the server validates your own aim and "
+        "still applies the host's swing cooldown.");
     if (ui->text_wrapped != nullptr) {
         ui->text_wrapped(ui->user, anomaly::sdk::StringView(help));
     } else {

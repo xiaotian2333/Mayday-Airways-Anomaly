@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "mayday.autobat",
   "name": "Auto Bat",
-  "description": "Automatically swing the baseball bat at nearby passengers within the game's swing range, without turning the camera.",
+  "description": "Automatically swing the baseball bat at nearby crewmates (players) within the game's crew swing range, without targeting NPC passengers or turning the camera.",
   "author": "Mayday Loader",
   "license": "AGPL-3.0-only",
   "version": "1.0.0",

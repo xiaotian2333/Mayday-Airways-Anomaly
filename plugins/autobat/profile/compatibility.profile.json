@@ -6,8 +6,9 @@
   "section": "compat",
   "contract": "mayday.bat-combat",
   "layout": {
-    "swingRangeMilli": 2800,
-    "attackIntervalMs": 850
+    "crewRangeMilli": 2600,
+    "attackIntervalMs": 100,
+    "crewConeDeg": 45
   },
   "symbols": []
 }

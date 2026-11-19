@@ -1129,7 +1129,7 @@
       }
     },
     "AnomalyMaydayCombatStateV1": {
-      "size": 40,
+      "size": 56,
       "alignment": 4,
       "offsets": {
         "struct_size": 0,
@@ -1140,12 +1140,16 @@
         "target_distance_mm": 20,
         "max_range_mm": 24,
         "attack_interval_ms": 28,
-        "last_result": 32,
-        "attacks_sent": 36
+        "host_mode": 32,
+        "gyro_enabled": 36,
+        "crew_count": 40,
+        "last_swing_result": 44,
+        "last_result": 48,
+        "attacks_sent": 52
       }
     },
     "AnomalyMaydayCombatServiceV1": {
-      "size": 40,
+      "size": 48,
       "alignment": 8,
       "offsets": {
         "struct_size": 0,
@@ -1153,7 +1157,8 @@
         "user": 8,
         "set_options": 16,
         "set_enabled": 24,
-        "get_state": 32
+        "set_gyro_enabled": 32,
+        "get_state": 40
       }
     }
   },

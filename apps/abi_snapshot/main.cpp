@@ -1331,6 +1331,10 @@ std::string BuildSnapshot() {
          {"target_distance_mm", offsetof(AnomalyMaydayCombatStateV1, target_distance_mm)},
          {"max_range_mm", offsetof(AnomalyMaydayCombatStateV1, max_range_mm)},
          {"attack_interval_ms", offsetof(AnomalyMaydayCombatStateV1, attack_interval_ms)},
+         {"host_mode", offsetof(AnomalyMaydayCombatStateV1, host_mode)},
+         {"gyro_enabled", offsetof(AnomalyMaydayCombatStateV1, gyro_enabled)},
+         {"crew_count", offsetof(AnomalyMaydayCombatStateV1, crew_count)},
+         {"last_swing_result", offsetof(AnomalyMaydayCombatStateV1, last_swing_result)},
          {"last_result", offsetof(AnomalyMaydayCombatStateV1, last_result)},
          {"attacks_sent", offsetof(AnomalyMaydayCombatStateV1, attacks_sent)}},
         false);
@@ -1344,6 +1348,7 @@ std::string BuildSnapshot() {
          {"user", offsetof(AnomalyMaydayCombatServiceV1, user)},
          {"set_options", offsetof(AnomalyMaydayCombatServiceV1, set_options)},
          {"set_enabled", offsetof(AnomalyMaydayCombatServiceV1, set_enabled)},
+         {"set_gyro_enabled", offsetof(AnomalyMaydayCombatServiceV1, set_gyro_enabled)},
          {"get_state", offsetof(AnomalyMaydayCombatServiceV1, get_state)}},
         true);
     output.append("  },\n");
