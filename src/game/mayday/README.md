@@ -3,11 +3,14 @@
 Mayday Airways (Steam Demo) 是 Unity IL2CPP + Mirror 网络游戏，
 与上游 Anomaly 的引擎适配层技术路径完全不同：
 
-- 引擎符号：不走特征码 Profile，而是使用 il2cpp 导出函数
-  （il2cpp_domain_get / il2cpp_class_from_name / il2cpp_runtime_invoke ...）
-  以及 Il2CppDumper 生成的 script.json / dummydll 做类与方法解析
+- 引擎符号：使用 il2cpp 导出函数
+  （il2cpp_domain_get / il2cpp_class_from_name / il2cpp_runtime_invoke ...），
+  类、方法与字段在运行时按名称解析并校验
 - 游戏对象访问：GameState（Mirror NetworkBehaviour 单例）等已知类型直接解析
-- Hook 目标：il2cpp 函数指针 / D3D11 Present（渲染后端为 D3D11 + uGUI，非 D3D12）
+- Hook 目标：il2cpp 函数指针 / D3D12 Present（渲染后端为 D3D12 + uGUI）
 
-实现待补（骨架阶段）。可复用经验见 Mayday-Airways-ce 仓库的 MelonLoader 版：
-GameState.Money SyncVar 直接读写、ServerAddMoney 记账入口等。
+实现状态：il2cpp 解析、`mayday.money` 与 `mayday.freecam` 已落地。金币服务遵循以下已验证语义：
+
+- `Money` 是 Mirror SyncVar，持 `GameState.Instance` 读写，不受堆地址随机化影响；
+- 直接写 `Money` 不进入游戏累计收入统计；「增加」调用 `ServerAddMoney`，进入记账并触发飘字；
+- 债务走 `ServerAddDebt` 的差额入口（当前债务 + delta = 目标值）。

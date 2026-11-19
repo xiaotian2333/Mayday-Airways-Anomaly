@@ -11,5 +11,8 @@ snapshot-*.json
 /.local/
 /plugins/*/build/
 /.dsh-inbox/
+/tools/MetaDump/bin/
+/tools/MetaDump/obj/
+/tools/MetaDump/deps/
 __pycache__/
 *.pyc

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AssemblyName>MetaDump</AssemblyName>
+    <RootNamespace>MetaDump</RootNamespace>
+    <!-- 引用游戏 MelonLoader 自带的 AsmResolver，无需额外拉包 -->
+    <!-- 可用 MAYDAY_GAME_DIR 环境变量或 -p:GameDir=... 覆盖；未设置时回退到本机默认安装路径 -->
+    <GameDir Condition="'$(GameDir)' == ''">$(MAYDAY_GAME_DIR)</GameDir>
+    <GameDir Condition="'$(GameDir)' == ''">D:\games\steam\steamapps\common\Mayday Airways Demo</GameDir>
+    <!-- AsmResolver 查找顺序：显式 AsmResolverDir → 游戏内 MelonLoader → 工具目录 deps（本地保留） -->
+    <AsmResolverDir Condition="'$(AsmResolverDir)' == '' and Exists('$(GameDir)\MelonLoader\net6\AsmResolver.dll')">$(GameDir)\MelonLoader\net6</AsmResolverDir>
+    <AsmResolverDir Condition="'$(AsmResolverDir)' == ''">$(MSBuildThisFileDirectory)deps</AsmResolverDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="AsmResolver">
+      <HintPath>$(AsmResolverDir)\AsmResolver.dll</HintPath>
+    </Reference>
+    <Reference Include="AsmResolver.DotNet">
+      <HintPath>$(AsmResolverDir)\AsmResolver.DotNet.dll</HintPath>
+    </Reference>
+    <Reference Include="AsmResolver.PE">
+      <HintPath>$(AsmResolverDir)\AsmResolver.PE.dll</HintPath>
+    </Reference>
+    <Reference Include="AsmResolver.PE.File">
+      <HintPath>$(AsmResolverDir)\AsmResolver.PE.File.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>
