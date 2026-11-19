@@ -31,10 +31,12 @@ constexpr const char* kIl2CppServiceId = "mayday.il2cpp";
 constexpr const char* kMoneyServiceId = ANOMALY_MAYDAY_MONEY_SERVICE_V1_ID;
 constexpr const char* kFreecamServiceId = ANOMALY_MAYDAY_FREECAM_SERVICE_V1_ID;
 constexpr const char* kWeatherServiceId = ANOMALY_MAYDAY_WEATHER_SERVICE_V1_ID;
+constexpr const char* kCombatServiceId = ANOMALY_MAYDAY_COMBAT_SERVICE_V1_ID;
 constexpr std::uint32_t kIl2CppServiceVersion = 1;
 constexpr std::uint32_t kMoneyServiceVersion = ANOMALY_MAYDAY_MONEY_SERVICE_V1_VERSION;
 constexpr std::uint32_t kFreecamServiceVersion = ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION;
 constexpr std::uint32_t kWeatherServiceVersion = ANOMALY_MAYDAY_WEATHER_SERVICE_V1_VERSION;
+constexpr std::uint32_t kCombatServiceVersion = ANOMALY_MAYDAY_COMBAT_SERVICE_V1_VERSION;
 
 // 游戏数据：WeatherKind 枚举字段的声明顺序（与 global-metadata 一致）。
 // 枚举数值不在此硬编码，运行时按字段名解析。
@@ -58,6 +60,22 @@ struct Quat {
     float y;
     float z;
     float w;
+};
+
+// 自动棒球棍的目标快照：object 是 Passenger 对象，chest 是游戏
+// BatItem.ChestOf 返回的命中点，distance_mm 用于 UI 与就近选择。
+struct CombatTarget {
+    void* object{};
+    Vec3 chest{};
+    std::int32_t distance_mm{-1};
+    bool valid{};
+};
+
+// Mayday.InteractRef 的托管布局：uint netId + ushort index（4 字节对齐）。
+struct CombatInteractRef {
+    std::uint32_t net_id{};
+    std::uint16_t index{};
+    std::uint16_t padding{};
 };
 
 std::string JsonEscape(const std::string& value) {
@@ -95,6 +113,7 @@ using FnRuntimeInvoke = void* (*)(void* method, void* obj, void** params, void**
 using FnThreadAttach = void* (*)(void* domain);
 using FnStringNew = void* (*)(const char* text);
 using FnObjectUnbox = void* (*)(void* obj);
+using FnObjectGetClass = void* (*)(void* obj);
 }  // namespace
 
 struct MaydayAdapter::Impl {
@@ -138,6 +157,7 @@ struct MaydayAdapter::Impl {
     FnThreadAttach thread_attach{};
     FnStringNew string_new{};
     FnObjectUnbox object_unbox{};
+    FnObjectGetClass object_get_class{};
     void* domain{};
     void* image{};            // Assembly-CSharp.dll
     void* game_state_class{};
@@ -248,6 +268,66 @@ struct MaydayAdapter::Impl {
     std::array<std::int32_t, 6> kind_values{};   // 声明序 → 运行时枚举值
     AnomalyMaydayWeatherServiceV1 weather_service{};
 
+    // ---- 自动棒球棍：PlayerInteractor.Update 主线程触发 + BatItem.ServerUseOnce 静默瞄准 ----
+    // 渲染线程只读写 atomic 开关与快照；所有 il2cpp/Unity 调用都发生在
+    // 游戏主线程的钩子里，避免在 Present 回调里触碰 Transform 或 Mirror。
+    std::atomic<void*> combat_published{nullptr};
+    AnomalyMaydayCombatServiceV1 combat_service{};
+    std::atomic<bool> combat_enabled{false};
+    std::atomic<std::int32_t> combat_max_range_mm{0};
+    std::atomic<std::int32_t> combat_interval_ms{0};
+    std::atomic<bool> combat_in_flight{false};
+    std::atomic<bool> combat_holding_bat{false};
+    std::atomic<bool> combat_has_target{false};
+    std::atomic<std::int32_t> combat_target_distance_mm{-1};
+    std::atomic<std::int32_t> combat_last_result{0};
+    std::atomic<std::uint32_t> combat_attacks_sent{0};
+    bool combat_resolved{false};
+    bool combat_hooks_installed{false};
+    std::atomic<bool> combat_shutdown{false};
+    bool combat_resolve_logged{false};
+    std::atomic<int> combat_in_callback{0};
+    std::unique_ptr<HookBackend> combat_hook_backend;
+    std::chrono::steady_clock::time_point combat_last_attack{};
+    std::chrono::steady_clock::time_point combat_last_scan{};
+    CombatTarget combat_target{};   // 主线程专属：最近一次扫描结果
+    static std::atomic<Impl*> combat_owner;
+    void* player_net_class{};
+    void* player_inventory_class{};
+    void* bat_item_class{};
+    void* passenger_class{};
+    void* interaction_registry_class{};
+    void* player_interactor_class{};
+    void* get_local{};
+    void* get_inventory{};
+    void* get_held{};
+    void* get_interactor{};
+    void* get_eye_position{};
+    void* get_chest_position{};
+    void* get_is_seated{};
+    void* get_is_stunned{};
+    void* get_network_is_dead{};
+    void* passenger_all_field{};
+    void* passenger_on_board{};
+    void* passenger_is_carried{};
+    void* bat_server_use_once{};
+    void* bat_chest_of{};
+    void* interact_ref_of{};
+    void* interactor_update{};
+    void* interactor_cmd_use{};
+    void* player_view_field{};
+    std::size_t player_view_offset{};
+    void* combat_update_target{};
+    void* combat_update_original{};
+    void* combat_bat_target{};
+    void* combat_bat_original{};
+    // 乘客列表方法在首次枚举时按实例类型解析（主线程专属，无锁）。
+    void* combat_list_class{};
+    void* combat_list_count{};
+    void* combat_list_item{};
+    // 静默瞄准复用自由镜头已解析的 Transform 世界欧拉角方法。
+    // transform_get_euler / transform_set_euler 字段见上方自由镜头缓存。
+
     // ---- 覆盖层输入阻断 ----
     // 游戏走 Unity InputSystem：它从原始设备状态更新控件，不依赖 WndProc
     // 是否把消息转发给游戏窗口。因此只吞窗口消息挡不住点击与按键，必须把
@@ -353,6 +433,11 @@ struct MaydayAdapter::Impl {
         void* user, std::int32_t active, std::int32_t kind_index, float severity);
     static AnomalyStatusV1 ANOMALY_CALL WeatherGetKindValue(
         void* user, std::int32_t kind_index, std::int32_t* out_value);
+    static AnomalyStatusV1 ANOMALY_CALL CombatSetOptions(
+        void* user, std::int32_t max_range_mm, std::int32_t attack_interval_ms);
+    static AnomalyStatusV1 ANOMALY_CALL CombatSetEnabled(void* user, std::int32_t enabled);
+    static AnomalyStatusV1 ANOMALY_CALL CombatGetState(
+        void* user, AnomalyMaydayCombatStateV1* out_state);
 
     // 当前线程的 il2cpp attach 结果；FLS 缓存（Core 禁止 thread_local），
     // 首次调用 attach，之后复用，避免每帧 Draw 重复 attach/detach。
@@ -369,6 +454,7 @@ struct MaydayAdapter::Impl {
     void PublishMoneyService();
     void PublishFreecamService();
     void PublishWeatherService();
+    void PublishCombatService();
     void RevokePublished();
 
     // 解析 GameState 类与方法；每线程需先 attach。返回 false = 游戏符号不可用。
@@ -376,6 +462,8 @@ struct MaydayAdapter::Impl {
     bool ResolveFreecam();
     // 解析 WorldEnvironment / WorldManager / WeatherSystem 与 WeatherKind 枚举值。
     bool ResolveWeather();
+    // 解析自动棒球棍所需的 PlayerNet / BatItem / Passenger / 交互与网络入口。
+    bool ResolveCombat();
     // 拿 GameState.Instance（未开局返回 nullptr）
     void* GameInstance();
     // 拿静态单例实例（WorldEnvironment / WorldManager / WeatherSystem）。
@@ -391,6 +479,21 @@ struct MaydayAdapter::Impl {
     bool InvokeQuat(void* method, void* object, Quat* out_value);
     bool InvokeBool(void* method, void* object, bool* out_value);
     bool InvokeVoidArg(void* method, void* object, void* argument);
+    void* InvokeObject(void* method, void* object);
+    bool InvokeVec3Arg(void* method, void* argument, Vec3* out_value);
+    [[nodiscard]] bool ClassDerivesFrom(void* klass, void* base) const;
+
+    // 自动棒球棍的主线程钩子与目标选择。
+    static void ANOMALY_CALL InteractorUpdateThunk(void* self);
+    static void ANOMALY_CALL BatUseOnceThunk(
+        void* self, void* player, void* target, const Vec3* hit_point);
+    void HandleInteractorUpdate(void* self);
+    void HandleBatUseOnce(void* self, void* player, void* target, const Vec3* hit_point);
+    void UpdateCombat(void* self);
+    bool FindNearestPassenger(void* local, CombatTarget* out_target);
+    bool BuildInteractRef(void* target, CombatInteractRef* out_ref);
+    bool EnsureCombatHooks();
+    void TeardownCombatHooks() noexcept;
 
     static void ANOMALY_CALL PlayerLookUpdateThunk(void* self);
     void HandleLookUpdate(void* self);
@@ -443,6 +546,7 @@ void MaydayAdapter::Impl::ProbeWorker() {
                 PublishMoneyService();
                 PublishFreecamService();
                 PublishWeatherService();
+                PublishCombatService();
             }
             break;
         }
@@ -481,6 +585,7 @@ bool MaydayAdapter::Impl::ResolveExports(const HMODULE game_assembly) {
         {reinterpret_cast<void**>(&thread_attach), "il2cpp_thread_attach"},
         {reinterpret_cast<void**>(&string_new), "il2cpp_string_new"},
         {reinterpret_cast<void**>(&object_unbox), "il2cpp_object_unbox"},
+        {reinterpret_cast<void**>(&object_get_class), "il2cpp_object_get_class"},
     };
     int resolved = 0;
     for (const auto& entry : entries) {
@@ -508,6 +613,10 @@ void MaydayAdapter::Impl::PublishIl2CppTable() {
 namespace {
 
 AnomalyStatusV1 MoneyStatus(const char* message) {
+    return {ANOMALY_STATUS_V1_UNAVAILABLE, 0, {message, std::strlen(message)}};
+}
+
+AnomalyStatusV1 CombatStatus(const char* message) {
     return {ANOMALY_STATUS_V1_UNAVAILABLE, 0, {message, std::strlen(message)}};
 }
 
@@ -758,6 +867,69 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::WeatherGetKindValue(
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
 
+// ---- 自动棒球棍服务实现 ----
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatSetOptions(
+    void* user, std::int32_t max_range_mm, std::int32_t attack_interval_ms) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr || max_range_mm < 100 || max_range_mm > 10000 ||
+        attack_interval_ms < 100 || attack_interval_ms > 5000) {
+        return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    }
+    impl->combat_max_range_mm.store(max_range_mm, std::memory_order_release);
+    impl->combat_interval_ms.store(attack_interval_ms, std::memory_order_release);
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatSetEnabled(
+    void* user, std::int32_t enabled) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    std::scoped_lock lock(impl->resolve_mutex);
+    if (enabled != 0) {
+        if (!impl->ResolveCombat()) return CombatStatus("status.combat_no_symbols");
+        if (impl->combat_max_range_mm.load(std::memory_order_acquire) <= 0 ||
+            impl->combat_interval_ms.load(std::memory_order_acquire) <= 0) {
+            return CombatStatus("status.combat_no_options");
+        }
+        if (!impl->EnsureCombatHooks()) {
+            return CombatStatus("status.combat_hook_failed");
+        }
+    }
+    impl->combat_enabled.store(enabled != 0, std::memory_order_release);
+    if (enabled == 0) {
+        impl->combat_has_target.store(false, std::memory_order_release);
+        impl->combat_target_distance_mm.store(-1, std::memory_order_release);
+    }
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatGetState(
+    void* user, AnomalyMaydayCombatStateV1* out_state) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr || out_state == nullptr ||
+        out_state->struct_size < sizeof(*out_state)) {
+        return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    }
+    out_state->enabled = impl->combat_enabled.load(std::memory_order_acquire) ? 1 : 0;
+    out_state->in_flight =
+        impl->combat_in_flight.load(std::memory_order_acquire) ? 1 : 0;
+    out_state->holding_bat =
+        impl->combat_holding_bat.load(std::memory_order_acquire) ? 1 : 0;
+    out_state->has_target =
+        impl->combat_has_target.load(std::memory_order_acquire) ? 1 : 0;
+    out_state->target_distance_mm =
+        impl->combat_target_distance_mm.load(std::memory_order_acquire);
+    out_state->max_range_mm =
+        impl->combat_max_range_mm.load(std::memory_order_acquire);
+    out_state->attack_interval_ms =
+        impl->combat_interval_ms.load(std::memory_order_acquire);
+    out_state->last_result =
+        impl->combat_last_result.load(std::memory_order_acquire);
+    out_state->attacks_sent =
+        impl->combat_attacks_sent.load(std::memory_order_acquire);
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
 void MaydayAdapter::Impl::PublishMoneyService() {
     money_service = {
         sizeof(AnomalyMaydayMoneyServiceV1), kMoneyServiceVersion, this,
@@ -786,6 +958,16 @@ void MaydayAdapter::Impl::PublishWeatherService() {
     if (ProcessAdapterServices().Publish(
             kWeatherServiceId, kWeatherServiceVersion, &weather_service)) {
         weather_published.store(&weather_service, std::memory_order_release);
+    }
+}
+
+void MaydayAdapter::Impl::PublishCombatService() {
+    combat_service = {
+        sizeof(AnomalyMaydayCombatServiceV1), kCombatServiceVersion, this,
+        CombatSetOptions, CombatSetEnabled, CombatGetState};
+    if (ProcessAdapterServices().Publish(
+            kCombatServiceId, kCombatServiceVersion, &combat_service)) {
+        combat_published.store(&combat_service, std::memory_order_release);
     }
 }
 
@@ -949,6 +1131,136 @@ bool MaydayAdapter::Impl::ResolveWeather() {
                  " Storm=" + std::to_string(kind_values[3]) +
                  " Fog=" + std::to_string(kind_values[4]) +
                  " Snow=" + std::to_string(kind_values[5]));
+    }
+    return true;
+}
+
+bool MaydayAdapter::Impl::ResolveCombat() {
+    if (combat_resolved) return true;
+    if (class_from_name == nullptr || class_get_method == nullptr ||
+        class_get_field == nullptr || field_get_offset == nullptr ||
+        field_static_get_value == nullptr || class_get_parent == nullptr ||
+        runtime_invoke == nullptr || object_unbox == nullptr ||
+        object_get_class == nullptr || domain_get_assemblies == nullptr ||
+        assembly_get_image == nullptr || image_get_name == nullptr) {
+        return false;
+    }
+    if (!EnsureGameImage()) return false;
+
+    player_net_class = class_from_name(image, "Mayday", "PlayerNet");
+    player_inventory_class = class_from_name(image, "Mayday", "PlayerInventory");
+    bat_item_class = class_from_name(image, "Mayday.Passengers", "BatItem");
+    passenger_class = class_from_name(image, "Mayday.Passengers", "Passenger");
+    interaction_registry_class = class_from_name(image, "Mayday", "InteractionRegistry");
+    player_interactor_class = class_from_name(image, "Mayday", "PlayerInteractor");
+    if (player_net_class == nullptr || player_inventory_class == nullptr ||
+        bat_item_class == nullptr || passenger_class == nullptr ||
+        interaction_registry_class == nullptr || player_interactor_class == nullptr) {
+        return false;
+    }
+
+    get_local = class_get_method(player_net_class, "get_Local", 0);
+    get_inventory = class_get_method(player_net_class, "get_Inventory", 0);
+    get_interactor = class_get_method(player_net_class, "get_Interactor", 0);
+    get_eye_position = class_get_method(player_net_class, "get_EyePosition", 0);
+    get_chest_position = class_get_method(player_net_class, "get_ChestPosition", 0);
+    get_is_seated = class_get_method(player_net_class, "get_IsSeated", 0);
+    get_is_stunned = class_get_method(player_net_class, "get_IsStunned", 0);
+    get_network_is_dead = class_get_method(player_net_class, "get_NetworkIsDead", 0);
+    player_view_field = class_get_field(player_net_class, "ViewTransform");
+    if (player_view_field != nullptr) {
+        player_view_offset = field_get_offset(player_view_field);
+    }
+    get_held = class_get_method(player_inventory_class, "get_Held", 0);
+    bat_server_use_once = class_get_method(bat_item_class, "ServerUseOnce", 3);
+    bat_chest_of = class_get_method(bat_item_class, "ChestOf", 1);
+    passenger_all_field = class_get_field(passenger_class, "All");
+    passenger_on_board = class_get_method(passenger_class, "get_IsOnBoardState", 0);
+    passenger_is_carried = class_get_method(passenger_class, "get_IsCarried", 0);
+    interact_ref_of = class_get_method(interaction_registry_class, "RefOf", 1);
+    interactor_update = class_get_method(player_interactor_class, "Update", 0);
+    interactor_cmd_use = class_get_method(player_interactor_class, "CmdUse", 4);
+
+    // UnityEngine.CoreModule 承载 Transform / Component / Quaternion。
+    std::size_t assembly_count{};
+    void** const assemblies = domain_get_assemblies(domain, &assembly_count);
+    void* core_image{};
+    for (std::size_t i = 0; assemblies != nullptr && i < assembly_count; ++i) {
+        void* const candidate = assembly_get_image(assemblies[i]);
+        if (candidate == nullptr) continue;
+        const char* const name = image_get_name(candidate);
+        if (name != nullptr && std::strcmp(name, "UnityEngine.CoreModule.dll") == 0) {
+            core_image = candidate;
+            break;
+        }
+    }
+    if (core_image == nullptr) return false;
+    void* const transform_class = class_from_name(core_image, "UnityEngine", "Transform");
+    void* const component_class = class_from_name(core_image, "UnityEngine", "Component");
+    if (transform_class == nullptr || component_class == nullptr) {
+        return false;
+    }
+    if (component_get_transform == nullptr) {
+        component_get_transform = class_get_method(component_class, "get_transform", 0);
+    }
+    if (transform_get_position == nullptr) {
+        transform_get_position = class_get_method(transform_class, "get_position", 0);
+    }
+    if (transform_get_euler == nullptr) {
+        transform_get_euler = class_get_method(transform_class, "get_eulerAngles", 0);
+    }
+    if (transform_set_euler == nullptr) {
+        transform_set_euler = class_get_method(transform_class, "set_eulerAngles", 1);
+    }
+
+    combat_update_target = interactor_update != nullptr
+        ? *reinterpret_cast<void**>(interactor_update) : nullptr;
+    combat_bat_target = bat_server_use_once != nullptr
+        ? *reinterpret_cast<void**>(bat_server_use_once) : nullptr;
+
+    struct NamedHandle { const char* name; void* handle; };
+    const NamedHandle required[] = {
+        {"player.get_Local", get_local},
+        {"player.get_Inventory", get_inventory},
+        {"player.get_Interactor", get_interactor},
+        {"player.get_EyePosition", get_eye_position},
+        {"player.ViewTransform", player_view_field},
+        {"player.get_eulerAngles", transform_get_euler},
+        {"player.set_eulerAngles", transform_set_euler},
+        {"inventory.get_Held", get_held},
+        {"bat.ServerUseOnce", bat_server_use_once},
+        {"bat.ChestOf", bat_chest_of},
+        {"passenger.All", passenger_all_field},
+        {"passenger.get_IsOnBoardState", passenger_on_board},
+        {"registry.RefOf", interact_ref_of},
+        {"interactor.Update", interactor_update},
+        {"interactor.CmdUse", interactor_cmd_use},
+        {"interactor.Update.target", combat_update_target},
+        {"bat.ServerUseOnce.target", combat_bat_target},
+    };
+    std::string missing;
+    for (const auto& entry : required) {
+        if (entry.handle == nullptr) {
+            if (!missing.empty()) missing += ' ';
+            missing += entry.name;
+        }
+    }
+    if (player_view_offset == 0 || player_view_offset >= 0x1000) {
+        if (!missing.empty()) missing += ' ';
+        missing += "player.ViewTransform.offset";
+    }
+    if (!missing.empty()) {
+        if (log_sink != nullptr && !combat_resolve_logged) {
+            combat_resolve_logged = true;
+            log_sink("combat.resolve_failed", "missing handles: " + missing);
+        }
+        return false;
+    }
+
+    combat_resolved = true;
+    if (log_sink != nullptr) {
+        log_sink("combat.resolved",
+                 "PlayerNet/BatItem/Passenger/InteractionRegistry resolved");
     }
     return true;
 }
@@ -1195,6 +1507,35 @@ bool MaydayAdapter::Impl::InvokeVoidArg(void* method, void* object, void* argume
     void* params[] = {argument};
     runtime_invoke(method, object, params, &exception);
     return exception == nullptr;
+}
+
+void* MaydayAdapter::Impl::InvokeObject(void* method, void* object) {
+    if (method == nullptr) return nullptr;
+    void* exception{};
+    void* const result = runtime_invoke(method, object, nullptr, &exception);
+    return exception == nullptr ? result : nullptr;
+}
+
+bool MaydayAdapter::Impl::InvokeVec3Arg(
+    void* method, void* argument, Vec3* out_value) {
+    if (method == nullptr || argument == nullptr || out_value == nullptr ||
+        object_unbox == nullptr) {
+        return false;
+    }
+    void* params[] = {argument};
+    void* exception{};
+    void* const boxed = runtime_invoke(method, nullptr, params, &exception);
+    if (exception != nullptr || boxed == nullptr) return false;
+    *out_value = *static_cast<Vec3*>(object_unbox(boxed));
+    return true;
+}
+
+bool MaydayAdapter::Impl::ClassDerivesFrom(void* klass, void* base) const {
+    if (klass == nullptr || base == nullptr || class_get_parent == nullptr) return false;
+    for (void* current = klass; current != nullptr; current = class_get_parent(current)) {
+        if (current == base) return true;
+    }
+    return false;
 }
 
 std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::freecam_owner{nullptr};
@@ -1532,6 +1873,348 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetInput(
     impl->in_pitch += pitch_delta;
     impl->in_speed = speed;
     return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+// ---------------------------------------------------------------------------
+// 自动棒球棍：PlayerInteractor.Update 触发使用命令，BatItem.ServerUseOnce
+// 在服务端命中判定前临时把视角朝向目标（静默瞄准，渲染帧看不到旋转）。
+// ---------------------------------------------------------------------------
+std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::combat_owner{nullptr};
+
+void MaydayAdapter::Impl::UpdateCombat(void* self) {
+    if (!combat_enabled.load(std::memory_order_acquire) ||
+        combat_shutdown.load(std::memory_order_acquire)) {
+        return;
+    }
+    void* const local = InvokeObject(get_local, nullptr);
+    if (local == nullptr) {
+        combat_in_flight.store(false, std::memory_order_release);
+        combat_holding_bat.store(false, std::memory_order_release);
+        combat_has_target.store(false, std::memory_order_release);
+        combat_target_distance_mm.store(-1, std::memory_order_release);
+        return;
+    }
+    combat_in_flight.store(true, std::memory_order_release);
+    // 服务器会为每个玩家的 PlayerInteractor 调用 Update；只处理本地玩家。
+    if (InvokeObject(get_interactor, local) != self) return;
+
+    bool seated = false;
+    if (get_is_seated != nullptr && InvokeBool(get_is_seated, local, &seated) && seated) {
+        return;
+    }
+    bool stunned = false;
+    if (get_is_stunned != nullptr && InvokeBool(get_is_stunned, local, &stunned) && stunned) {
+        return;
+    }
+    bool dead = false;
+    if (get_network_is_dead != nullptr &&
+        InvokeBool(get_network_is_dead, local, &dead) && dead) {
+        return;
+    }
+
+    void* const inventory = InvokeObject(get_inventory, local);
+    void* const held = inventory != nullptr ? InvokeObject(get_held, inventory) : nullptr;
+    const bool holding_bat = held != nullptr && object_get_class != nullptr &&
+        ClassDerivesFrom(object_get_class(held), bat_item_class);
+    combat_holding_bat.store(holding_bat, std::memory_order_release);
+    if (!holding_bat) {
+        combat_has_target.store(false, std::memory_order_release);
+        combat_target_distance_mm.store(-1, std::memory_order_release);
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - combat_last_scan >= std::chrono::milliseconds(100)) {
+        CombatTarget target;
+        if (FindNearestPassenger(local, &target)) {
+            combat_target = target;
+            combat_has_target.store(true, std::memory_order_release);
+            combat_target_distance_mm.store(
+                target.distance_mm, std::memory_order_release);
+        } else {
+            combat_target = {};
+            combat_has_target.store(false, std::memory_order_release);
+            combat_target_distance_mm.store(-1, std::memory_order_release);
+        }
+        combat_last_scan = now;
+    }
+    if (!combat_has_target.load(std::memory_order_acquire)) return;
+
+    const auto interval = std::chrono::milliseconds(
+        combat_interval_ms.load(std::memory_order_acquire));
+    if (now - combat_last_attack < interval) return;
+
+    CombatInteractRef ref;
+    if (!BuildInteractRef(combat_target.object, &ref)) {
+        combat_last_result.store(2, std::memory_order_release);
+        combat_last_attack = now;
+        return;
+    }
+    float dt = 0.0f;
+    std::uint8_t phase = 0;
+    Vec3 hit_point = combat_target.chest;
+    void* params[] = {&ref, &hit_point, &dt, &phase};
+    void* exception{};
+    runtime_invoke(interactor_cmd_use, self, params, &exception);
+    combat_last_attack = now;
+    if (exception == nullptr) {
+        combat_last_result.store(1, std::memory_order_release);
+        combat_attacks_sent.fetch_add(1, std::memory_order_acq_rel);
+    } else {
+        combat_last_result.store(2, std::memory_order_release);
+    }
+}
+
+bool MaydayAdapter::Impl::FindNearestPassenger(
+    void* local, CombatTarget* out_target) {
+    if (local == nullptr || out_target == nullptr || passenger_all_field == nullptr ||
+        bat_chest_of == nullptr || passenger_on_board == nullptr ||
+        object_get_class == nullptr || class_get_method == nullptr) {
+        return false;
+    }
+    void* list = nullptr;
+    field_static_get_value(passenger_all_field, &list);
+    if (list == nullptr) return false;
+    void* const list_class = object_get_class(list);
+    if (list_class == nullptr) return false;
+    if (combat_list_count == nullptr || combat_list_item == nullptr ||
+        combat_list_class != list_class) {
+        combat_list_count = class_get_method(list_class, "get_Count", 0);
+        combat_list_item = class_get_method(list_class, "get_Item", 1);
+        combat_list_class = list_class;
+        if (combat_list_count == nullptr || combat_list_item == nullptr) return false;
+    }
+    std::int32_t count = 0;
+    if (!InvokeInt(combat_list_count, list, &count) || count <= 0) return false;
+    Vec3 eye{};
+    if (!InvokeVec3(get_eye_position, local, &eye)) return false;
+
+    const float max_range_m =
+        static_cast<float>(combat_max_range_mm.load(std::memory_order_acquire)) /
+        1000.0f;
+    float best_squared = max_range_m * max_range_m;
+    CombatTarget best;
+    for (std::int32_t index = 0; index < count; ++index) {
+        void* params[] = {&index};
+        void* exception{};
+        void* const passenger =
+            runtime_invoke(combat_list_item, list, params, &exception);
+        if (exception != nullptr || passenger == nullptr) continue;
+        bool on_board = false;
+        if (!InvokeBool(passenger_on_board, passenger, &on_board) || !on_board) {
+            continue;
+        }
+        if (passenger_is_carried != nullptr) {
+            bool carried = false;
+            if (InvokeBool(passenger_is_carried, passenger, &carried) && carried) {
+                continue;
+            }
+        }
+        Vec3 chest{};
+        if (!InvokeVec3Arg(bat_chest_of, passenger, &chest)) continue;
+        const float dx = chest.x - eye.x;
+        const float dy = chest.y - eye.y;
+        const float dz = chest.z - eye.z;
+        const float squared = dx * dx + dy * dy + dz * dz;
+        if (!(squared <= best_squared)) continue;
+        best_squared = squared;
+        best.object = passenger;
+        best.chest = chest;
+        best.distance_mm = static_cast<std::int32_t>(
+            std::lround(std::sqrt(squared) * 1000.0f));
+        best.valid = true;
+    }
+    if (!best.valid) return false;
+    *out_target = best;
+    return true;
+}
+
+bool MaydayAdapter::Impl::BuildInteractRef(
+    void* target, CombatInteractRef* out_ref) {
+    if (target == nullptr || out_ref == nullptr || interact_ref_of == nullptr ||
+        object_unbox == nullptr) {
+        return false;
+    }
+    void* params[] = {target};
+    void* exception{};
+    void* const boxed = runtime_invoke(interact_ref_of, nullptr, params, &exception);
+    if (exception != nullptr || boxed == nullptr) return false;
+    const auto* ref = static_cast<const CombatInteractRef*>(object_unbox(boxed));
+    if (ref == nullptr || ref->net_id == 0) return false;
+    *out_ref = *ref;
+    return true;
+}
+
+void MaydayAdapter::Impl::HandleInteractorUpdate(void* self) {
+    auto* const original =
+        reinterpret_cast<void (ANOMALY_CALL*)(void*)>(combat_update_original);
+    if (original != nullptr) original(self);
+    if (combat_shutdown.load(std::memory_order_acquire)) return;
+    UpdateCombat(self);
+}
+
+void MaydayAdapter::Impl::HandleBatUseOnce(
+    void* self, void* player, void* target, const Vec3* hit_point) {
+    auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(
+        void*, void*, void*, const Vec3*)>(combat_bat_original);
+    if (original == nullptr) return;
+    if (!combat_enabled.load(std::memory_order_acquire) ||
+        combat_shutdown.load(std::memory_order_acquire) ||
+        self == nullptr || player == nullptr || target == nullptr ||
+        player_view_field == nullptr || object_get_class == nullptr) {
+        original(self, player, target, hit_point);
+        return;
+    }
+    // 只对本地玩家自己的挥棒做静默瞄准；服务器处理远端玩家命令时
+    // PlayerNet.Local 不是同一个对象，直接放行。
+    void* const local = InvokeObject(get_local, nullptr);
+    if (local == nullptr || local != player) {
+        original(self, player, target, hit_point);
+        return;
+    }
+    void* const view = *reinterpret_cast<void**>(
+        reinterpret_cast<std::uint8_t*>(local) + player_view_offset);
+    if (view == nullptr) {
+        original(self, player, target, hit_point);
+        return;
+    }
+    void* const target_class = object_get_class(target);
+    Vec3 point{};
+    bool have_point = false;
+    if (ClassDerivesFrom(target_class, passenger_class)) {
+        have_point = InvokeVec3Arg(bat_chest_of, target, &point);
+    } else if (ClassDerivesFrom(target_class, player_net_class) &&
+               get_chest_position != nullptr) {
+        have_point = InvokeVec3(get_chest_position, target, &point);
+    }
+    if (!have_point) {
+        original(self, player, target, hit_point);
+        return;
+    }
+    Vec3 eye{};
+    if (!InvokeVec3(get_eye_position, local, &eye)) {
+        original(self, player, target, hit_point);
+        return;
+    }
+    Vec3 forward{point.x - eye.x, point.y - eye.y, point.z - eye.z};
+    const float length_squared =
+        forward.x * forward.x + forward.y * forward.y + forward.z * forward.z;
+    if (!(length_squared > 1e-6f)) {
+        original(self, player, target, hit_point);
+        return;
+    }
+    // 只用水平朝向 + 俯仰构造世界欧拉角：服务端读的是 ViewTransform.forward，
+    // roll 不影响命中判定，原欧拉角在调用后立即恢复。
+    constexpr float kRadiansToDegrees = 57.295779513082320876f;
+    const float inverse_length = 1.0f / std::sqrt(length_squared);
+    const float pitch = -std::asin(std::clamp(
+        forward.y * inverse_length, -1.0f, 1.0f)) * kRadiansToDegrees;
+    const float yaw =
+        std::atan2(forward.x, forward.z) * kRadiansToDegrees;
+    Vec3 aim_euler{pitch, yaw, 0.0f};
+    Vec3 saved_euler{};
+    if (!InvokeVec3(transform_get_euler, view, &saved_euler) ||
+        !InvokeVoidArg(transform_set_euler, view, &aim_euler)) {
+        original(self, player, target, hit_point);
+        return;
+    }
+    original(self, player, target, hit_point);
+    static_cast<void>(InvokeVoidArg(transform_set_euler, view, &saved_euler));
+}
+
+bool MaydayAdapter::Impl::EnsureCombatHooks() {
+    if (combat_hooks_installed) return true;
+    if (combat_shutdown.load(std::memory_order_acquire) ||
+        combat_update_target == nullptr || combat_bat_target == nullptr) {
+        return false;
+    }
+    combat_hook_backend = CreateMinHookBackend();
+    if (combat_hook_backend == nullptr || !combat_hook_backend->Initialize()) {
+        combat_hook_backend.reset();
+        return false;
+    }
+    combat_owner.store(this, std::memory_order_release);
+    bool ok = combat_hook_backend->Create(
+        combat_update_target,
+        reinterpret_cast<void*>(&Impl::InteractorUpdateThunk),
+        &combat_update_original);
+    const bool created_update = ok;
+    if (ok) {
+        ok = combat_hook_backend->Create(
+            combat_bat_target,
+            reinterpret_cast<void*>(&Impl::BatUseOnceThunk),
+            &combat_bat_original);
+    }
+    const bool created_bat = ok;
+    if (ok) ok = combat_hook_backend->Enable(combat_update_target);
+    if (ok) ok = combat_hook_backend->Enable(combat_bat_target);
+    if (!ok) {
+        if (created_update) {
+            static_cast<void>(combat_hook_backend->Remove(combat_update_target));
+        }
+        if (created_bat) {
+            static_cast<void>(combat_hook_backend->Remove(combat_bat_target));
+        }
+        combat_update_original = nullptr;
+        combat_bat_original = nullptr;
+        combat_owner.store(nullptr, std::memory_order_release);
+        static_cast<void>(combat_hook_backend->Uninitialize());
+        combat_hook_backend.reset();
+        return false;
+    }
+    combat_hooks_installed = true;
+    return true;
+}
+
+void MaydayAdapter::Impl::TeardownCombatHooks() noexcept {
+    combat_enabled.store(false, std::memory_order_release);
+    if (!combat_hooks_installed || combat_hook_backend == nullptr) return;
+    if (combat_update_target != nullptr) {
+        static_cast<void>(combat_hook_backend->Disable(combat_update_target));
+    }
+    if (combat_bat_target != nullptr) {
+        static_cast<void>(combat_hook_backend->Disable(combat_bat_target));
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (combat_in_callback.load(std::memory_order_acquire) != 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    static_cast<void>(combat_hook_backend->Remove(combat_update_target));
+    static_cast<void>(combat_hook_backend->Remove(combat_bat_target));
+    combat_owner.store(nullptr, std::memory_order_release);
+    static_cast<void>(combat_hook_backend->Uninitialize());
+    combat_hook_backend.reset();
+    combat_hooks_installed = false;
+    combat_update_original = nullptr;
+    combat_bat_original = nullptr;
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::InteractorUpdateThunk(void* self) {
+    Impl* const impl = combat_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->combat_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        impl->HandleInteractorUpdate(self);
+    } catch (...) {
+        // 插件逻辑异常不得穿透游戏 Update。
+    }
+    impl->combat_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::BatUseOnceThunk(
+    void* self, void* player, void* target, const Vec3* hit_point) {
+    Impl* const impl = combat_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->combat_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        impl->HandleBatUseOnce(self, player, target, hit_point);
+    } catch (...) {
+        // 静默瞄准失败时游戏仍需执行原始挥棒；HandleBatUseOnce 内部
+        // 每条失败路径都已调用 original。
+    }
+    impl->combat_in_callback.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 // ---------------------------------------------------------------------------
@@ -2379,6 +3062,10 @@ void MaydayAdapter::Impl::RevokePublished() {
     if (weather != nullptr) {
         static_cast<void>(ProcessAdapterServices().Revoke(kWeatherServiceId, weather));
     }
+    void* const combat = combat_published.exchange(nullptr, std::memory_order_acq_rel);
+    if (combat != nullptr) {
+        static_cast<void>(ProcessAdapterServices().Revoke(kCombatServiceId, combat));
+    }
 }
 
 MaydayAdapter::MaydayAdapter() : impl_(std::make_unique<Impl>()) {
@@ -2405,6 +3092,8 @@ bool MaydayAdapter::Stop(std::chrono::milliseconds timeout) noexcept {
         impl_->TeardownInputBlockHook();
         impl_->pause_menu_hook_shutdown = true;
         impl_->TeardownPauseMenuHook();
+        impl_->combat_shutdown.store(true, std::memory_order_release);
+        impl_->TeardownCombatHooks();
     }
     // 等探测线程走完当前轮次（含全部 Publish）再回收服务表：旧的“只 sleep
     // 一次”兜底允许 RevokePublished 之后探测线程仍发布新服务，服务表会残留

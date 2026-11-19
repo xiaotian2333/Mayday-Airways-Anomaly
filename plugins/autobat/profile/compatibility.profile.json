@@ -1,0 +1,13 @@
+{
+  "$schema": "../../../schemas/plugin-profile.schema.json",
+  "schemaVersion": 1,
+  "game": "mayday",
+  "module": "bat_combat",
+  "section": "compat",
+  "contract": "mayday.bat-combat",
+  "layout": {
+    "swingRangeMilli": 2800,
+    "attackIntervalMs": 850
+  },
+  "symbols": []
+}

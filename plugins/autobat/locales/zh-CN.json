@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "messages": {
+    "window.title": "自动棒球棍",
+    "plugin.description": "手持棒球棍时自动挥击攻击范围内最近的乘客，视角保持不动。",
+    "toggle.enabled": "自动挥棒",
+    "status.disabled": "自动挥棒已关闭。",
+    "status.waiting": "等待游戏战斗服务…",
+    "status.unavailable": "游戏尚未就绪，进入一局后再试。",
+    "status.failed": "操作失败。",
+    "status.attach_failed": "无法附加到游戏运行时。",
+    "status.not_in_flight": "进入一局后可自动挥棒。",
+    "status.hold_bat": "请先手持棒球棍。",
+    "status.target": "目标距离 {0} 厘米（攻击范围 {1} 厘米）。",
+    "status.no_target": "{0} 厘米内没有可攻击的乘客。",
+    "status.profile_missing": "缺少兼容性配置，无法确定游戏的最大攻击距离。",
+    "status.profile_invalid": "兼容性配置无效，无法确定游戏的最大攻击距离。",
+    "status.combat_no_symbols": "当前游戏版本缺少自动棒球棍所需的符号。",
+    "status.combat_no_options": "攻击距离与挥击间隔尚未配置。",
+    "status.combat_hook_failed": "安装游戏挥棒/主线程钩子失败。",
+    "stats.swings": "已发送挥击：{0}",
+    "help.text": "开启后，手持棒球棍会自动锁定攻击范围内最近的乘客，并以协议包形式发送使用请求；由你主持会话时，仅在服务端命中判定期间临时朝向目标，画面视角不会移动。"
+  }
+}

@@ -112,6 +112,62 @@ typedef struct AnomalyMaydayWeatherServiceV1 {
         void* user, int32_t kind_index, int32_t* out_value);
 } AnomalyMaydayWeatherServiceV1;
 
+// Mayday Airways automatic bat service (id="mayday.combat"). The host resolves
+// the local player, the held BatItem and the game's passenger list, then sends
+// the game's own use command (Mirror Command) at the game's swing range. While
+// the host owns the session, the server-side swing is silently aimed at the
+// selected target, so the camera never turns.
+//
+// set_options must be called with the compatibility profile's swing range and
+// attack interval before enabling; those values come from the game build and
+// are not guessed by the host. Failures return ANOMALY_STATUS_V1_UNAVAILABLE
+// with a stable diagnostic key ("status.unavailable", "status.combat_no_symbols",
+// "status.combat_no_options", "status.combat_hook_failed") that the plugin
+// localizes.
+
+#define ANOMALY_MAYDAY_COMBAT_SERVICE_V1_ID "mayday.combat"
+#define ANOMALY_MAYDAY_COMBAT_SERVICE_V1_VERSION 1u
+
+typedef struct AnomalyMaydayCombatStateV1 {
+    uint32_t struct_size;
+    // 1 while automatic swinging is enabled, 0 otherwise.
+    int32_t enabled;
+    // 1 when a local player exists (inside a flight), 0 otherwise.
+    int32_t in_flight;
+    // 1 when the local player's held item is a BatItem.
+    int32_t holding_bat;
+    // 1 when a passenger was found inside max_range_mm.
+    int32_t has_target;
+    // Distance from the player's eye to the target's chest, in millimetres;
+    // -1 when no target is available.
+    int32_t target_distance_mm;
+    // Effective swing range and send interval configured by set_options.
+    int32_t max_range_mm;
+    int32_t attack_interval_ms;
+    // 0 = idle, 1 = the last attack command was sent, 2 = it failed.
+    int32_t last_result;
+    // Number of attack commands sent since the service was published.
+    uint32_t attacks_sent;
+} AnomalyMaydayCombatStateV1;
+
+typedef struct AnomalyMaydayCombatServiceV1 {
+    uint32_t struct_size;
+    uint32_t service_version;
+    void* user;
+    // Stores the compatibility values before enabling. max_range_mm is the
+    // game's server-side swing limit, attack_interval_ms the send cadence
+    // (both extracted from the game build).
+    AnomalyStatusV1 (ANOMALY_CALL *set_options)(
+        void* user, int32_t max_range_mm, int32_t attack_interval_ms);
+    // Enables (enabled != 0) or disables automatic swinging. Enabling also
+    // installs the main-thread game hooks; disabling leaves them installed but
+    // dormant until the host stops.
+    AnomalyStatusV1 (ANOMALY_CALL *set_enabled)(void* user, int32_t enabled);
+    // Reads the latest main-thread snapshot; no game calls are made here.
+    AnomalyStatusV1 (ANOMALY_CALL *get_state)(
+        void* user, AnomalyMaydayCombatStateV1* out_state);
+} AnomalyMaydayCombatServiceV1;
+
 #ifdef __cplusplus
 }
 #endif

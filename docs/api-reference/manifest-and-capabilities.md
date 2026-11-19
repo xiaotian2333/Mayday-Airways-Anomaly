@@ -52,9 +52,10 @@ capability 策略源：`src/plugin/plugin_capability_policy.cpp`。
 ## Capability 列表
 
 `mods`、`commands`、`configuration`、`diagnostics`、`entity-esp`、`ipc`、`game-events`、
-`interop-hook`、`interop-patch`、`interop-signature`、`mayday-freecam`、`mayday-money`、
-`memory-read`、`memory-write`、`notifications`、`runtime-info`、`scheduler`、`storage`、
-`input`、`ui-font`、`ui-overlay`、`ui-texture`、`ui-window`、`ui`、`json`、`websocket`。
+`interop-hook`、`interop-patch`、`interop-signature`、`mayday-combat`、`mayday-freecam`、
+`mayday-money`、`mayday-weather`、`memory-read`、`memory-write`、`notifications`、
+`runtime-info`、`scheduler`、`storage`、`input`、`ui-font`、`ui-overlay`、`ui-texture`、
+`ui-window`、`ui`、`json`、`websocket`。
 
 ## 服务映射
 
@@ -76,6 +77,8 @@ capability 策略源：`src/plugin/plugin_capability_policy.cpp`。
 | `anomaly.interop.patch` | `interop-patch` |
 | `mayday.money` | `mayday-money` |
 | `mayday.freecam` | `mayday-freecam` |
+| `mayday.weather` | `mayday-weather` |
+| `mayday.combat` | `mayday-combat` |
 | `anomaly.ui` | `ui` |
 | `anomaly.localization` | `ui` |
 | `anomaly.window` | `ui-window` |
