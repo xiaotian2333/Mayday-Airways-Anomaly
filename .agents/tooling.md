@@ -61,6 +61,18 @@ cmake --install .build\windows-vs2022 --config RelWithDebInfo `
 | `tools/MetaDump` | 从 MelonLoader 生成的 interop 程序集按类型名子串导出类、方法（含 `static` 标记）、字段与枚举值，供插件按名称解析 il2cpp 成员；`dotnet run --project tools/MetaDump -- <类型名子串> [成员名过滤]` | 本机开发辅助，不参与 CMake 构建与发布打包；构建优先用游戏内 MelonLoader 的 AsmResolver（`MAYDAY_GAME_DIR` 或 `-p:GameDir=...`），缺失时回退到本地 `tools/MetaDump/deps`（不提交），目标程序集可用 `MAYDAY_DUMP_ASM` 覆盖；输出可能含游戏内部符号，分享前审查 |
 | `start_game.ps1` | 启动 Mayday 并自动关闭 Discord 弹窗、进入单人飞行局，供 Anomaly 实机验证；`-NoLaunch` 只对已开窗口执行点击，`-NoClick` 只等到 Runtime 就绪；就绪判定读 `Anomaly\logs\anomaly-runtime.log` 本次启动新增的 `runtime_health=confirmed` | 用 `pwsh -NoProfile -File` 启动；仅用于本机测试，按窗口相对坐标点击，要求主菜单为默认布局；不读写游戏内存 |
 
+MetaDump 读取的 dummy interop 程序集在本机用 Cpp2IL（`2022.1.0-pre-release.21`，支持 Unity 6000.3 /
+metadata v39）生成，仅含元数据与方法签名、不含可执行方法体，工具与产物都留在 `.local/`，不提交：
+
+```powershell
+.local\tools\cpp2il\Cpp2IL.exe --game-path 'D:\games\steam\steamapps\common\Mayday Airways Demo' `
+  --output-as dummydll --output-to .local\il2cpp-interop
+```
+
+未设置 `MAYDAY_DUMP_ASM` 时，MetaDump 依次查找游戏内 MelonLoader interop 与当前目录
+`.local\il2cpp-interop\Assembly-CSharp.dll`；因此从仓库根执行
+`dotnet run --project tools/MetaDump -- <类型名子串>` 即可。生成物包含游戏内部符号，不要提交或分享。
+
 所有工具脚本默认使用 `.build/windows-vs2022` 和其中的 `RelWithDebInfo` 二进制。只在有意使用
 其他 artifact 时传入明确的工具路径；不要重新引入阶段命名或临时构建目录默认值。
 

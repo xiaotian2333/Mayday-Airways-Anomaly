@@ -16,10 +16,22 @@ internal static class Program
         }
         var gameDir = Environment.GetEnvironmentVariable("MAYDAY_GAME_DIR")
             ?? @"D:\games\steam\steamapps\common\Mayday Airways Demo";
-        var asmPath = System.IO.Path.Combine(gameDir, @"MelonLoader\Il2CppAssemblies\Assembly-CSharp.dll");
-        // MAYDAY_DUMP_ASM 可覆盖目标程序集（如 MelonLoader.dll 本体）
+        // 程序集查找顺序: MAYDAY_DUMP_ASM 覆盖 → 游戏内 MelonLoader interop → 当前目录 .local/il2cpp-interop（Cpp2IL 生成）
         var overrideAsm = Environment.GetEnvironmentVariable("MAYDAY_DUMP_ASM");
-        if (!string.IsNullOrEmpty(overrideAsm)) asmPath = overrideAsm;
+        string asmPath;
+        if (!string.IsNullOrEmpty(overrideAsm))
+        {
+            asmPath = overrideAsm;
+        }
+        else
+        {
+            var candidates = new[]
+            {
+                System.IO.Path.Combine(gameDir, @"MelonLoader\Il2CppAssemblies\Assembly-CSharp.dll"),
+                System.IO.Path.Combine(Environment.CurrentDirectory, @".local\il2cpp-interop\Assembly-CSharp.dll"),
+            };
+            asmPath = candidates.FirstOrDefault(System.IO.File.Exists) ?? candidates[0];
+        }
         var module = ModuleDefinition.FromFile(asmPath);
 
         string needle = args[0];
