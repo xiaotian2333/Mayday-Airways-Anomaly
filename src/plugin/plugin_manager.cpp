@@ -4182,6 +4182,10 @@ bool PluginManager::Activate(LoadedPlugin& plugin) {
         // 重试会从头再跑一次 on_load，先吊销本次尝试登记的全部资源，避免任务
         // 叠加或热键/命令撞上 CONFLICT 让插件永远无法激活；配置 schema 等服务
         // 支持重新登记，占位条目由下一次 Activate 重建。
+        // 在途回调无需排空：等待期不卸载 DLL，回调由 scope lease 保护跑完，
+        // 已入队任务随吊销取消（CancelQueuedWork）。不能在此调
+        // FreezeCallbackSources——accepting 闸门没有重开路径，会把重试的
+        // AcquireCallback 永久拒绝，恰好复现本处要修的"永远无法激活"。
         static_cast<void>(plugin.scope->RevokeAll());
         plugin.plugin_context = nullptr;
         plugin.waiting_for_service = true;
