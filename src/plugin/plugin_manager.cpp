@@ -4402,9 +4402,13 @@ bool PluginManager::LoadBinary(
         }
         if (!Activate(*plugin)) {
             Log(ANOMALY_CORE_LOG_LEVEL_V1_ERROR, "ABI v1 plugin rejected activation: " + plugin->view.id);
-            static_cast<void>(plugin->scope->RevokeAll());
-            unload_module();
-            discard_shadow();
+            // 失败代可能已经在 on_load 里注册了调度任务、热键或 IPC provider，并让插件线程
+            // 跑起来。直接 FreeLibrary 会把在途回调的返回地址变成悬空代码，因此把它交给
+            // 正常卸载流程：冻结来源、取消排队、排空回调并核对 hook/patch 撤销结果，
+            // 超时则 quarantine 并保留模块映射。
+            plugins_.push_back(std::move(plugin));
+            static_cast<void>(UnloadIndicesWithDeadline(
+                {plugins_.size() - 1}, true, kEnablementStopTimeout));
             return false;
         }
         Log(ANOMALY_CORE_LOG_LEVEL_V1_INFO,
@@ -4509,6 +4513,7 @@ void PluginManager::LoadAll() {
         Log(ANOMALY_CORE_LOG_LEVEL_V1_WARNING, "plugin enablement file watcher failed to start");
     }
     if (!loaded) Log(ANOMALY_CORE_LOG_LEVEL_V1_WARNING, "one or more plugin packages were not activated");
+    PublishDiagnosticsSnapshot();
 }
 
 void PluginManager::ReloadAll() {
@@ -4772,6 +4777,7 @@ bool PluginManager::ReconcileEnablement(
         loaded = false;
     }
 
+    PublishDiagnosticsSnapshot();
     return stopped && loaded;
 }
 
@@ -4787,7 +4793,9 @@ bool PluginManager::StopForRuntime(std::chrono::milliseconds timeout) {
         std::scoped_lock lock(stop_diagnostics_mutex_);
         stop_diagnostics_.clear();
     }
-    return UnloadIndicesWithDeadline(indices, true, timeout);
+    const bool stopped = UnloadIndicesWithDeadline(indices, true, timeout);
+    PublishDiagnosticsSnapshot();
+    return stopped;
 }
 
 void PluginManager::UnloadIndices(
@@ -5111,6 +5119,7 @@ PluginMaintenanceTiming PluginManager::MaintenancePluginState() {
     if (!PerformanceDiagnosticsEnabled()) {
         RetryWaitingForAdapterServices();
         PollForChanges();
+        RefreshDiagnosticsSnapshotIfDue();
         return {};
     }
     const auto retry_started = std::chrono::steady_clock::now();
@@ -5118,6 +5127,7 @@ PluginMaintenanceTiming PluginManager::MaintenancePluginState() {
     const auto poll_started = std::chrono::steady_clock::now();
     PollForChanges();
     const auto completed = std::chrono::steady_clock::now();
+    RefreshDiagnosticsSnapshotIfDue();
     return {poll_started - retry_started, completed - poll_started};
 }
 
@@ -5316,6 +5326,7 @@ bool PluginManager::ReloadPackages(const std::vector<std::string>& package_names
             [&](const auto& plugin) { return affected.contains(plugin->view.id); })) {
         Log(ANOMALY_CORE_LOG_LEVEL_V1_ERROR,
             "plugin package reload stopped by quarantined generation: " + summary);
+        PublishDiagnosticsSnapshot();
         return false;
     }
 
@@ -5385,6 +5396,7 @@ bool PluginManager::ReloadPackages(const std::vector<std::string>& package_names
         Log(rollback_ok ? ANOMALY_CORE_LOG_LEVEL_V1_WARNING : ANOMALY_CORE_LOG_LEVEL_V1_ERROR,
             std::string(rollback_ok ? "plugin package reload rolled back: "
                                     : "plugin package rollback failed: ") + summary);
+        PublishDiagnosticsSnapshot();
         return false;
     }
 
@@ -5392,6 +5404,7 @@ bool PluginManager::ReloadPackages(const std::vector<std::string>& package_names
         shadow_store_.Retire(candidate.shadow_generation);
     }
     Log(ANOMALY_CORE_LOG_LEVEL_V1_INFO, "plugin package change applied: " + summary);
+    PublishDiagnosticsSnapshot();
     return true;
 }
 
@@ -6002,7 +6015,7 @@ bool PluginManager::DrawUiTextureEx(
     }
 }
 
-PluginRuntimeDiagnosticsSnapshot PluginManager::DiagnosticsSnapshot() const {
+PluginRuntimeDiagnosticsSnapshot PluginManager::BuildDiagnosticsSnapshot() const {
     struct ServiceCandidate final {
         std::string_view id;
         std::uint32_t version{};
@@ -6189,6 +6202,42 @@ PluginRuntimeDiagnosticsSnapshot PluginManager::DiagnosticsSnapshot() const {
     return snapshot;
 }
 
+void PluginManager::PublishDiagnosticsSnapshot() noexcept {
+    try {
+        auto built = std::make_shared<const PluginRuntimeDiagnosticsSnapshot>(
+            BuildDiagnosticsSnapshot());
+        const auto published_at = std::chrono::steady_clock::now();
+        std::scoped_lock lock(published_diagnostics_mutex_);
+        published_diagnostics_ = std::move(built);
+        published_diagnostics_at_ = published_at;
+    } catch (...) {
+        // A snapshot that cannot be allocated leaves the previous one in
+        // place. Diagnostics are observable state, not a correctness input.
+    }
+}
+
+void PluginManager::RefreshDiagnosticsSnapshotIfDue() noexcept {
+    bool due{};
+    try {
+        std::scoped_lock lock(published_diagnostics_mutex_);
+        due = published_diagnostics_ == nullptr ||
+            std::chrono::steady_clock::now() - published_diagnostics_at_ >=
+                std::chrono::milliseconds(500);
+    } catch (...) {
+        return;
+    }
+    if (due) PublishDiagnosticsSnapshot();
+}
+
+PluginRuntimeDiagnosticsSnapshot PluginManager::DiagnosticsSnapshot() const {
+    std::shared_ptr<const PluginRuntimeDiagnosticsSnapshot> published;
+    {
+        std::scoped_lock lock(published_diagnostics_mutex_);
+        published = published_diagnostics_;
+    }
+    return published == nullptr ? PluginRuntimeDiagnosticsSnapshot{} : *published;
+}
+
 std::vector<PluginView> PluginManager::Plugins() const {
     return DiagnosticsSnapshot().plugins;
 }
@@ -6310,7 +6359,9 @@ bool PluginManager::SetVisible(std::string_view plugin_id, bool visible) {
     (*found)->view.visible = visible;
     (*found)->ui_proxy_context.reopen_requested = visible;
     ReconcileWindowVisibility(*(*found));
-    return (*found)->view.visibility_control;
+    const bool visibility_control = (*found)->view.visibility_control;
+    PublishDiagnosticsSnapshot();
+    return visibility_control;
 }
 
 }  // namespace anomaly
