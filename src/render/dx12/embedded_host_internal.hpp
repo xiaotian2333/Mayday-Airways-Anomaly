@@ -407,6 +407,8 @@ struct EmbeddedState {
     // renders in that case, so the reason has to survive for diagnostics.
     unsigned long input_install_error{};
     bool input_installed{};
+    // 主切换热键的自算上升沿状态，见 platform_ui_input_policy.hpp。
+    bool platform_menu_toggle_was_down{};
     // Evidence about the command-queue handover, which only a D3D12 title
     // performs. The overlay submits onto the game's own direct queue so its
     // draws stay ordered against the game's frame, which means a missing queue

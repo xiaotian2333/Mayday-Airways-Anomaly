@@ -3979,6 +3979,22 @@ bool PluginManager::LoadStagedCatalogEntry(
 
 bool PluginManager::Activate(LoadedPlugin& plugin) {
     if (plugin.scope == nullptr) return false;
+    // 生命周期占位条目只用于作用域快照展示，本身没有门禁职责。等待重试
+    // 会整体 RevokeAll 再重跑本函数，所以每次尝试开始都在这里重建。
+    static_cast<void>(plugin.scope->Register(
+        anomaly::PluginResourceKind::Task, "plugin.update"));
+    if (plugin.view.visibility_control) {
+        static_cast<void>(plugin.scope->Register(
+            anomaly::PluginResourceKind::Ui, "plugin.draw"));
+    }
+    constexpr std::size_t overlay_field_size =
+        offsetof(AnomalyPluginDescriptorV1, on_overlay) +
+        sizeof(plugin.descriptor_v1.on_overlay);
+    if (plugin.descriptor_v1.struct_size >= overlay_field_size &&
+        plugin.descriptor_v1.on_overlay != nullptr) {
+        static_cast<void>(plugin.scope->Register(
+            anomaly::PluginResourceKind::Ui, "plugin.overlay"));
+    }
     plugin.plugin_context = nullptr;
     plugin.ui_stack.Reset();
     plugin.service_context.manager = this;
@@ -4162,6 +4178,11 @@ bool PluginManager::Activate(LoadedPlugin& plugin) {
     g_loading_plugin_id.Get().clear();
     g_loading_package_directory.Get().clear();
     if (load_status.code == ANOMALY_STATUS_V1_UNAVAILABLE) {
+        // on_load 可能已登记调度任务、热键、命令或 IPC 端点才发现服务未就绪。
+        // 重试会从头再跑一次 on_load，先吊销本次尝试登记的全部资源，避免任务
+        // 叠加或热键/命令撞上 CONFLICT 让插件永远无法激活；配置 schema 等服务
+        // 支持重新登记，占位条目由下一次 Activate 重建。
+        static_cast<void>(plugin.scope->RevokeAll());
         plugin.plugin_context = nullptr;
         plugin.waiting_for_service = true;
         plugin.started = false;
@@ -4204,6 +4225,9 @@ bool PluginManager::Activate(LoadedPlugin& plugin) {
             }
             plugin.plugin_context = nullptr;
             if (start_status.code == ANOMALY_STATUS_V1_UNAVAILABLE) {
+                // on_unload 已在上方失败分支回调，这里吊销 on_load 登记的剩余
+                // 资源：重试会重跑 on_load，不能带着上一轮的注册叠加。
+                static_cast<void>(plugin.scope->RevokeAll());
                 plugin.waiting_for_service = true;
                 plugin.started = false;
                 const std::string detail = StatusMessage("on_start", start_status);
@@ -4321,12 +4345,6 @@ bool PluginManager::LoadBinary(
                     "exception in ABI v1 plugin entry: " + source.string());
             }
         });
-        constexpr std::size_t overlay_field_size =
-            offsetof(AnomalyPluginDescriptorV1, on_overlay) +
-            sizeof(descriptor.on_overlay);
-        const bool has_overlay_callback =
-            descriptor.struct_size >= overlay_field_size &&
-            descriptor.on_overlay != nullptr;
         constexpr std::size_t minimum_size = offsetof(AnomalyPluginDescriptorV1, on_draw) +
             sizeof(descriptor.on_draw);
         const bool valid = entry_status.code == ANOMALY_STATUS_V1_OK &&
@@ -4372,16 +4390,8 @@ bool PluginManager::LoadBinary(
         }
         plugin->scope = std::make_shared<anomaly::PluginScope>(
             lifecycle_ledger_, plugin->view.id, plugin->view.generation);
-        static_cast<void>(plugin->scope->Register(
-            anomaly::PluginResourceKind::Task, "plugin.update"));
-        if (plugin->view.visibility_control) {
-            static_cast<void>(plugin->scope->Register(
-                anomaly::PluginResourceKind::Ui, "plugin.draw"));
-        }
-        if (has_overlay_callback) {
-            static_cast<void>(plugin->scope->Register(
-                anomaly::PluginResourceKind::Ui, "plugin.overlay"));
-        }
+        // 生命周期占位条目由 Activate 登记：等待重试会整体 RevokeAll 后重跑
+        // Activate，注册点放在那里才能每次尝试都重建。
         plugin->ui_proxy_context.service = ui_service_;
         plugin->ui_proxy_context.ui_stack = &plugin->ui_stack;
         plugin->ui_proxy_context.scope = plugin->scope;

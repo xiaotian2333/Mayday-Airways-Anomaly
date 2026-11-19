@@ -8,6 +8,7 @@
 #include "anomaly/sdk/services/ui.h"
 
 #include <array>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -80,6 +81,15 @@ bool RefreshStatus(const AnomalyMaydayMoneyServiceV1* money) {
     return true;
 }
 
+// 游戏金币字段与 set_money/add_money 契约是 int32，而输入控件接受完整 uint32：
+// 超过 int32 上限的金额钳到上限，避免 static_cast 把 30 亿静默回绕成负数。
+std::int32_t MoneyAmount(std::uint32_t amount) noexcept {
+    constexpr std::uint32_t kMaximum =
+        static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)());
+    return amount <= kMaximum ? static_cast<std::int32_t>(amount)
+                              : (std::numeric_limits<std::int32_t>::max)();
+}
+
 void ApplyPendingCommand(const AnomalyMaydayMoneyServiceV1* money) {
     const PendingCommand command = g_pending_command;
     const std::uint32_t amount = g_pending_amount;
@@ -89,10 +99,10 @@ void ApplyPendingCommand(const AnomalyMaydayMoneyServiceV1* money) {
     AnomalyStatusV1 status{ANOMALY_STATUS_V1_OK, 0, {}};
     switch (command) {
     case PendingCommand::SetMoney:
-        status = money->set_money(money->user, static_cast<std::int32_t>(amount));
+        status = money->set_money(money->user, MoneyAmount(amount));
         break;
     case PendingCommand::AddMoney:
-        status = money->add_money(money->user, static_cast<std::int32_t>(amount));
+        status = money->add_money(money->user, MoneyAmount(amount));
         break;
     case PendingCommand::ClearDebt:
         status = money->set_debt(money->user, 0);

@@ -36,6 +36,12 @@ constexpr std::size_t kMaximumQueuedFramesPerClient = kMaximumQueuedMessages;
 constexpr std::size_t kMaximumQueuedBytesPerClient =
     kMaximumQueuedFramesPerClient * (kMaximumTextBytes + 10U);
 constexpr auto kFinalDrainTimeout = std::chrono::milliseconds(1000);
+// 本服务只发布不接收：入站数据没有消费者，累计超过预算即断开该客户端，
+// 防止单个连接用持续发送把唯一 worker 的读循环变成死循环。
+constexpr std::uint64_t kMaximumInboundBytesPerClient = 4U * 1024U * 1024U;
+// 握手除了逐次 1 秒的接收超时外还有总时限，slowloris 式逐字节握手不能
+// 无限期拖住 accept 循环。
+constexpr auto kHandshakeDeadline = std::chrono::seconds(10);
 constexpr std::uint64_t kPortRequestPortMask = 0xFFFFU;
 constexpr unsigned kPortRequestGenerationShift = 16U;
 
@@ -231,6 +237,7 @@ struct WebSocketServer::Impl final {
         std::deque<std::string> frames;
         std::size_t front_offset{};
         std::size_t queued_bytes{};
+        std::uint64_t drained_bytes{};
     };
 
     std::atomic<std::uint16_t> port{};
@@ -274,6 +281,7 @@ struct WebSocketServer::Impl final {
 
     [[nodiscard]] bool Handshake(const SOCKET client) noexcept {
         try {
+            const auto deadline = std::chrono::steady_clock::now() + kHandshakeDeadline;
             DWORD receive_timeout = 1000U;
             u_long blocking = 0;
             if (ioctlsocket(client, FIONBIO, &blocking) != 0) return false;
@@ -287,9 +295,12 @@ struct WebSocketServer::Impl final {
             request.reserve(1024U);
             std::array<char, 1024> buffer{};
             while (request.size() < kMaximumHandshakeBytes) {
-                // 停止请求到达时立即放弃握手，避免 Stop 的 join 被慢速客户端
-                // 的 1 秒接收超时逐字节拖长。
-                if (!running.load(std::memory_order_acquire)) return false;
+                // 停止请求到达或超过握手总时限时立即放弃，避免 Stop 的 join
+                // 被慢速客户端的 1 秒接收超时逐字节拖长。
+                if (!running.load(std::memory_order_acquire) ||
+                    std::chrono::steady_clock::now() >= deadline) {
+                    return false;
+                }
                 const int received = recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
                 if (received <= 0) return false;
                 request.append(buffer.data(), static_cast<std::size_t>(received));
@@ -348,11 +359,20 @@ struct WebSocketServer::Impl final {
         }
     }
 
-    [[nodiscard]] bool DrainClient(const SOCKET client) noexcept {
+    [[nodiscard]] bool DrainClient(Client& client) noexcept {
         std::array<char, 2048> buffer{};
         for (;;) {
-            const int received = recv(client, buffer.data(), static_cast<int>(buffer.size()), 0);
-            if (received > 0) continue;
+            // 停止请求到达时立即放弃，保证 Stop 的 join 不会被占用。
+            if (!running.load(std::memory_order_acquire)) return false;
+            const int received =
+                recv(client.socket, buffer.data(), static_cast<int>(buffer.size()), 0);
+            if (received > 0) {
+                // 入站数据只被丢弃：累计超限即断开，持续发送的客户端不能把
+                // 唯一 worker 钉在这个读循环里。
+                client.drained_bytes += static_cast<std::uint64_t>(received);
+                if (client.drained_bytes > kMaximumInboundBytesPerClient) return false;
+                continue;
+            }
             if (received == 0) return false;
             const int error = WSAGetLastError();
             return error == WSAEWOULDBLOCK;
@@ -479,7 +499,7 @@ struct WebSocketServer::Impl final {
                     AcceptClients(clients);
                 }
                 for (auto iterator = clients.begin(); iterator != clients.end();) {
-                    if (FD_ISSET(iterator->socket, &read_set) && !DrainClient(iterator->socket)) {
+                    if (FD_ISSET(iterator->socket, &read_set) && !DrainClient(*iterator)) {
                         CloseSocket(iterator->socket);
                         iterator = clients.erase(iterator);
                     } else {

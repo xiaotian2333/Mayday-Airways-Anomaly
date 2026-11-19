@@ -9156,6 +9156,8 @@ void RunPlatform(
 
     auto previous = std::chrono::steady_clock::now();
     bool running = true;
+    // 主切换热键的自算上升沿状态，见 platform_ui_input_policy.hpp。
+    bool toggle_was_down = false;
     while (running && !stop_token.stop_requested()) {
         MSG message{};
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
@@ -9177,11 +9179,10 @@ void RunPlatform(
             host.attached && host.target != nullptr &&
             foreground_window == host.target;
         const bool menu_focus = host_window_focused || game_window_focused;
-        const int toggle_state = menu_focus
-            ? GetAsyncKeyState(static_cast<int>(host.toggle_key))
-            : 0;
+        const bool toggle_down =
+            (GetAsyncKeyState(static_cast<int>(host.toggle_key)) & 0x8000) != 0;
         if (anomaly::ShouldTogglePlatformMenus(
-                PlatformUiCapturingHotkey(), toggle_state)) {
+                PlatformUiCapturingHotkey(), menu_focus, toggle_down, toggle_was_down)) {
             if (!host.visible) {
                 host.visible = true;
                 if (host.attached) PlaceAttachedWindow(host);

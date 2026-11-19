@@ -312,7 +312,11 @@ UpdateTransactionResult RepositoryUpdateTransaction::RecoverInterrupted() {
             return Failure(UpdateTransactionError::RecoveryFailure, "transaction journal path is invalid");
         }
         const std::string phase = journal.at("phase").get<std::string>();
-        if (phase == "old-moved" && !std::filesystem::exists(destination, error) &&
+        // "prepared" 与 "old-moved" 都可能停留在 rename(destination, backup) 之后、
+        // 下一条日志落盘之前：destination 缺失而旧版滞留 backup。恢复动作相同，
+        // 且条件本身幂等（destination 已在则不动作）。
+        if ((phase == "prepared" || phase == "old-moved") &&
+            !std::filesystem::exists(destination, error) &&
             std::filesystem::exists(backup, error)) {
             std::filesystem::create_directories(destination.parent_path(), error);
             std::filesystem::rename(backup, destination, error);

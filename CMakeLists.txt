@@ -773,7 +773,7 @@ if(ANOMALY_BUILD_OPTIONAL_LIBS)
     target_include_directories(anomaly_update_transaction PUBLIC include)
     target_compile_definitions(
         anomaly_update_transaction PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(anomaly_update_transaction PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(anomaly_update_transaction PRIVATE /W4 /permissive- /EHsc /utf-8)  # 源码含中文注释
     target_link_libraries(anomaly_update_transaction PUBLIC
         anomaly_repository_index anomaly_artifact_bundle anomaly_plugin_manifest
         PRIVATE nlohmann_json::nlohmann_json)

@@ -1006,8 +1006,11 @@ bool IsMicrosoftSignedBinary(const std::filesystem::path& path) {
     CertFreeCertificateContext(certificate);
     close();
     if (subject_length <= 1 || subject_length > std::size(subject)) return false;
-    const std::wstring_view name(subject, subject_length - 1);
-    return name.find(L"Microsoft") != std::wstring_view::npos;
+    // 子串匹配会被从公共 CA 购得、显示名恰好含 "Microsoft" 的合法证书绕过，
+    // 只接受微软自有签名者的显示名（不区分大小写）。不匹配时 DependencyCopy
+    // 继续按 core 目录与 System32 查找，注入仍然可用。
+    return _wcsicmp(subject, L"Microsoft Windows") == 0 ||
+        _wcsicmp(subject, L"Microsoft Corporation") == 0;
 }
 
 // Which copy of a dependency to use, in the order that keeps a manual map out of the target's loader: the

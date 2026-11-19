@@ -1824,11 +1824,11 @@ void RenderEmbedded(IDXGISwapChain* swap_chain, UINT flags) {
     // while the user is typing in an unrelated application.
     const bool game_focused =
         state->window != nullptr && GetForegroundWindow() == state->window;
-    const int toggle_state = game_focused
-        ? GetAsyncKeyState(static_cast<int>(toggle_key))
-        : 0;
+    const bool toggle_down =
+        (GetAsyncKeyState(static_cast<int>(toggle_key)) & 0x8000) != 0;
     if (anomaly::ShouldTogglePlatformMenus(
-            PlatformUiCapturingHotkey(), toggle_state)) {
+            PlatformUiCapturingHotkey(), game_focused, toggle_down,
+            state->platform_menu_toggle_was_down)) {
         const bool expanding = anomaly::HostUiMenusCollapsed();
         anomaly::SetHostUiMenusCollapsed(!expanding);
         // The shell's own close button marks the management window closed, and
