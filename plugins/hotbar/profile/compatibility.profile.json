@@ -6,7 +6,8 @@
   "section": "il2cpp",
   "contract": "mayday.hotbar-slots",
   "layout": {
-    "maxSlotCount": 10
+    "maxSlotCount": 10,
+    "slotPivotXMilli": 4290
   },
   "symbols": [
     {
@@ -76,6 +77,16 @@
           "pattern": "33 C9 E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 83 B9 E4 00 00 00 00 75 05 E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 45 33 C0 BA 29",
           "entry": "48 83 EC 28 80 3D 58 CA B6 03 00 75 13 48 8D 0D 44 80 92 03 E8 C7 E4 F2 FF C6 05",
           "callOffset": 2,
+          "values": {}
+        }
+      ]
+    },
+    {
+      "name": "hotbar_slot_pivot",
+      "candidates": [
+        {
+          "pattern": "48 8b 4f 10 48 85 c9 0f 84 ?? ?? ?? ?? f3 0f 10 0d ?? ?? ?? ?? 45 33 c0 0f 28 c1 0f 14 c1",
+          "entry": "48 8b 4f 10 48 85 c9 0f 84 42 0b 00 00 f3 0f 10 0d 77 97 c2 02 45 33 c0 0f 28 c1 0f 14 c1",
           "values": {}
         }
       ]

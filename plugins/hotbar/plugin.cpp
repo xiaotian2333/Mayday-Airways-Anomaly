@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <span>
 #include <string>
 #include <string_view>
@@ -30,6 +31,7 @@ constexpr std::string_view kProfileFile = "compatibility.profile.json";
 constexpr std::string_view kProfileContract = "mayday.hotbar-slots";
 // 槽数量固定，不做用户配置：实际槽数取 profile 的兼容上限（本构建为 10）。
 constexpr std::string_view kProfileLayoutMaxSlots = "maxSlotCount";
+constexpr std::string_view kProfileLayoutPivotMilli = "slotPivotXMilli";
 constexpr std::uint32_t kVanillaSlots = 4;
 // 插件不提供槽数配置：槽数量固定取 profile 兼容上限（本构建 10）。
 constexpr std::uint32_t kSlotCount = 10;
@@ -40,6 +42,7 @@ constexpr std::string_view kSymSelectUserCode = "inventory_cmdselect_usercode";
 constexpr std::string_view kSymSelectInvoke = "inventory_cmdselect_invoke";
 constexpr std::string_view kSymWheelModulo = "interactor_wheel_modulo";
 constexpr std::string_view kSymHotbarUi = "hotbar_widget_ctor";
+constexpr std::string_view kSymSlotPivot = "hotbar_slot_pivot";
 constexpr std::string_view kSymHotbarDown = "game_input_hotbar_down";
 constexpr std::string_view kSymInputBlocked = "game_input_blocked";
 
@@ -77,19 +80,23 @@ void PluginLog(const char* message) {
 
 std::uint32_t g_slot_count{};  // 生效槽数（profile 兼容上限，本构建固定 10）
 std::uint32_t g_max_slots{};   // profile 声明的槽数；0 表示无法确定（停用）
+std::uint32_t g_slot_pivot_milli{500};  // 槽行 pivot.x×1000（原版 0.5，居中值调高）
 // Load 阶段解析并校验后的符号地址（ApplyForCount 复用，无需重新解析）。
 std::uintptr_t g_symbol_spawn{};
 std::uintptr_t g_symbol_user_code{};
 std::uintptr_t g_symbol_invoke{};
 std::uintptr_t g_symbol_wheel{};
 std::uintptr_t g_symbol_ui_ctor{};
+std::uintptr_t g_symbol_slot_pivot{};
 std::uintptr_t g_symbol_hotbar_down{};
 std::uintptr_t g_symbol_blocked{};
 
 using HotbarDownOriginal = std::int32_t (ANOMALY_CALL*)(void*);
 using InputBlockedFn = std::uint8_t (ANOMALY_CALL*)(void*);
 
-enum PatchId : std::size_t { PatchSpawn, PatchUserCode, PatchInvoke, PatchWheel, PatchUi, PatchCount };
+enum PatchId : std::size_t {
+    PatchSpawn, PatchUserCode, PatchInvoke, PatchWheel, PatchUi,
+    PatchCenterPivot, PatchCount };
 struct PatchState {
     AnomalyGenerationHandleV1 handle{};
     bool applied{};
@@ -165,12 +172,16 @@ std::int32_t ANOMALY_CALL HotbarDownThunk(void* method) {
 
 bool ApplyMemoryPatch(
     const PatchId id, const std::uintptr_t address, const std::uint8_t* bytes,
-    const std::size_t size, const char* label) {
+    const std::size_t size, const char* label,
+    std::uint32_t* out_code = nullptr) {
     AnomalyGenerationHandleV1 handle{};
     const auto status = g_patch->apply(
         g_patch->user, address, {bytes, size}, anomaly::sdk::StringView(label),
         &handle);
-    if (!anomaly::sdk::Succeeded(status)) return false;
+    if (!anomaly::sdk::Succeeded(status)) {
+        if (out_code != nullptr) *out_code = status.code;
+        return false;
+    }
     g_patches[id] = {handle, true};
     return true;
 }
@@ -262,11 +273,47 @@ void ApplyForCount(const std::uint32_t n) {
                               request.size, request.label)) {
             all_patched = false;
             if (g_error.empty()) g_error = "reason.patch";
-            PluginLog("hotbar: patch failed");
+            PluginLog(
+                (std::string("hotbar: patch failed: ") + request.label).c_str());
         }
     }
     if (all_patched) {
         PluginLog(("hotbar: patches applied for slot count " + std::to_string(n)).c_str());
+    }
+
+    // 槽行居中：锚点函数在构造行 pivot 时从共享常量池加载 0.5（movss，池
+    // 常量被 78 处引用不能改），经 unpcklps 构造出 Vector2 (0.5, 0.5)。10 槽
+    // 行比原版 4 槽宽，行中心偏右；把 pivot.x 调高可让行回到屏幕中线（y 不
+    // 变）。实现上把 22 字节构造窗口整体改写为 movabs rdx, imm64 直接携带
+    // 目标 Vector2 (pivot_x, 0.5)，xor r8d（call 第三参数 0）与窗口后的
+    // movq rdx, xmm0、call 保持原样。
+    if (n >= 1 && g_core != nullptr && g_slot_pivot_milli >= 500) {
+        const float pivot_x = static_cast<float>(g_slot_pivot_milli) / 1000.0f;
+        std::uint8_t row_patch[22]{};
+        row_patch[0] = 0x48;
+        row_patch[1] = 0xBA;  // movabs rdx, imm64
+        const float pair[2] = {pivot_x, 0.5f};
+        std::memcpy(row_patch + 2, pair, sizeof(pair));
+        row_patch[10] = 0x45;
+        row_patch[11] = 0x33;
+        row_patch[12] = 0xC0;  // xor r8d, r8d
+        for (std::size_t i = 13; i < sizeof(row_patch); ++i) row_patch[i] = 0x90;
+        // 窗口尾部必须是被保留的 movq rdx, xmm0（66 48 0f 7e c2）；符号解析
+        // 已由 profile 入口字节校验，这里复核窗口边界防止落在错误位置。
+        std::uint8_t window[22]{};
+        const auto window_status = g_core->read_memory(
+            g_core->user, g_symbol_slot_pivot + 13, {window, sizeof(window)});
+        const std::uint8_t movq_bytes[5] = {0x66, 0x48, 0x0F, 0x7E, 0xC2};
+        const bool window_ok = anomaly::sdk::Succeeded(window_status) &&
+            std::memcmp(window + 17, movq_bytes, sizeof(movq_bytes)) == 0;
+        if (window_ok &&
+            ApplyMemoryPatch(PatchCenterPivot, g_symbol_slot_pivot + 13,
+                             row_patch, sizeof(row_patch),
+                             "hotbar.center_pivot")) {
+            PluginLog("hotbar: centering applied");
+        } else {
+            PluginLog("hotbar: centering skipped (window mismatch)");
+        }
     }
 
     if (n >= 1) {
@@ -320,6 +367,7 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
         // 槽数量固定，取 profile 的兼容上限（本构建为 10）；缺失即视为不可用。
         try {
             g_max_slots = g_profile.Value(kProfileLayoutMaxSlots, 16);
+            g_slot_pivot_milli = g_profile.Value(kProfileLayoutPivotMilli, 100000);
         } catch (...) {
             g_max_slots = 0;
         }
@@ -348,6 +396,7 @@ AnomalyStatusV1 ANOMALY_CALL Start(void*) {
         {kSymSelectInvoke, &g_symbol_invoke},
         {kSymWheelModulo, &g_symbol_wheel},
         {kSymHotbarUi, &g_symbol_ui_ctor},
+        {kSymSlotPivot, &g_symbol_slot_pivot},
         {kSymHotbarDown, &g_symbol_hotbar_down},
         {kSymInputBlocked, &g_symbol_blocked},
     };
@@ -432,6 +481,7 @@ void ANOMALY_CALL Unload(void*) {
     g_profile = {};
     g_slot_count = 0;
     g_max_slots = 0;
+    g_slot_pivot_milli = 500;
     g_symbol_spawn = 0;
     g_symbol_user_code = 0;
     g_symbol_invoke = 0;
@@ -482,9 +532,10 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     const bool extras_ready = g_patches[PatchUserCode].applied &&
         g_patches[PatchInvoke].applied && g_patches[PatchWheel].applied;
     const bool hook_ready = g_hook_handle.id != 0;
+    const bool center_ready = g_patches[PatchCenterPivot].applied;
     const bool feature_ready = g_slot_count == 0
         ? base_ready
-        : base_ready && extras_ready && hook_ready;
+        : base_ready && extras_ready && hook_ready && center_ready;
     if (!g_error.empty()) {
         // 原因是稳定诊断 key（reason.*），在这里翻译；未知 key 回退通用文案。
         const std::string reason =
@@ -519,6 +570,7 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
                           g_patches[PatchUserCode].applied && g_patches[PatchInvoke].applied);
             DrawTargetRow(ui, "target.scroll", "Wheel cycling",
                           g_patches[PatchWheel].applied);
+            DrawTargetRow(ui, "target.center", "Slot row centering", center_ready);
             DrawTargetRow(ui, "target.keys", "Keys beyond 4 (hook)", hook_ready);
         }
         ui->end_table(ui->user);
