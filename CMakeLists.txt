@@ -1295,6 +1295,18 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Autobat")
     target_compile_options(anomaly_builtin_autobat PRIVATE /utf-8)
 
+    # Mayday 内建插件：物品栏扩展。特征码定位 4 槽硬编码点扩到 8 槽：服务器侧
+    # （槽位生成、选择上界）在宿主充当服务器时对全部玩家生效，客户端侧（原生
+    # HUD 槽位数组、滚轮取模、按键 5-8 hook）只影响本机。
+    anomaly_add_plugin(anomaly_builtin_hotbar
+        SOURCES plugins/hotbar/plugin.cpp
+        MANIFEST plugins/hotbar/manifest.json
+        PACKAGE_NAME Hotbar
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Hotbar")
+    target_compile_options(anomaly_builtin_hotbar PRIVATE /utf-8)
+    # 按键 5-8 的边沿检测与前台窗口判定走 user32。
+    target_link_libraries(anomaly_builtin_hotbar PRIVATE user32)
+
     if(ANOMALY_BUILD_TEST_FIXTURES)
         add_executable(anomaly_ui_overlay_fixture
             apps/test_host/ui_overlay_fixture.cpp src/plugin/plugin_manager.cpp)
