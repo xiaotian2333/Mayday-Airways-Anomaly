@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -770,6 +771,15 @@ AnomalyStatusV1 ScopedPlatformServices::RegisterConfigSchema(
         }
         *handle = {state->token, owner.scope->Generation()};
         return Status(ANOMALY_STATUS_V1_OK);
+    } catch (const std::exception& error) {
+        if (state && state->token != 0) static_cast<void>(owner.scope->Release(state->token));
+        // Diagnostic buffer: the Status message contract requires static storage.
+        // Schema registration runs serialized in the config-init domain, so this
+        // buffer only carries the latest failure text.
+        static char detail[256];
+        std::snprintf(detail, sizeof(detail),
+            "configuration schema is not valid: %s", error.what());
+        return Status(ANOMALY_STATUS_V1_FAILED, detail);
     } catch (...) {
         if (state && state->token != 0) static_cast<void>(owner.scope->Release(state->token));
         return Status(ANOMALY_STATUS_V1_FAILED, "configuration schema is not valid");
