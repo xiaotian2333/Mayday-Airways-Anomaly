@@ -15,7 +15,6 @@
 #include "anomaly/sdk/services/ui.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <span>
@@ -29,13 +28,11 @@ namespace {
 
 constexpr std::string_view kProfileFile = "compatibility.profile.json";
 constexpr std::string_view kProfileContract = "mayday.hotbar-slots";
+// 槽数量固定，不做用户配置：实际槽数取 profile 的兼容上限（本构建为 10）。
 constexpr std::string_view kProfileLayoutMaxSlots = "maxSlotCount";
-constexpr std::string_view kConfigId = "hotbar";
-constexpr std::uint32_t kConfigVersion = 1;
 constexpr std::uint32_t kVanillaSlots = 4;
-// 设置界面的槽数上限（0 = 保持原版）。profile 的 maxSlotCount 是兼容上限，
-// 二者取小后生效。
-constexpr std::uint32_t kMaxUiSlots = 10;
+// 插件不提供槽数配置：槽数量固定取 profile 兼容上限（本构建 10）。
+constexpr std::uint32_t kSlotCount = 10;
 
 // 与 profile/compatibility.profile.json 的 symbols[].name 一一对应。
 constexpr std::string_view kSymSpawnSlots = "inventory_spawn_slots";
@@ -68,12 +65,8 @@ const AnomalyHostApiV1* g_host{};
 const AnomalyCoreServiceV1* g_core{};
 const AnomalyHookServiceV1* g_hook{};
 const AnomalyPatchServiceV1* g_patch{};
-const AnomalyConfigServiceV1* g_config{};
-const AnomalyJsonServiceV1* g_json{};
-const AnomalySchedulerServiceV1* g_scheduler{};
 anomaly::sdk::Localizer g_localizer;
 anomaly::sdk::ProfileSnapshot g_profile;
-AnomalyGenerationHandleV1 g_config_schema{};
 
 // 诊断日志：定位特征码/补丁/hook 各阶段失败原因（失败原因也进界面）。
 void PluginLog(const char* message) {
@@ -82,19 +75,8 @@ void PluginLog(const char* message) {
                 anomaly::sdk::StringView(message));
 }
 
-std::uint32_t g_slot_count{8};  // 当前生效的槽数（0 = 未扩展；默认 8 延续已验证行为）
-std::uint32_t g_max_slots{};    // profile 兼容上限；0 表示无法确定（停用）
-std::uint32_t g_count_draft{8};  // 设置界面的输入草稿
-std::atomic<bool> g_dirty{false};
-std::atomic<bool> g_save_scheduled{false};
-// 最近一次「应用」的时间戳；状态行据此短暂显示重进提示。
-std::atomic<std::int64_t> g_last_apply_ms{0};
-
-std::int64_t NowMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
+std::uint32_t g_slot_count{};  // 生效槽数（profile 兼容上限，本构建固定 10）
+std::uint32_t g_max_slots{};   // profile 声明的槽数；0 表示无法确定（停用）
 // Load 阶段解析并校验后的符号地址（ApplyForCount 复用，无需重新解析）。
 std::uintptr_t g_symbol_spawn{};
 std::uintptr_t g_symbol_user_code{};
@@ -311,92 +293,6 @@ void ApplyForCount(const std::uint32_t n) {
     }
 }
 
-AnomalyByteSpanV1 ConfigBytes(const std::string_view value) noexcept {
-    return {reinterpret_cast<const std::uint8_t*>(value.data()), value.size()};
-}
-
-bool SaveSettings() {
-    if (g_config == nullptr) return false;
-    char document[48]{};
-    const int written = std::snprintf(
-        document, sizeof(document), "{\"slot_count\":%u}", g_slot_count);
-    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(document)) {
-        return false;
-    }
-    return anomaly::sdk::Succeeded(g_config->write_atomic(
-        g_config->user, anomaly::sdk::StringView(kConfigId), kConfigVersion,
-        ConfigBytes(std::string_view(document, static_cast<std::size_t>(written)))));
-}
-
-// 设置变更（保存 + 按新槽数重应用补丁）统一走 Worker 定时任务：Draw 不能
-// 触碰补丁服务，配置写入也须避开 Game/Render 域。
-void ANOMALY_CALL SettingsTask(void*, AnomalyGenerationHandleV1) {
-    g_save_scheduled.store(false, std::memory_order_release);
-    if (g_dirty.exchange(false, std::memory_order_acq_rel)) {
-        if (!SaveSettings()) g_dirty.store(true, std::memory_order_release);
-    }
-    if (g_symbols_ok) {
-        ApplyForCount(g_slot_count);
-    }
-}
-
-void MarkSettingsChanged() {
-    g_dirty.store(true, std::memory_order_release);
-    if (g_scheduler == nullptr) return;
-    if (g_save_scheduled.exchange(true, std::memory_order_acq_rel)) return;
-    AnomalyGenerationHandleV1 handle{};
-    if (!anomaly::sdk::Succeeded(g_scheduler->schedule(
-            g_scheduler->user, 250, SettingsTask, nullptr, &handle))) {
-        g_save_scheduled.store(false, std::memory_order_release);
-    }
-}
-
-bool ReadSlotCount(AnomalyGenerationHandleV1 root, std::uint32_t* out_count) {
-    AnomalyGenerationHandleV1 child{};
-    if (!anomaly::sdk::Succeeded(g_json->object_find(
-            g_json->user, root, anomaly::sdk::StringView("slot_count"), &child))) {
-        return false;
-    }
-    double value{};
-    const bool ok = anomaly::sdk::Succeeded(g_json->number_value(g_json->user, child, &value));
-    static_cast<void>(g_json->release(g_json->user, child));
-    if (!ok || value < 0.0 || value > static_cast<double>(kMaxUiSlots)) return false;
-    *out_count = static_cast<std::uint32_t>(value);
-    return true;
-}
-
-void LoadSettings() {
-    if (g_config == nullptr || g_json == nullptr) return;
-    std::uint32_t version{};
-    std::size_t size{};
-    AnomalyStatusV1 status = g_config->read(
-        g_config->user, anomaly::sdk::StringView(kConfigId), &version,
-        {nullptr, 0}, &size);
-    if (status.code == ANOMALY_STATUS_V1_NOT_FOUND) return;
-    if (!anomaly::sdk::Succeeded(status) || size == 0 || size > 256) return;
-    std::string document(size, '\0');
-    std::size_t copied = document.size();
-    status = g_config->read(
-        g_config->user, anomaly::sdk::StringView(kConfigId), &version,
-        {reinterpret_cast<std::uint8_t*>(document.data()), document.size()},
-        &copied);
-    if (!anomaly::sdk::Succeeded(status) || copied == 0 || copied > document.size()) {
-        return;
-    }
-    if (version != kConfigVersion) return;
-    AnomalyGenerationHandleV1 root{};
-    if (!anomaly::sdk::Succeeded(g_json->parse(
-            g_json->user, {document.data(), copied}, &root))) {
-        return;
-    }
-    std::uint32_t count{};
-    if (ReadSlotCount(root, &count)) {
-        g_slot_count = count;
-        g_count_draft = count;
-    }
-    static_cast<void>(g_json->release(g_json->user, root));
-}
-
 AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) {
     g_host = host;
     g_localizer = anomaly::sdk::Localizer(host);
@@ -406,20 +302,12 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
         view.Query<AnomalyHookServiceV1>(ANOMALY_HOOK_SERVICE_V1_ID);
     const auto patch =
         view.Query<AnomalyPatchServiceV1>(ANOMALY_PATCH_SERVICE_V1_ID);
-    const auto config =
-        view.Query<AnomalyConfigServiceV1>(ANOMALY_CONFIG_SERVICE_V1_ID);
-    const auto json = view.Query<AnomalyJsonServiceV1>(ANOMALY_JSON_SERVICE_V1_ID);
-    const auto scheduler =
-        view.Query<AnomalySchedulerServiceV1>(ANOMALY_SCHEDULER_SERVICE_V1_ID);
-    if (!hook || !patch || !config || !json || !scheduler) {
+    if (!hook || !patch) {
         return {ANOMALY_STATUS_V1_UNAVAILABLE, 0, {}};
     }
     g_core = core.get();
     g_hook = hook.get();
     g_patch = patch.get();
-    g_config = config.get();
-    g_json = json.get();
-    g_scheduler = scheduler.get();
     // Profile 解析失败不阻断加载：界面给出原因，Start 直接跳过。
     constexpr anomaly::sdk::ProfileContract kContract{
         "mayday", "GameAssembly.dll", "il2cpp", kProfileContract};
@@ -429,43 +317,15 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
         PluginLog("hotbar: profile load failed");
     } else {
         PluginLog("hotbar: profile loaded");
-        // 兼容上限来自 profile；缺失即视为不可用（停用扩展而不是猜测）。
+        // 槽数量固定，取 profile 的兼容上限（本构建为 10）；缺失即视为不可用。
         try {
-            g_max_slots = g_profile.Value(kProfileLayoutMaxSlots, 64);
+            g_max_slots = g_profile.Value(kProfileLayoutMaxSlots, 16);
         } catch (...) {
             g_max_slots = 0;
         }
     }
     *context = &g_slot_count;
     return anomaly::sdk::Ok();
-}
-
-// 设置初始化（Worker 域）：注册 schema、读取持久化槽数，再按实际值重应用。
-// 实测在 Load（生命周期域）注册较大 schema 会失败，Worker 域正常。
-void ANOMALY_CALL InitConfigTask(void*, AnomalyGenerationHandleV1) {
-    constexpr std::string_view kConfigSchema =
-        R"({"type":"object","additionalProperties":false,"required":["slot_count"],)"
-        R"("properties":{"slot_count":{"type":"integer","minimum":0,"maximum":10}}})";
-    const auto schema_status = g_config->register_schema(
-        g_config->user, anomaly::sdk::StringView(kConfigId), kConfigVersion,
-        ConfigBytes(kConfigSchema), &g_config_schema);
-    if (!anomaly::sdk::Succeeded(schema_status)) {
-        const std::string detail =
-            std::string("hotbar: config schema registration failed code=") +
-            std::to_string(schema_status.code) + " msg=" +
-            (schema_status.message.data != nullptr
-                 ? std::string(schema_status.message.data, schema_status.message.size)
-                 : std::string());
-        PluginLog(detail.c_str());
-        return;
-    }
-    LoadSettings();
-    if (!g_symbols_ok) return;
-    const std::uint32_t configured =
-        g_slot_count > g_max_slots ? g_max_slots : g_slot_count;
-    if (configured != g_slot_count) g_slot_count = configured;
-    ApplyForCount(g_slot_count);
-    PluginLog(("hotbar: config slot_count=" + std::to_string(g_slot_count)).c_str());
 }
 
 AnomalyStatusV1 ANOMALY_CALL Start(void*) {
@@ -547,20 +407,11 @@ AnomalyStatusV1 ANOMALY_CALL Start(void*) {
         return anomaly::sdk::Ok();
     }
 
-    // 先按 Load 时的槽数落补丁（默认 8）；设置初始化任务随后读取持久化值，
-    // 与实际值不同会再按新值重应用。
+    // 槽数量固定为 profile 兼容上限（本构建 10），启用即按该值应用全部补丁。
     const std::uint32_t configured =
-        g_slot_count > g_max_slots ? g_max_slots : g_slot_count;
+        g_max_slots != 0 && g_max_slots < kSlotCount ? g_max_slots : kSlotCount;
+    g_slot_count = configured;
     ApplyForCount(configured);
-
-    // 设置初始化放 Worker 域：Load 域注册配置 schema 会失败（实测）。
-    if (g_scheduler != nullptr) {
-        AnomalyGenerationHandleV1 handle{};
-        if (!anomaly::sdk::Succeeded(g_scheduler->schedule(
-                g_scheduler->user, 25, InitConfigTask, nullptr, &handle))) {
-            PluginLog("hotbar: config init schedule failed");
-        }
-    }
     return anomaly::sdk::Ok();
 }
 
@@ -570,9 +421,6 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void*, std::uint32_t) {
     ReleaseAppliedPatches();
     g_error.clear();
     g_symbols_ok = false;
-    if (g_dirty.exchange(false, std::memory_order_acq_rel)) {
-        static_cast<void>(SaveSettings());
-    }
     return anomaly::sdk::Ok();
 }
 
@@ -581,16 +429,9 @@ void ANOMALY_CALL Unload(void*) {
     g_core = nullptr;
     g_hook = nullptr;
     g_patch = nullptr;
-    g_config = nullptr;
-    g_json = nullptr;
-    g_scheduler = nullptr;
-    g_config_schema = {};
     g_profile = {};
-    g_slot_count = 8;
+    g_slot_count = 0;
     g_max_slots = 0;
-    g_count_draft = 8;
-    g_dirty.store(false, std::memory_order_relaxed);
-    g_save_scheduled.store(false, std::memory_order_relaxed);
     g_symbol_spawn = 0;
     g_symbol_user_code = 0;
     g_symbol_invoke = 0;
@@ -666,12 +507,6 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
         ui->text(ui->user, anomaly::sdk::StringView(g_localizer.Format(
                                "state.active", "Inventory slots: {0}.",
                                std::span<const std::string_view>{args})));
-        // 应用后的短暂提示：滚轮/按键立即生效，数据与界面需新一局。
-        if (NowMs() - g_last_apply_ms.load(std::memory_order_relaxed) < 8000) {
-            ui->text(ui->user, anomaly::sdk::StringView(
-                                   g_localizer.Text("state.reapplied",
-                                                    "Applied: wheel and keys take effect now; the inventory data and HUD update on the next flight.")));
-        }
     }
 
     ui->separator(ui->user);
@@ -687,35 +522,6 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
             DrawTargetRow(ui, "target.keys", "Keys beyond 4 (hook)", hook_ready);
         }
         ui->end_table(ui->user);
-    }
-
-    // ---- 设置区：【- 数量 +】 + 应用；输入框直绑 g_count_draft，失焦写回即时可见 ----
-    ui->separator(ui->user);
-    ui->text(ui->user, anomaly::sdk::StringView(
-                           g_localizer.Text("settings.slots",
-                                            "Slot count (0 = no slots, max 10)")));
-    if (ui->button(ui->user, anomaly::sdk::StringView("-"), 0.0f, 0.0f)) {
-        if (g_count_draft > 0) --g_count_draft;
-    }
-    ui->same_line(ui->user, 0.0f, -1.0f);
-    static_cast<void>(ui->input_uint32(ui->user, anomaly::sdk::StringView("##slotcount"),
-                                       &g_count_draft, 0, 0));
-    if (g_count_draft > kMaxUiSlots) g_count_draft = kMaxUiSlots;
-    ui->same_line(ui->user, 0.0f, -1.0f);
-    if (ui->button(ui->user, anomaly::sdk::StringView("+"), 0.0f, 0.0f)) {
-        if (g_count_draft < kMaxUiSlots) ++g_count_draft;
-    }
-    ui->same_line(ui->user, 0.0f, -1.0f);
-    const std::string apply_label = g_localizer.Text("settings.apply", "Apply");
-    if (ui->button(ui->user, anomaly::sdk::StringView(apply_label), 0.0f, 0.0f)) {
-        const std::uint32_t ceiling =
-            g_max_slots != 0 && g_max_slots < kMaxUiSlots ? g_max_slots : kMaxUiSlots;
-        if (g_count_draft > ceiling) g_count_draft = ceiling;
-        if (g_count_draft != g_slot_count || g_dirty.load(std::memory_order_relaxed)) {
-            g_slot_count = g_count_draft;
-            MarkSettingsChanged();
-        }
-        g_last_apply_ms.store(NowMs(), std::memory_order_relaxed);
     }
 
     ui->separator(ui->user);
@@ -734,10 +540,9 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
               "wheel. Keys beyond 4 are added by this plugin and respect the "
               "game's input blocking.");
     draw_help("help.settings",
-              "The slot count can be changed any time: wheel and keys apply "
-              "immediately, while the inventory data and HUD update on the "
-              "next flight. 0 keeps the vanilla behaviour; values below 4 "
-              "create a smaller inventory.");
+              "The inventory is fixed at 10 slots. Enable the plugin before "
+              "entering a flight; inventories spawned earlier update on the "
+              "next flight.");
     draw_help("help.multiplayer",
               "Multiplayer: while the host runs this plugin, joiners need no "
               "extra install - their inventory already holds the extended "
