@@ -6,7 +6,7 @@
   "section": "il2cpp",
   "contract": "mayday.hotbar-slots",
   "layout": {
-    "slotCount": 8
+    "maxSlotCount": 10
   },
   "symbols": [
     {
