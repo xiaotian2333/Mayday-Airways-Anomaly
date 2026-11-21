@@ -15,6 +15,7 @@
 #include "anomaly/sdk/services/ui.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <span>
@@ -86,6 +87,14 @@ std::uint32_t g_max_slots{};    // profile 兼容上限；0 表示无法确定�
 std::uint32_t g_count_draft{8};  // 设置界面的输入草稿
 std::atomic<bool> g_dirty{false};
 std::atomic<bool> g_save_scheduled{false};
+// 最近一次「应用」的时间戳；状态行据此短暂显示重进提示。
+std::atomic<std::int64_t> g_last_apply_ms{0};
+
+std::int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 // Load 阶段解析并校验后的符号地址（ApplyForCount 复用，无需重新解析）。
 std::uintptr_t g_symbol_spawn{};
 std::uintptr_t g_symbol_user_code{};
@@ -203,32 +212,19 @@ void ReleaseHook() {
     g_blocked_fn = nullptr;
 }
 
-// 按槽数 n 重新落补丁与 hook（仅 Lifecycle/Worker 域调用）。n = 0 表示全部
-// 还原为原版行为；n ≥ 1 时先释放旧句柄再按新槽数应用。符号地址在 Load 阶段
-// 已缓存并校验，释放后字节回到原状，可安全重用。
+// 按槽数 n 重新落补丁与 hook（仅 Lifecycle/Worker 域调用）。符号地址在 Load
+// 阶段已缓存并校验，释放后字节回到原状，可安全重用。
+// n = 0 表示「无槽位」：只落生成槽数（0 项）与 UI 槽位数组（0 格）两处补丁，
+// 滚轮/选择上界/按键 hook 不适用（原版代码对空物品栏无副作用，保留原样）。
 void ApplyForCount(const std::uint32_t n) {
     ReleaseHook();
     ReleaseAppliedPatches();
     g_error.clear();
     g_slot_count = n;
-    if (n == 0) {
-        PluginLog("hotbar: feature off (slot count 0)");
-        return;
-    }
 
     const auto count = static_cast<std::uint8_t>(n);
     const auto last = static_cast<std::uint8_t>(n - 1);
     const std::uint8_t immediate[1] = {count};
-    const std::uint8_t select_bound[1] = {last};
-    const std::uint8_t wheel_bytes[kWheelSize] = {
-        0x83, 0xC2, count,          // add edx, N
-        0x50,                       // push rax（保护 inventory 指针）
-        0x8B, 0xC2,                 // mov eax, edx
-        0x33, 0xD2,                 // xor edx, edx
-        0xB9, count, 0x00, 0x00, 0x00,  // mov ecx, N
-        0xF7, 0xF1,                 // div ecx（edx = 余数 = 槽位）
-        0x58,                       // pop rax
-        0x90, 0x90};                // 补齐 18 字节窗口
     struct PatchRequest {
         PatchId id;
         std::uintptr_t address;
@@ -236,20 +232,50 @@ void ApplyForCount(const std::uint32_t n) {
         std::size_t size;
         const char* label;
     };
-    const PatchRequest requests[] = {
-        {PatchSpawn, g_symbol_spawn + kSpawnImmediateOffset, immediate, 1,
-         "hotbar.spawn_slots"},
-        {PatchUserCode, g_symbol_user_code + kSelectUserCodeOffset, select_bound,
-         1, "hotbar.select_usercode"},
-        {PatchInvoke, g_symbol_invoke + kSelectInvokeOffset, select_bound, 1,
-         "hotbar.select_invoke"},
-        {PatchWheel, g_symbol_wheel + kWheelOffset, wheel_bytes, kWheelSize,
-         "hotbar.wheel_modulo"},
-        {PatchUi, g_symbol_ui_ctor + kCtorImmediateOffset, immediate, 1,
-         "hotbar.ui_slots"},
-    };
+    PatchRequest requests[5];
+    std::size_t request_count = 0;
+    requests[request_count++] = PatchRequest{
+        PatchSpawn, g_symbol_spawn + kSpawnImmediateOffset, immediate, 1,
+        "hotbar.spawn_slots"};
+    requests[request_count++] = PatchRequest{
+        PatchUi, g_symbol_ui_ctor + kCtorImmediateOffset, immediate, 1,
+        "hotbar.ui_slots"};
+    std::uint8_t wheel_bytes[kWheelSize]{};
+    if (n >= 1) {
+        const std::uint8_t select_bound[1] = {last};
+        // 滚轮取模：任意 N 用除法实现（rax 是存活寄存器，push/pop 保护；
+        // rcx 会被其后的 mov rcx,[rax+0F0h] 重写）。加 4N 而非 N：N<4 且
+        // active-steps+N 可能为负（div 对负数给错误余数），4N 保证恒为正，
+        // 且 4N ≤ 40 仍在 imm8 范围内。
+        const auto wheel_addend = static_cast<std::uint8_t>(n * 4);
+        wheel_bytes[0] = 0x83;
+        wheel_bytes[1] = 0xC2;
+        wheel_bytes[2] = wheel_addend;  // add edx, 4N
+        wheel_bytes[3] = 0x50;          // push rax
+        wheel_bytes[4] = 0x8B;
+        wheel_bytes[5] = 0xC2;          // mov eax, edx
+        wheel_bytes[6] = 0x33;
+        wheel_bytes[7] = 0xD2;          // xor edx, edx
+        wheel_bytes[8] = 0xB9;
+        wheel_bytes[9] = count;         // mov ecx, N（imm32 低字节）
+        wheel_bytes[13] = 0xF7;
+        wheel_bytes[14] = 0xF1;         // div ecx
+        wheel_bytes[15] = 0x58;         // pop rax
+        wheel_bytes[16] = 0x90;
+        wheel_bytes[17] = 0x90;         // 补齐 18 字节窗口
+        requests[request_count++] = PatchRequest{
+            PatchUserCode, g_symbol_user_code + kSelectUserCodeOffset,
+            select_bound, 1, "hotbar.select_usercode"};
+        requests[request_count++] = PatchRequest{
+            PatchInvoke, g_symbol_invoke + kSelectInvokeOffset, select_bound, 1,
+            "hotbar.select_invoke"};
+        requests[request_count++] = PatchRequest{
+            PatchWheel, g_symbol_wheel + kWheelOffset, wheel_bytes, kWheelSize,
+            "hotbar.wheel_modulo"};
+    }
     bool all_patched = true;
-    for (const PatchRequest& request : requests) {
+    for (std::size_t i = 0; i < request_count; ++i) {
+        const PatchRequest& request = requests[i];
         if (!ApplyMemoryPatch(request.id, request.address, request.bytes,
                               request.size, request.label)) {
             all_patched = false;
@@ -258,28 +284,30 @@ void ApplyForCount(const std::uint32_t n) {
         }
     }
     if (all_patched) {
-        PluginLog("hotbar: patches applied");
+        PluginLog(("hotbar: patches applied for slot count " + std::to_string(n)).c_str());
     }
 
-    // 按键 hook：失败只影响 4 以上的按键，其余补丁保持生效。
-    AnomalyHookRequestV1 hook_request{};
-    hook_request.struct_size = sizeof(hook_request);
-    hook_request.kind = ANOMALY_HOOK_V1_FUNCTION;
-    hook_request.target = g_symbol_hotbar_down;
-    hook_request.detour = reinterpret_cast<void*>(&HotbarDownThunk);
-    hook_request.label = anomaly::sdk::StringView("hotbar.get_hotbar_down");
-    std::uintptr_t original{};
-    AnomalyGenerationHandleV1 hook_handle{};
-    const auto hook_status =
-        g_hook->create(g_hook->user, &hook_request, &original, &hook_handle);
-    if (anomaly::sdk::Succeeded(hook_status) && original != 0) {
-        g_original = original;
-        g_hook_handle = hook_handle;
-        g_blocked_fn = reinterpret_cast<InputBlockedFn>(g_symbol_blocked);
-        PluginLog("hotbar: hook installed");
-    } else {
-        if (g_error.empty()) g_error = "reason.hook";
-        PluginLog("hotbar: hook failed");
+    if (n >= 1) {
+        // 按键 hook：失败只影响 4 以上的按键，其余补丁保持生效。
+        AnomalyHookRequestV1 hook_request{};
+        hook_request.struct_size = sizeof(hook_request);
+        hook_request.kind = ANOMALY_HOOK_V1_FUNCTION;
+        hook_request.target = g_symbol_hotbar_down;
+        hook_request.detour = reinterpret_cast<void*>(&HotbarDownThunk);
+        hook_request.label = anomaly::sdk::StringView("hotbar.get_hotbar_down");
+        std::uintptr_t original{};
+        AnomalyGenerationHandleV1 hook_handle{};
+        const auto hook_status =
+            g_hook->create(g_hook->user, &hook_request, &original, &hook_handle);
+        if (anomaly::sdk::Succeeded(hook_status) && original != 0) {
+            g_original = original;
+            g_hook_handle = hook_handle;
+            g_blocked_fn = reinterpret_cast<InputBlockedFn>(g_symbol_blocked);
+            PluginLog("hotbar: hook installed");
+        } else {
+            if (g_error.empty()) g_error = "reason.hook";
+            PluginLog("hotbar: hook failed");
+        }
     }
 }
 
@@ -475,6 +503,47 @@ AnomalyStatusV1 ANOMALY_CALL Start(void*) {
     }
     if (!g_symbols_ok) {
         PluginLog("hotbar: symbol resolution failed");
+        // 诊断：对失败符号分层探测（v3 批量 / v1 单发 / 入口字节实读）。
+        const anomaly::sdk::Host view(g_host);
+        const auto sig = view.Query<AnomalySignatureServiceV1>(
+            ANOMALY_SIGNATURE_SERVICE_V1_ID);
+        const auto core = view.Query<AnomalyCoreServiceV1>(ANOMALY_CORE_SERVICE_V1_ID);
+        struct Probe { std::string_view name; std::string_view pattern; };
+        const Probe probes[] = {
+            {kSymSelectInvoke, "4C 39 44 D1 F8 75 ?? 83 FF 03 77"},
+            {kSymWheelModulo, "2B D7 83 C2 04 81 E2 03 00 00 80"},
+            {kSymHotbarDown,
+             "48 83 EC 28 80 3D ?? ?? ?? ?? 00 75 ?? 48 8D 0D 54 EF 90 03 E8 B7 DF F2 FF"},
+        };
+        for (const Probe& probe : probes) {
+            if (sig) {
+                std::uintptr_t address{};
+                const auto status = sig->resolve(
+                    sig->user, anomaly::sdk::StringView(g_profile.Document().module),
+                    anomaly::sdk::StringView(g_profile.Document().section),
+                    anomaly::sdk::StringView(probe.pattern), &address);
+                const std::string line = std::string("hotbar: diag v1 ") +
+                    std::string(probe.name) + " code=" + std::to_string(status.code) +
+                    " addr=0x" + [&] {
+                        char buffer[24]{};
+                        std::snprintf(buffer, sizeof(buffer), "%llx",
+                                      static_cast<unsigned long long>(address));
+                        return std::string(buffer);
+                    }();
+                PluginLog(line.c_str());
+                if (anomaly::sdk::Succeeded(status) && address != 0 && core) {
+                    std::uint8_t bytes[24]{};
+                    const auto read_status = core->read_memory(
+                        core->user, address, {bytes, sizeof(bytes)});
+                    char hex[80]{};
+                    for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+                        std::snprintf(hex + i * 3, 4, "%02x ", bytes[i]);
+                    }
+                    PluginLog(("hotbar: diag bytes " + std::string(hex) + " rd=" +
+                               std::to_string(read_status.code)).c_str());
+                }
+            }
+        }
         return anomaly::sdk::Ok();
     }
 
@@ -566,12 +635,15 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     anomaly::sdk::UiWindow window(ui, title, &open);
     if (!window) return;
 
-    // 状态行：失败（带原因）/ 关闭 / 部分生效 / 全部生效。
-    const bool patches_ready =
-        g_patches[PatchSpawn].applied && g_patches[PatchUserCode].applied &&
-        g_patches[PatchInvoke].applied && g_patches[PatchWheel].applied &&
-        g_patches[PatchUi].applied;
+    // 状态行：失败（带原因）/ 部分生效 / 全部生效。N=0 只要求两处基础补丁。
+    const bool base_ready =
+        g_patches[PatchSpawn].applied && g_patches[PatchUi].applied;
+    const bool extras_ready = g_patches[PatchUserCode].applied &&
+        g_patches[PatchInvoke].applied && g_patches[PatchWheel].applied;
     const bool hook_ready = g_hook_handle.id != 0;
+    const bool feature_ready = g_slot_count == 0
+        ? base_ready
+        : base_ready && extras_ready && hook_ready;
     if (!g_error.empty()) {
         // 原因是稳定诊断 key（reason.*），在这里翻译；未知 key 回退通用文案。
         const std::string reason =
@@ -584,59 +656,66 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
         ui->text(ui->user, anomaly::sdk::StringView(
                                g_localizer.Text("reason.profile",
                                                 "compatibility profile did not load")));
-    } else if (!patches_ready || !hook_ready) {
-        if (g_slot_count == 0) {
-            ui->text(ui->user, anomaly::sdk::StringView(
-                                   g_localizer.Text("state.off",
-                                                    "Not extended; the vanilla 4 slots.")));
-        } else {
-            ui->text(ui->user, anomaly::sdk::StringView(
-                                   g_localizer.Text("state.partial",
-                                                    "Partially applied; some targets failed.")));
-        }
+    } else if (!feature_ready) {
+        ui->text(ui->user, anomaly::sdk::StringView(
+                               g_localizer.Text("state.partial",
+                                                "Partially applied; some targets failed.")));
     } else {
         const std::string slots = std::to_string(g_slot_count);
         const std::string_view args[]{slots};
         ui->text(ui->user, anomaly::sdk::StringView(g_localizer.Format(
                                "state.active", "Inventory slots: {0}.",
                                std::span<const std::string_view>{args})));
-    }
-
-    ui->separator(ui->user);
-    if (g_slot_count != 0) {
-        if (ui->begin_table(ui->user, anomaly::sdk::StringView("##targets"), 2, 0, 0.0f, 0.0f)) {
-            DrawTargetRow(ui, "target.spawn", "Inventory spawn slots (server)",
-                          g_patches[PatchSpawn].applied);
-            DrawTargetRow(ui, "target.select", "Slot select bounds (server)",
-                          g_patches[PatchUserCode].applied && g_patches[PatchInvoke].applied);
-            DrawTargetRow(ui, "target.ui", "Native hotbar UI", g_patches[PatchUi].applied);
-            DrawTargetRow(ui, "target.scroll", "Wheel cycling", g_patches[PatchWheel].applied);
-            DrawTargetRow(ui, "target.keys", "Keys beyond 4 (hook)", hook_ready);
-            ui->end_table(ui->user);
+        // 应用后的短暂提示：滚轮/按键立即生效，数据与界面需新一局。
+        if (NowMs() - g_last_apply_ms.load(std::memory_order_relaxed) < 8000) {
+            ui->text(ui->user, anomaly::sdk::StringView(
+                                   g_localizer.Text("state.reapplied",
+                                                    "Applied: wheel and keys take effect now; the inventory data and HUD update on the next flight.")));
         }
     }
 
-    // ---- 设置区：槽数量（0 = 原版），显式「应用」触发保存与重补丁 ----
+    ui->separator(ui->user);
+    if (ui->begin_table(ui->user, anomaly::sdk::StringView("##targets"), 2, 0, 0.0f, 0.0f)) {
+        DrawTargetRow(ui, "target.spawn", "Inventory spawn slots (server)",
+                      g_patches[PatchSpawn].applied);
+        DrawTargetRow(ui, "target.ui", "Native hotbar UI", g_patches[PatchUi].applied);
+        if (g_slot_count >= 1) {
+            DrawTargetRow(ui, "target.select", "Slot select bounds (server)",
+                          g_patches[PatchUserCode].applied && g_patches[PatchInvoke].applied);
+            DrawTargetRow(ui, "target.scroll", "Wheel cycling",
+                          g_patches[PatchWheel].applied);
+            DrawTargetRow(ui, "target.keys", "Keys beyond 4 (hook)", hook_ready);
+        }
+        ui->end_table(ui->user);
+    }
+
+    // ---- 设置区：【- 数量 +】 + 应用；输入框直绑 g_count_draft，失焦写回即时可见 ----
     ui->separator(ui->user);
     ui->text(ui->user, anomaly::sdk::StringView(
                            g_localizer.Text("settings.slots",
-                                            "Slot count (0 = vanilla)")));
-    std::uint32_t draft = g_count_draft;
-    if (ui->input_uint32(ui->user, anomaly::sdk::StringView("##slotcount"),
-                         &draft, 0, 0) != 0) {
-        g_count_draft = draft > kMaxUiSlots ? kMaxUiSlots : draft;
+                                            "Slot count (0 = no slots, max 10)")));
+    if (ui->button(ui->user, anomaly::sdk::StringView("-"), 0.0f, 0.0f)) {
+        if (g_count_draft > 0) --g_count_draft;
     }
+    ui->same_line(ui->user, 0.0f, -1.0f);
+    static_cast<void>(ui->input_uint32(ui->user, anomaly::sdk::StringView("##slotcount"),
+                                       &g_count_draft, 0, 0));
+    if (g_count_draft > kMaxUiSlots) g_count_draft = kMaxUiSlots;
+    ui->same_line(ui->user, 0.0f, -1.0f);
+    if (ui->button(ui->user, anomaly::sdk::StringView("+"), 0.0f, 0.0f)) {
+        if (g_count_draft < kMaxUiSlots) ++g_count_draft;
+    }
+    ui->same_line(ui->user, 0.0f, -1.0f);
     const std::string apply_label = g_localizer.Text("settings.apply", "Apply");
     if (ui->button(ui->user, anomaly::sdk::StringView(apply_label), 0.0f, 0.0f)) {
         const std::uint32_t ceiling =
             g_max_slots != 0 && g_max_slots < kMaxUiSlots ? g_max_slots : kMaxUiSlots;
-        const std::uint32_t next = g_count_draft > ceiling ? ceiling : g_count_draft;
-        g_count_draft = next;
-        const bool changed = next != g_slot_count;
-        if (changed) g_slot_count = next;
-        if (changed || g_dirty.load(std::memory_order_relaxed)) {
+        if (g_count_draft > ceiling) g_count_draft = ceiling;
+        if (g_count_draft != g_slot_count || g_dirty.load(std::memory_order_relaxed)) {
+            g_slot_count = g_count_draft;
             MarkSettingsChanged();
         }
+        g_last_apply_ms.store(NowMs(), std::memory_order_relaxed);
     }
 
     ui->separator(ui->user);
