@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "id": "mayday.music",
+  "name": "Music Player",
+  "description": "Plays local music files (mp3/flac/wav) through the game's voice pipeline so everyone in the session can hear them, with an optional self-listen local playback for the operator.",
+  "author": "Mayday Loader",
+  "license": "AGPL-3.0-only",
+  "version": "1.0.0",
+  "entry": "plugin.dll",
+  "api": { "major": 1, "minMinor": 0, "maxMinor": 0 },
+  "games": ["mayday"],
+  "builds": ["mayday-*"],
+  "loadPhase": "game-ready",
+  "services": [
+    { "id": "anomaly.ui", "minVersion": 1 },
+    { "id": "anomaly.localization", "minVersion": 1 },
+    { "id": "anomaly.core", "minVersion": 1 },
+    { "id": "anomaly.config", "minVersion": 1 },
+    { "id": "anomaly.json", "minVersion": 1 },
+    { "id": "anomaly.scheduler", "minVersion": 1 },
+    { "id": "mayday.voice", "minVersion": 1 }
+  ],
+  "capabilities": [
+    "ui",
+    "configuration",
+    "json",
+    "scheduler",
+    "mayday-voice"
+  ]
+}

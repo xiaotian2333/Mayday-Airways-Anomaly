@@ -32,16 +32,22 @@ constexpr const char* kMoneyServiceId = ANOMALY_MAYDAY_MONEY_SERVICE_V1_ID;
 constexpr const char* kFreecamServiceId = ANOMALY_MAYDAY_FREECAM_SERVICE_V1_ID;
 constexpr const char* kWeatherServiceId = ANOMALY_MAYDAY_WEATHER_SERVICE_V1_ID;
 constexpr const char* kCombatServiceId = ANOMALY_MAYDAY_COMBAT_SERVICE_V1_ID;
+constexpr const char* kVoiceServiceId = ANOMALY_MAYDAY_VOICE_SERVICE_V1_ID;
 constexpr std::uint32_t kIl2CppServiceVersion = 1;
 constexpr std::uint32_t kMoneyServiceVersion = ANOMALY_MAYDAY_MONEY_SERVICE_V1_VERSION;
 constexpr std::uint32_t kFreecamServiceVersion = ANOMALY_MAYDAY_FREECAM_SERVICE_V1_VERSION;
 constexpr std::uint32_t kWeatherServiceVersion = ANOMALY_MAYDAY_WEATHER_SERVICE_V1_VERSION;
 constexpr std::uint32_t kCombatServiceVersion = ANOMALY_MAYDAY_COMBAT_SERVICE_V1_VERSION;
+constexpr std::uint32_t kVoiceServiceVersion = ANOMALY_MAYDAY_VOICE_SERVICE_V1_VERSION;
 
 // 游戏数据：WeatherKind 枚举字段的声明顺序（与 global-metadata 一致）。
 // 枚举数值不在此硬编码，运行时按字段名解析。
 constexpr std::array<const char*, 6> kWeatherKindNames{
     "Calm", "Cloudy", "Rain", "Storm", "Fog", "Snow"};
+
+// 游戏数据：SpeakerRoute 枚举字段名（None=近讲位置音、PA=机内广播、
+// Radio=电台）。枚举数值运行时按字段名解析，不在此硬编码。
+constexpr std::array<const char*, 3> kSpeakerRouteNames{"None", "PA", "Radio"};
 
 // il2cpp 值类型的内存布局（UnityEngine.Vector2 / Vector3 / Quaternion）。
 struct Vec2 {
@@ -109,11 +115,19 @@ using FnClassGetField = void* (*)(void* klass, const char* name);
 using FnClassGetParent = void* (*)(void* klass);
 using FnFieldGetOffset = std::size_t (*)(void* field);
 using FnFieldStaticGetValue = void (*)(void* field, void* value);
+using FnFieldGetType = void* (*)(void* field);
+using FnClassFromIl2CppType = void* (*)(void* type);
 using FnRuntimeInvoke = void* (*)(void* method, void* obj, void** params, void** exc);
+using FnArrayNew = void* (*)(void* klass, std::uintptr_t length);
 using FnThreadAttach = void* (*)(void* domain);
 using FnStringNew = void* (*)(const char* text);
 using FnObjectUnbox = void* (*)(void* obj);
 using FnObjectGetClass = void* (*)(void* obj);
+
+// il2cpp 单维零基数组对象布局：对象头 0x10 + bounds(0x8) + max_length(0x8)，
+// 元素数据自 0x20 起。
+constexpr std::uintptr_t kIl2CppArrayDataOffset = 0x20;
+constexpr std::uintptr_t kIl2CppArrayLengthOffset = 0x18;
 }  // namespace
 
 struct MaydayAdapter::Impl {
@@ -153,6 +167,8 @@ struct MaydayAdapter::Impl {
     FnClassGetField class_get_field{};
     FnFieldGetOffset field_get_offset{};
     FnFieldStaticGetValue field_static_get_value{};
+    FnFieldGetType field_get_type{};
+    FnClassFromIl2CppType class_from_il2cpp_type{};
     FnRuntimeInvoke runtime_invoke{};
     FnThreadAttach thread_attach{};
     FnStringNew string_new{};
@@ -267,6 +283,89 @@ struct MaydayAdapter::Impl {
     void* ws_get_severity{};
     std::array<std::int32_t, 6> kind_values{};   // 声明序 → 运行时枚举值
     AnomalyMaydayWeatherServiceV1 weather_service{};
+
+    // ---- 语音注入：PlayerVoice.SendVoice 直发 μ-law 编码帧 ----
+    // 插件 Game 域（on_update）调用 send_frame；本类只做运行时按名解析与
+    // runtime_invoke 封送，发送节奏（SendInterval）、分帧（MuLawPacketBytes）
+    // 与 μ-law 编码由插件负责。快照（在局/后端/路由枚举值）只在 send_frame
+    // 里刷新，get_state 仅读最后一次快照，Render 域调用安全。
+    std::atomic<void*> voice_published{nullptr};
+    AnomalyMaydayVoiceServiceV1 voice_service{};
+    bool voice_resolved{false};
+    bool voice_resolve_logged{false};
+    // 解析缓存（resolve_mutex 保护）
+    void* player_voice_class{};
+    void* voice_send_method{};               // PlayerVoice.SendVoice(byte, bool, byte[], int)
+    void* voice_all_field{};                 // static List<PlayerVoice> All
+    void* voice_local_flag_method{};         // get_isLocalPlayer()（Mirror 新版属性）
+    void* voice_local_flag_field{};          // isLocalPlayer（Mirror 旧版公共字段）
+    void* voice_capture_class{};
+    void* voice_mulaw_rate_field{};          // static int VoiceCapture.MuLawRate
+    void* voice_packet_bytes_field{};        // static int VoiceCapture.MuLawPacketBytes
+    void* voice_send_interval_field{};       // static float VoiceCapture.SendInterval
+    void* speaker_route_class{};             // Mayday.Net.SpeakerRoute 枚举
+    void* voice_backend_class{};
+    void* voice_backend_dissonance_method{}; // static bool get_SessionUsesDissonance()
+    void* voice_backend_dissonance_field{};  // static bool SessionUsesDissonance（旧形态）
+    void* voice_list_class{};                // mscorlib List`1（泛型定义）
+    void* voice_list_items_field{};          // List`1._items
+    void* voice_list_size_field{};           // List`1._size
+    std::size_t voice_list_items_offset{};
+    std::size_t voice_list_size_offset{};
+    void* voice_byte_class{};                // mscorlib System.Byte
+    void* voice_mirror_image{};              // Mirror.dll image（NetworkServer 解析）
+    void* dissonance_voice_class{};
+    void* voice_capture_method{};            // DissonanceVoice.ReceiveMicrophoneData（显式接口实现名）
+    void* voice_naudio_image{};              // NAudio* 程序集 image（WaveFormat 解析）
+    void* voice_dissonancevoip_image{};      // DissonanceVoip.dll（可能内嵌 NAudio 源码）
+    void* voice_wave_format_class{};
+    std::size_t voice_wave_rate_offset{};    // WaveFormat 采样率字段偏移（字段名候选见解析处）
+    void* voice_wave_rate_getter{};          // WaveFormat.get_SampleRate（字段解析失败时兜底）
+    std::chrono::steady_clock::time_point voice_hook_retry_at{};  // hook 失败节流
+    // 传输门控解除：VoiceBroadcastTrigger.ShouldActivate（播放期强制 true）+
+    // capture 回调时覆盖 comms.IsMuted=false，双保险解除游戏的 PTT 门控。
+    void* voice_trigger_class{};             // Dissonance.VoiceBroadcastTrigger
+    void* voice_activate_target{};
+    void* voice_activate_original{};
+    bool voice_activate_hook_created{};
+    void* dissonance_comms_class{};          // Dissonance.DissonanceComms
+    void* voice_set_muted_method{};          // DissonanceComms.set_IsMuted
+    void* voice_instance_field{};            // DissonanceVoice.instance（静态）
+    std::size_t voice_comms_offset{};        // DissonanceVoice.comms 字段偏移
+    // 按键说话门控源头：Mayday.GameInput.get_PushToTalkHeld。播放期间返回
+    // true 等于替玩家按住语音键，任何读取该输入的门控（Intent/Trigger/
+    // IsMuted）都随之放行；停止后放行原判定。
+    void* game_input_class{};
+    void* voice_ptt_target{};
+    void* voice_ptt_original{};
+    bool voice_ptt_hook_created{};
+    FnArrayNew array_new{};
+    // ---- Dissonance capture 注入 hook：播放期把麦克风 capture 数据替换为 ----
+    // 插件注册的 PCM 流（屏蔽原麦克风），流耗尽或注销后放行原数据。
+    std::atomic<const void*> injection_pcm{nullptr};  // 插件缓冲（mono f32），生命周期归插件
+    std::atomic<std::int32_t> injection_count{0};    // 流总样本数
+    std::atomic<std::int32_t> injection_pos{0};      // hook 消费位置（样本数）
+    std::atomic<std::int32_t> injection_requested_rate{0};
+    std::atomic<std::int32_t> injection_rate_captured{-1};  // hook 首次捕获的 WaveFormat.SampleRate
+    std::atomic<float> injection_volume{1.0f};
+    std::atomic<bool> injection_active{false};
+    std::atomic<bool> voice_hook_installed{false};
+    std::atomic<bool> voice_hook_shutdown{false};
+    std::atomic<int> voice_hook_in_callback{0};
+    std::unique_ptr<HookBackend> voice_hook_backend;
+    void* voice_capture_target{};
+    void* voice_capture_original{};
+    static std::atomic<Impl*> voice_capture_owner;
+    // 快照：send_frame（Game 域）无锁刷新，get_state（任意域）无锁读取。
+    std::atomic<bool> voice_in_flight{false};
+    std::atomic<std::int32_t> voice_backend_dissonance{-1};
+    std::atomic<std::int32_t> voice_sample_rate{0};
+    std::atomic<std::int32_t> voice_frame_bytes{0};
+    std::atomic<std::int32_t> voice_send_interval_ms{0};
+    std::atomic<std::int32_t> voice_route_proximity{-1};
+    std::atomic<std::int32_t> voice_route_pa{-1};
+    std::atomic<std::int32_t> voice_route_radio{-1};
+    std::atomic<std::int32_t> voice_host_mode{0};
 
     // ---- 自动棒球棍：PlayerInteractor.Update 主线程触发 + BatItem.ServerUseOnce 静默瞄准 ----
     // 渲染线程只读写 atomic 开关与快照；所有 il2cpp/Unity 调用都发生在
@@ -484,6 +583,16 @@ struct MaydayAdapter::Impl {
         void* user, std::int32_t enabled);
     static AnomalyStatusV1 ANOMALY_CALL CombatGetState(
         void* user, AnomalyMaydayCombatStateV1* out_state);
+    static AnomalyStatusV1 ANOMALY_CALL VoiceSendFrame(
+        void* user, std::int32_t route_id, const void* frame, std::int32_t length);
+    static AnomalyStatusV1 ANOMALY_CALL VoiceRefreshState(void* user);
+    static AnomalyStatusV1 ANOMALY_CALL VoiceGetState(
+        void* user, AnomalyMaydayVoiceStateV1* out_state);
+    static AnomalyStatusV1 ANOMALY_CALL VoiceSetInjection(
+        void* user, std::int32_t enabled, const void* samples,
+        std::int32_t sample_count, std::int32_t sample_rate);
+    static AnomalyStatusV1 ANOMALY_CALL VoiceSetInjectionVolume(
+        void* user, float volume);
 
     // 当前线程的 il2cpp attach 结果；FLS 缓存（Core 禁止 thread_local），
     // 首次调用 attach，之后复用，避免每帧 Draw 重复 attach/detach。
@@ -501,6 +610,7 @@ struct MaydayAdapter::Impl {
     void PublishFreecamService();
     void PublishWeatherService();
     void PublishCombatService();
+    void PublishVoiceService();
     void RevokePublished();
 
     // 解析 GameState 类与方法；每线程需先 attach。返回 false = 游戏符号不可用。
@@ -510,6 +620,8 @@ struct MaydayAdapter::Impl {
     bool ResolveWeather();
     // 解析自动棒球棍所需的 PlayerNet / BatItem / Passenger / 交互与网络入口。
     bool ResolveCombat();
+    // 解析语音注入所需的 PlayerVoice / VoiceCapture 常量 / SpeakerRoute 枚举。
+    bool ResolveVoice();
     // 拿 GameState.Instance（未开局返回 nullptr）
     void* GameInstance();
     // 拿静态单例实例（WorldEnvironment / WorldManager / WeatherSystem）。
@@ -527,6 +639,21 @@ struct MaydayAdapter::Impl {
     bool InvokeVoidArg(void* method, void* object, void* argument);
     void* InvokeObject(void* method, void* object);
     [[nodiscard]] bool ClassDerivesFrom(void* klass, void* base) const;
+    // 语音辅助：遍历 PlayerVoice.All 找本地实例；刷新会话后端与 host_mode 快照。
+    bool VoiceFindLocalPlayer(void** out_instance);
+    void VoiceRefreshSnapshot();
+    // Dissonance capture 注入：安装/拆除 ReceiveMicrophoneData hook 与数据替换。
+    bool EnsureVoiceCaptureHook();
+    void TeardownVoiceCaptureHook() noexcept;
+    static void ANOMALY_CALL VoiceCaptureThunk(
+        void* self, void* segment, void* format, void* method);
+    void HandleVoiceCapture(void* self, void* segment, void* format, void* method);
+    static bool ANOMALY_CALL VoiceActivateThunk(void* self, bool intent, void* method);
+    bool HandleShouldActivate(void* self, bool intent, void* method);
+    static bool ANOMALY_CALL VoicePttThunk(void* self, void* method);
+    bool HandlePtt(void* self, void* method);
+    // 注入活跃时覆盖 comms.IsMuted = false（capture 回调内执行，主线程）。
+    void EnsureInjectionTransmitting();
 
     // 自动棒球棍的主线程钩子与目标选择。
     static void ANOMALY_CALL InteractorUpdateThunk(void* self);
@@ -599,6 +726,7 @@ void MaydayAdapter::Impl::ProbeWorker() {
                 PublishFreecamService();
                 PublishWeatherService();
                 PublishCombatService();
+                PublishVoiceService();
             }
             break;
         }
@@ -644,7 +772,10 @@ bool MaydayAdapter::Impl::ResolveExports(const HMODULE game_assembly) {
         {reinterpret_cast<void**>(&class_get_field), "il2cpp_class_get_field_from_name"},
         {reinterpret_cast<void**>(&field_get_offset), "il2cpp_field_get_offset"},
         {reinterpret_cast<void**>(&field_static_get_value), "il2cpp_field_static_get_value"},
+        {reinterpret_cast<void**>(&field_get_type), "il2cpp_field_get_type"},
+        {reinterpret_cast<void**>(&class_from_il2cpp_type), "il2cpp_class_from_il2cpp_type"},
         {reinterpret_cast<void**>(&runtime_invoke), "il2cpp_runtime_invoke"},
+        {reinterpret_cast<void**>(&array_new), "il2cpp_array_new"},
         {reinterpret_cast<void**>(&thread_attach), "il2cpp_thread_attach"},
         {reinterpret_cast<void**>(&string_new), "il2cpp_string_new"},
         {reinterpret_cast<void**>(&object_unbox), "il2cpp_object_unbox"},
@@ -680,6 +811,10 @@ AnomalyStatusV1 MoneyStatus(const char* message) {
 }
 
 AnomalyStatusV1 CombatStatus(const char* message) {
+    return {ANOMALY_STATUS_V1_UNAVAILABLE, 0, {message, std::strlen(message)}};
+}
+
+AnomalyStatusV1 VoiceStatus(const char* message) {
     return {ANOMALY_STATUS_V1_UNAVAILABLE, 0, {message, std::strlen(message)}};
 }
 
@@ -1032,6 +1167,728 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::CombatGetState(
     return {ANOMALY_STATUS_V1_OK, 0, {}};
 }
 
+bool MaydayAdapter::Impl::ResolveVoice() {
+    if (voice_resolved) return true;
+    if (class_from_name == nullptr || class_get_method == nullptr ||
+        class_get_field == nullptr || field_get_offset == nullptr ||
+        field_static_get_value == nullptr || field_get_type == nullptr ||
+        class_from_il2cpp_type == nullptr || runtime_invoke == nullptr ||
+        object_unbox == nullptr || array_new == nullptr ||
+        domain_get_assemblies == nullptr || assembly_get_image == nullptr ||
+        image_get_name == nullptr) {
+        return false;
+    }
+    if (!EnsureGameImage()) return false;
+
+    player_voice_class = class_from_name(image, "Mayday.Net", "PlayerVoice");
+    voice_capture_class = class_from_name(image, "Mayday.Net", "VoiceCapture");
+    speaker_route_class = class_from_name(image, "Mayday.Net", "SpeakerRoute");
+    if (player_voice_class == nullptr || voice_capture_class == nullptr ||
+        speaker_route_class == nullptr) {
+        return false;
+    }
+    voice_send_method = class_get_method(player_voice_class, "SendVoice", 4);
+    voice_all_field = class_get_field(player_voice_class, "All");
+    // Mirror 的 isLocalPlayer 新版本是属性、旧版本是公共字段：按名解析两个
+    // 候选，至少命中一个才算可用。
+    voice_local_flag_method = class_get_method(player_voice_class, "get_isLocalPlayer", 0);
+    if (voice_local_flag_method == nullptr) {
+        voice_local_flag_field = class_get_field(player_voice_class, "isLocalPlayer");
+    }
+
+    // VoiceCapture 三个静态常量按字段名直读（帧率/帧长/发送间隔）。
+    voice_mulaw_rate_field = class_get_field(voice_capture_class, "MuLawRate");
+    voice_packet_bytes_field = class_get_field(voice_capture_class, "MuLawPacketBytes");
+    voice_send_interval_field = class_get_field(voice_capture_class, "SendInterval");
+    std::int32_t mulaw_rate = 0;
+    std::int32_t packet_bytes = 0;
+    float send_interval = 0.0f;
+    if (voice_mulaw_rate_field == nullptr || voice_packet_bytes_field == nullptr ||
+        voice_send_interval_field == nullptr) {
+        return false;
+    }
+    field_static_get_value(voice_mulaw_rate_field, &mulaw_rate);
+    field_static_get_value(voice_packet_bytes_field, &packet_bytes);
+    field_static_get_value(voice_send_interval_field, &send_interval);
+    if (mulaw_rate <= 0 || packet_bytes <= 0 || send_interval <= 0.0f) {
+        return false;
+    }
+
+    // SpeakerRoute 枚举值按字段名解析；数值互不相同才算可信（同 WeatherKind）。
+    std::array<std::int32_t, std::size(kSpeakerRouteNames)> route_values{};
+    for (std::size_t i = 0; i < std::size(kSpeakerRouteNames); ++i) {
+        void* const field = class_get_field(speaker_route_class, kSpeakerRouteNames[i]);
+        if (field == nullptr) return false;
+        std::int32_t value = 0;
+        field_static_get_value(field, &value);
+        route_values[i] = value;
+    }
+    for (std::size_t a = 0; a < route_values.size(); ++a) {
+        for (std::size_t b = a + 1; b < route_values.size(); ++b) {
+            if (route_values[a] == route_values[b]) return false;
+        }
+    }
+
+    // mscorlib 承载 System.Byte；Mirror 承载 NetworkServer；NAudio 承载
+    // WaveFormat（Dissonance capture 输入格式描述）。
+    std::size_t assembly_count{};
+    void** const assemblies = domain_get_assemblies(domain, &assembly_count);
+    void* mscorlib_image{};
+    for (std::size_t i = 0; assemblies != nullptr && i < assembly_count; ++i) {
+        void* const candidate = assembly_get_image(assemblies[i]);
+        if (candidate == nullptr) continue;
+        const char* const name = image_get_name(candidate);
+        if (name == nullptr) continue;
+        if (std::strcmp(name, "mscorlib.dll") == 0) {
+            mscorlib_image = candidate;
+        } else if (std::strcmp(name, "Mirror.dll") == 0) {
+            voice_mirror_image = candidate;
+        } else if (std::strncmp(name, "NAudio", 6) == 0) {
+            voice_naudio_image = candidate;
+        } else if (std::strncmp(name, "DissonanceVoip", 14) == 0) {
+            voice_dissonancevoip_image = candidate;
+        }
+    }
+    if (mscorlib_image == nullptr) return false;
+    voice_byte_class = class_from_name(mscorlib_image, "System", "Byte");
+    // Dissonance capture 注入（可选：缺失只停用注入，不影响 μ-law 直发）。
+    dissonance_voice_class = class_from_name(image, "Mayday.Net", "DissonanceVoice");
+    if (dissonance_voice_class != nullptr) {
+        // ReceiveMicrophoneData 是 IMicrophoneSubscriber 的显式接口实现，
+        // metadata 里的方法名带接口前缀；两种形态都试。
+        voice_capture_method = class_get_method(
+            dissonance_voice_class, "ReceiveMicrophoneData", 2);
+        if (voice_capture_method == nullptr) {
+            voice_capture_method = class_get_method(
+                dissonance_voice_class,
+                "Dissonance.Audio.Capture.IMicrophoneSubscriber.ReceiveMicrophoneData", 2);
+        }
+    }
+    // WaveFormat 可能是独立 NAudio 程序集，也可能内嵌进 DissonanceVoip；
+    // 采样率字段名存在 SampleRate/sampleRate/_sampleRate 三种形态，字段
+    // 解析失败时兜底走 get_SampleRate 属性（hook 回调里 invoke 一次）。
+    void* const wave_image = voice_naudio_image != nullptr
+        ? voice_naudio_image : voice_dissonancevoip_image;
+    if (wave_image != nullptr) {
+        voice_wave_format_class = class_from_name(wave_image, "NAudio.Wave", "WaveFormat");
+        if (voice_wave_format_class != nullptr) {
+            const char* const rate_field_names[]{"SampleRate", "sampleRate", "_sampleRate"};
+            for (const char* const field_name : rate_field_names) {
+                void* const rate_field = class_get_field(voice_wave_format_class, field_name);
+                if (rate_field != nullptr) {
+                    voice_wave_rate_offset = field_get_offset(rate_field);
+                    break;
+                }
+            }
+            voice_wave_rate_getter =
+                class_get_method(voice_wave_format_class, "get_SampleRate", 0);
+        }
+    }
+    // 传输门控：VoiceBroadcastTrigger.ShouldActivate（Dissonance 内部每帧查询）
+    // 与 DissonanceComms.set_IsMuted（游戏侧 PTT 的常见实现点）。缺失只影响
+    // 免按键，注入与 μ-law 直发不受影响。
+    if (voice_dissonancevoip_image != nullptr) {
+        voice_trigger_class = class_from_name(
+            voice_dissonancevoip_image, "Dissonance", "VoiceBroadcastTrigger");
+        if (voice_trigger_class != nullptr) {
+            // bool ShouldActivate(bool intent)：参数是游戏算好的意图值。
+            void* const activate_method =
+                class_get_method(voice_trigger_class, "ShouldActivate", 1);
+            if (activate_method != nullptr) {
+                voice_activate_target =
+                    *reinterpret_cast<void**>(activate_method);
+            }
+        }
+        dissonance_comms_class = class_from_name(
+            voice_dissonancevoip_image, "Dissonance", "DissonanceComms");
+        if (dissonance_comms_class != nullptr) {
+            voice_set_muted_method = class_get_method(
+                dissonance_comms_class, "set_IsMuted", 1);
+        }
+    }
+    if (dissonance_voice_class != nullptr) {
+        voice_instance_field = class_get_field(dissonance_voice_class, "instance");
+        void* const comms_field = class_get_field(dissonance_voice_class, "comms");
+        if (comms_field != nullptr) {
+            voice_comms_offset = field_get_offset(comms_field);
+        }
+    }
+    // 按键说话输入源头（Assembly-CSharp）。
+    game_input_class = class_from_name(image, "Mayday", "GameInput");
+    if (game_input_class != nullptr) {
+        void* const ptt_method =
+            class_get_method(game_input_class, "get_PushToTalkHeld", 0);
+        if (ptt_method != nullptr) {
+            voice_ptt_target = *reinterpret_cast<void**>(ptt_method);
+        }
+    }
+    // List<PlayerVoice> 的 _items/_size 偏移必须在实例化后的泛型类上取：
+    // 泛型定义 List`1 的字段偏移未计算，il2cpp_field_get_offset 返回 0。
+    // 从 All 字段类型反解 List<PlayerVoice> 实例类。
+    if (field_get_type != nullptr && class_from_il2cpp_type != nullptr &&
+        voice_all_field != nullptr) {
+        void* const all_type = field_get_type(voice_all_field);
+        voice_list_class = all_type != nullptr
+            ? class_from_il2cpp_type(all_type) : nullptr;
+    }
+    if (voice_list_class != nullptr) {
+        voice_list_items_field = class_get_field(voice_list_class, "_items");
+        voice_list_size_field = class_get_field(voice_list_class, "_size");
+    }
+    if (voice_list_items_field != nullptr && voice_list_size_field != nullptr) {
+        voice_list_items_offset = field_get_offset(voice_list_items_field);
+        voice_list_size_offset = field_get_offset(voice_list_size_field);
+    }
+    if (network_server_class == nullptr && voice_mirror_image != nullptr) {
+        network_server_class = class_from_name(voice_mirror_image, "Mirror", "NetworkServer");
+    }
+    if (network_server_class != nullptr && get_network_server_active == nullptr) {
+        get_network_server_active = class_get_method(network_server_class, "get_active", 0);
+    }
+
+    // VoiceBackend.SessionUsesDissonance：属性/静态字段两种候选都解析，
+    // 拿不到只影响后端诊断显示（快照记 -1），不阻断发送。
+    voice_backend_class = class_from_name(image, "Mayday.Net", "VoiceBackend");
+    if (voice_backend_class != nullptr) {
+        voice_backend_dissonance_method =
+            class_get_method(voice_backend_class, "get_SessionUsesDissonance", 0);
+        if (voice_backend_dissonance_method == nullptr) {
+            voice_backend_dissonance_field =
+                class_get_field(voice_backend_class, "SessionUsesDissonance");
+        }
+    }
+
+    // 全部必需句柄清点：日志精确列出缺失项（同 combat/weather 的定位约定）。
+    struct NamedHandle { const char* name; void* handle; };
+    const NamedHandle required[] = {
+        {"voice.SendVoice", voice_send_method},
+        {"voice.All", voice_all_field},
+        {"voice.isLocalPlayer", voice_local_flag_method != nullptr
+            ? voice_local_flag_method
+            : static_cast<void*>(voice_local_flag_field)},
+        {"voice.MuLawRate", voice_mulaw_rate_field},
+        {"voice.MuLawPacketBytes", voice_packet_bytes_field},
+        {"voice.SendInterval", voice_send_interval_field},
+        {"voice.List._items", voice_list_items_field},
+        {"voice.List._size", voice_list_size_field},
+        {"voice.System.Byte", voice_byte_class},
+        {"voice.NetworkServer.active", get_network_server_active},
+    };
+    std::string missing;
+    for (const auto& entry : required) {
+        if (entry.handle == nullptr) {
+            if (!missing.empty()) missing += ' ';
+            missing += entry.name;
+        }
+    }
+    if (voice_list_items_offset == 0 || voice_list_items_offset >= 0x1000) {
+        if (!missing.empty()) missing += ' ';
+        missing += "voice.List._items.offset";
+    }
+    if (voice_list_size_offset == 0 || voice_list_size_offset >= 0x1000) {
+        if (!missing.empty()) missing += ' ';
+        missing += "voice.List._size.offset";
+    }
+    if (!missing.empty()) {
+        if (log_sink != nullptr && !voice_resolve_logged) {
+            voice_resolve_logged = true;
+            log_sink("voice.resolve_failed", "missing handles: " + missing);
+        }
+        return false;
+    }
+
+    voice_resolved = true;
+    voice_sample_rate.store(mulaw_rate, std::memory_order_release);
+    voice_frame_bytes.store(packet_bytes, std::memory_order_release);
+    voice_send_interval_ms.store(
+        static_cast<std::int32_t>(send_interval * 1000.0f), std::memory_order_release);
+    voice_route_proximity.store(route_values[0], std::memory_order_release);
+    voice_route_pa.store(route_values[1], std::memory_order_release);
+    voice_route_radio.store(route_values[2], std::memory_order_release);
+    if (log_sink != nullptr) {
+        log_sink("voice.resolved",
+                 std::string("MuLawRate=") + std::to_string(mulaw_rate) +
+                 " MuLawPacketBytes=" + std::to_string(packet_bytes) +
+                 " SendInterval=" + std::to_string(send_interval) +
+                 " routes: None=" + std::to_string(route_values[0]) +
+                 " PA=" + std::to_string(route_values[1]) +
+                 " Radio=" + std::to_string(route_values[2]));
+    }
+    return true;
+}
+
+bool MaydayAdapter::Impl::VoiceFindLocalPlayer(void** out_instance) {
+    *out_instance = nullptr;
+    void* list{};
+    field_static_get_value(voice_all_field, &list);
+    if (list == nullptr || voice_list_items_offset == 0) return false;
+    const std::uintptr_t list_addr = reinterpret_cast<std::uintptr_t>(list);
+    void* items = *reinterpret_cast<void**>(list_addr + voice_list_items_offset);
+    const std::int32_t size = *reinterpret_cast<const std::int32_t*>(
+        list_addr + voice_list_size_offset);
+    if (items == nullptr || size <= 0) return false;
+    const std::uintptr_t items_addr = reinterpret_cast<std::uintptr_t>(items);
+    const std::uintptr_t max_length =
+        *reinterpret_cast<const std::uintptr_t*>(items_addr + kIl2CppArrayLengthOffset);
+    const std::int32_t count = static_cast<std::int32_t>(
+        (std::min)(static_cast<std::uintptr_t>(size), max_length));
+    for (std::int32_t i = 0; i < count; ++i) {
+        void* const element = *reinterpret_cast<void**>(
+            items_addr + kIl2CppArrayDataOffset +
+            sizeof(void*) * static_cast<std::uintptr_t>(i));
+        if (element == nullptr) continue;
+        bool local = false;
+        if (voice_local_flag_method != nullptr) {
+            if (!InvokeBool(voice_local_flag_method, element, &local)) continue;
+        } else {
+            const std::size_t offset = field_get_offset(voice_local_flag_field);
+            local = *reinterpret_cast<const std::uint8_t*>(
+                reinterpret_cast<std::uintptr_t>(element) + offset) != 0;
+        }
+        if (local) {
+            *out_instance = element;
+            return true;
+        }
+    }
+    return false;
+}
+
+void MaydayAdapter::Impl::VoiceRefreshSnapshot() {
+    if (get_network_server_active != nullptr) {
+        bool active{};
+        if (InvokeBool(get_network_server_active, nullptr, &active)) {
+            voice_host_mode.store(active ? 1 : 0, std::memory_order_release);
+        }
+    }
+    if (voice_backend_dissonance_method != nullptr) {
+        bool uses{};
+        if (InvokeBool(voice_backend_dissonance_method, nullptr, &uses)) {
+            voice_backend_dissonance.store(uses ? 1 : 0, std::memory_order_release);
+        } else {
+            voice_backend_dissonance.store(-1, std::memory_order_release);
+        }
+    } else if (voice_backend_dissonance_field != nullptr) {
+        bool uses{};
+        field_static_get_value(voice_backend_dissonance_field, &uses);
+        voice_backend_dissonance.store(uses ? 1 : 0, std::memory_order_release);
+    } else {
+        voice_backend_dissonance.store(-1, std::memory_order_release);
+    }
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::VoiceSendFrame(
+    void* user, std::int32_t route_id, const void* frame, std::int32_t length) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr || frame == nullptr || length <= 0 || route_id < 0 ||
+        route_id >= static_cast<std::int32_t>(std::size(kSpeakerRouteNames))) {
+        return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    }
+    std::scoped_lock lock(impl->resolve_mutex);
+    if (!impl->ResolveVoice()) return VoiceStatus("status.voice_no_symbols");
+    if (impl->AttachedThread() == nullptr) return VoiceStatus("status.attach_failed");
+
+    // 每次发送都从 PlayerVoice.All 重取本地实例：列表由游戏维护，元素在
+    // 换局/断线后失效，缓存指针会成为悬垂引用。
+    void* local{};
+    if (!impl->VoiceFindLocalPlayer(&local)) {
+        impl->voice_in_flight.store(false, std::memory_order_release);
+        return VoiceStatus("status.not_in_flight");
+    }
+    impl->voice_in_flight.store(true, std::memory_order_release);
+    impl->VoiceRefreshSnapshot();
+
+    // 宿主稳定路由语义 → 运行时枚举值；对应枚举未解析到则拒绝发送。
+    const std::int32_t route_value = route_id == 0
+        ? impl->voice_route_proximity.load(std::memory_order_acquire)
+        : route_id == 1
+        ? impl->voice_route_pa.load(std::memory_order_acquire)
+        : impl->voice_route_radio.load(std::memory_order_acquire);
+    if (route_value < 0) return VoiceStatus("status.voice_no_symbols");
+
+    // SendVoice(byte route, bool flag, byte[] buffer, int length)：值类型传
+    // 地址，byte[] 传 il2cpp_array_new 分配的对象指针；帧数据写入数组数据区。
+    // flag 传 true 表示活跃发言（语义沿 VoiceCapture.PacketSink 的 spurt
+    // 约定，待实机校验）。
+    void* const managed = impl->array_new(
+        impl->voice_byte_class, static_cast<std::uintptr_t>(length));
+    if (managed == nullptr) return VoiceStatus("status.failed");
+    std::memcpy(reinterpret_cast<void*>(
+        reinterpret_cast<std::uintptr_t>(managed) + kIl2CppArrayDataOffset),
+        frame, static_cast<std::size_t>(length));
+    std::uint8_t route_byte = static_cast<std::uint8_t>(route_value);
+    std::uint8_t flag = 1;
+    std::int32_t length_value = length;
+    void* params[] = {&route_byte, &flag, managed, &length_value};
+    if (!impl->InvokeVoid(impl->voice_send_method, local, params)) {
+        return VoiceStatus("status.failed");
+    }
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::VoiceRefreshState(void* user) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    std::scoped_lock lock(impl->resolve_mutex);
+    if (!impl->ResolveVoice()) return VoiceStatus("status.voice_no_symbols");
+    if (impl->AttachedThread() == nullptr) return VoiceStatus("status.attach_failed");
+    // 就绪判定与快照刷新：本地实例存在即在局；后端/host_mode 每帧重读。
+    void* local{};
+    const bool in_flight = impl->VoiceFindLocalPlayer(&local);
+    impl->voice_in_flight.store(in_flight, std::memory_order_release);
+    impl->VoiceRefreshSnapshot();
+    // capture 注入 hook 惰性安装（符号齐备后装一次；失败按 1 秒节奏重试）。
+    if (!impl->voice_hook_shutdown.load(std::memory_order_acquire) &&
+        !impl->voice_hook_installed.load(std::memory_order_acquire)) {
+        static_cast<void>(impl->EnsureVoiceCaptureHook());
+    }
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::VoiceGetState(
+    void* user, AnomalyMaydayVoiceStateV1* out_state) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr || out_state == nullptr ||
+        out_state->struct_size < sizeof(*out_state)) {
+        return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    }
+    out_state->in_flight = impl->voice_in_flight.load(std::memory_order_acquire) ? 1 : 0;
+    out_state->backend_dissonance =
+        impl->voice_backend_dissonance.load(std::memory_order_acquire);
+    out_state->sample_rate = impl->voice_sample_rate.load(std::memory_order_acquire);
+    out_state->frame_bytes = impl->voice_frame_bytes.load(std::memory_order_acquire);
+    out_state->send_interval_ms =
+        impl->voice_send_interval_ms.load(std::memory_order_acquire);
+    out_state->route_proximity =
+        impl->voice_route_proximity.load(std::memory_order_acquire);
+    out_state->route_pa = impl->voice_route_pa.load(std::memory_order_acquire);
+    out_state->route_radio = impl->voice_route_radio.load(std::memory_order_acquire);
+    out_state->host_mode = impl->voice_host_mode.load(std::memory_order_acquire);
+    out_state->injection_available =
+        impl->voice_hook_installed.load(std::memory_order_acquire) &&
+        (impl->voice_wave_rate_offset > 0 || impl->voice_wave_rate_getter != nullptr)
+        ? 1 : 0;
+    out_state->injection_sample_rate =
+        impl->injection_rate_captured.load(std::memory_order_acquire);
+    out_state->injection_position =
+        impl->injection_pos.load(std::memory_order_acquire);
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+bool MaydayAdapter::Impl::EnsureVoiceCaptureHook() {
+    if (voice_hook_installed.load(std::memory_order_acquire)) return true;
+    if (voice_hook_shutdown.load(std::memory_order_acquire)) return false;
+    // 失败按 1 秒节奏重试，避免每帧重建 MinHook。
+    const auto now = std::chrono::steady_clock::now();
+    if (now < voice_hook_retry_at) return false;
+    voice_hook_retry_at = now + std::chrono::milliseconds(1000);
+    // 注入需要 capture 方法（WaveFormat 采样率读取方式字段或 getter 二选一）。
+    if (voice_capture_target == nullptr) {
+        voice_capture_target = voice_capture_method != nullptr
+            ? *reinterpret_cast<void**>(voice_capture_method) : nullptr;
+    }
+    if (voice_capture_target == nullptr ||
+        (voice_wave_rate_offset == 0 && voice_wave_rate_getter == nullptr)) {
+        return false;
+    }
+    auto backend = CreateMinHookBackend();
+    if (backend == nullptr || !backend->Initialize()) {
+        backend.reset();
+        return false;
+    }
+    voice_capture_owner.store(this, std::memory_order_release);
+    bool ok = backend->Create(
+        voice_capture_target,
+        reinterpret_cast<void*>(&Impl::VoiceCaptureThunk),
+        &voice_capture_original);
+    if (ok) ok = backend->Enable(voice_capture_target);
+    if (!ok) {
+        static_cast<void>(backend->Remove(voice_capture_target));
+        voice_capture_original = nullptr;
+        voice_capture_owner.store(nullptr, std::memory_order_release);
+        static_cast<void>(backend->Uninitialize());
+        return false;
+    }
+    // 传输门控解除（可选）：ShouldActivate 强制 true 解除 PTT/VAD 判定；
+    // 失败时注入照常工作，只是仍需按住说话键。
+    voice_activate_hook_created = false;
+    if (voice_activate_target != nullptr) {
+        const bool created = backend->Create(
+            voice_activate_target,
+            reinterpret_cast<void*>(&Impl::VoiceActivateThunk),
+            &voice_activate_original);
+        if (created && backend->Enable(voice_activate_target)) {
+            voice_activate_hook_created = true;
+        } else if (created) {
+            static_cast<void>(backend->Remove(voice_activate_target));
+            voice_activate_original = nullptr;
+        }
+    }
+    // 门控源头兜底：播放期把 get_PushToTalkHeld 强制为 true（替玩家按住）。
+    voice_ptt_hook_created = false;
+    if (voice_ptt_target != nullptr) {
+        const bool created = backend->Create(
+            voice_ptt_target,
+            reinterpret_cast<void*>(&Impl::VoicePttThunk),
+            &voice_ptt_original);
+        if (created && backend->Enable(voice_ptt_target)) {
+            voice_ptt_hook_created = true;
+        } else if (created) {
+            static_cast<void>(backend->Remove(voice_ptt_target));
+            voice_ptt_original = nullptr;
+        }
+    }
+    voice_hook_backend = std::move(backend);
+    voice_hook_installed.store(true, std::memory_order_release);
+    if (log_sink != nullptr) {
+        log_sink("voice.capture_hook",
+                 std::string("ReceiveMicrophoneData hooked; sample rate via ") +
+                 (voice_wave_rate_offset > 0 ? "field" : "getter") +
+                 (voice_activate_hook_created ? "; ShouldActivate forced while injecting" : "; ShouldActivate hook unavailable") +
+                 (voice_ptt_hook_created ? "; PushToTalk forced while injecting" : "; PushToTalk hook unavailable"));
+    }
+    return true;
+}
+
+void MaydayAdapter::Impl::TeardownVoiceCaptureHook() noexcept {
+    voice_hook_shutdown.store(true, std::memory_order_release);
+    injection_active.store(false, std::memory_order_release);
+    if (!voice_hook_installed.load(std::memory_order_acquire) ||
+        voice_hook_backend == nullptr) {
+        return;
+    }
+    static_cast<void>(voice_hook_backend->Disable(voice_capture_target));
+    if (voice_activate_hook_created) {
+        static_cast<void>(voice_hook_backend->Disable(voice_activate_target));
+    }
+    if (voice_ptt_hook_created) {
+        static_cast<void>(voice_hook_backend->Disable(voice_ptt_target));
+    }
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(500);
+    while (voice_hook_in_callback.load(std::memory_order_acquire) != 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    static_cast<void>(voice_hook_backend->Remove(voice_capture_target));
+    if (voice_activate_hook_created) {
+        static_cast<void>(voice_hook_backend->Remove(voice_activate_target));
+    }
+    if (voice_ptt_hook_created) {
+        static_cast<void>(voice_hook_backend->Remove(voice_ptt_target));
+    }
+    voice_capture_owner.store(nullptr, std::memory_order_release);
+    static_cast<void>(voice_hook_backend->Uninitialize());
+    voice_hook_backend.reset();
+    voice_hook_installed.store(false, std::memory_order_release);
+    voice_capture_original = nullptr;
+    voice_activate_original = nullptr;
+    voice_activate_hook_created = false;
+    voice_ptt_original = nullptr;
+    voice_ptt_hook_created = false;
+}
+
+void ANOMALY_CALL MaydayAdapter::Impl::VoiceCaptureThunk(
+    void* self, void* segment, void* format, void* method) {
+    Impl* const impl = voice_capture_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return;
+    impl->voice_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        impl->HandleVoiceCapture(self, segment, format, method);
+    } catch (...) {
+        // 数据替换失败不得穿透 Dissonance 的 capture 管线。
+    }
+    impl->voice_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void MaydayAdapter::Impl::HandleVoiceCapture(
+    void* self, void* segment, void* format, void* method) {
+    auto* const original = reinterpret_cast<void (ANOMALY_CALL*)(
+        void*, void*, void*, void*)>(voice_capture_original);
+    if (original == nullptr) return;
+    // 捕获 WaveFormat 采样率（int 字段或 get_SampleRate 属性），供插件解码对齐。
+    if (injection_rate_captured.load(std::memory_order_acquire) <= 0 &&
+        format != nullptr) {
+        std::int32_t rate = 0;
+        if (voice_wave_rate_offset > 0) {
+            rate = *reinterpret_cast<const std::int32_t*>(
+                reinterpret_cast<std::uintptr_t>(format) + voice_wave_rate_offset);
+        } else if (voice_wave_rate_getter != nullptr) {
+            // 属性 getter 兜底：hook 在主线程（capture 由 Unity Update 驱动），
+            // invoke 安全；成功后缓存，后续不再调用。
+            static_cast<void>(InvokeInt(voice_wave_rate_getter, format, &rate));
+        }
+        if (rate > 0 && rate < 384001) {
+            injection_rate_captured.store(rate, std::memory_order_release);
+            if (log_sink != nullptr) {
+                log_sink("voice.capture_rate",
+                         "WaveFormat.SampleRate = " + std::to_string(rate));
+            }
+        }
+    }
+    // 播放期间把游戏写入的 IsMuted 覆盖回 false（解除 PTT 门控，见函数注释）。
+    EnsureInjectionTransmitting();
+    const bool active = injection_active.load(std::memory_order_acquire);
+    const void* const samples = injection_pcm.load(std::memory_order_acquire);
+    if (active && samples != nullptr && segment != nullptr) {
+        // il2cpp 的 ArraySegment<float> 布局：{T[] array; int offset; int count}
+        // （栈上值类型无对象头）。il2cpp 数组元素数据自 0x20 起。
+        const std::uintptr_t segment_addr = reinterpret_cast<std::uintptr_t>(segment);
+        void* const array = *reinterpret_cast<void**>(segment_addr);
+        const std::int32_t offset = *reinterpret_cast<const std::int32_t*>(segment_addr + 0x8);
+        const std::int32_t count = *reinterpret_cast<const std::int32_t*>(segment_addr + 0xC);
+        if (array != nullptr && count > 0 && offset >= 0) {
+            const std::uintptr_t array_addr = reinterpret_cast<std::uintptr_t>(array);
+            const std::uintptr_t max_length =
+                *reinterpret_cast<const std::uintptr_t*>(array_addr + kIl2CppArrayLengthOffset);
+            const std::uintptr_t total =
+                static_cast<std::uintptr_t>(offset) + static_cast<std::uintptr_t>(count);
+            if (total <= max_length) {
+                float* const dest = reinterpret_cast<float*>(
+                    array_addr + kIl2CppArrayDataOffset +
+                    sizeof(float) * static_cast<std::uintptr_t>(offset));
+                std::int32_t pos = injection_pos.load(std::memory_order_acquire);
+                const std::int32_t stream_count = injection_count.load(std::memory_order_acquire);
+                const float volume = injection_volume.load(std::memory_order_relaxed);
+                const auto* const source = static_cast<const float*>(samples);
+                for (std::int32_t i = 0; i < count; ++i) {
+                    const std::int32_t index = pos + i;
+                    float value = 0.0f;
+                    if (index >= 0 && index < stream_count) {
+                        value = source[index] * volume;
+                        value = value < -1.0f ? -1.0f : (value > 1.0f ? 1.0f : value);
+                    }
+                    dest[i] = value;
+                }
+                pos += count;
+                if (pos > stream_count) pos = stream_count;
+                injection_pos.store(pos, std::memory_order_release);
+            }
+        }
+    }
+    // 原方法继续消费：注入时数据已是音乐（麦克风被覆盖屏蔽），未注入时
+    // 麦克风数据原样放行。
+    original(self, segment, format, method);
+}
+
+bool ANOMALY_CALL MaydayAdapter::Impl::VoiceActivateThunk(
+    void* self, bool intent, void* method) {
+    Impl* const impl = voice_capture_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return false;
+    impl->voice_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    bool result = false;
+    try {
+        result = impl->HandleShouldActivate(self, intent, method);
+    } catch (...) {
+        // 门控判定失败按不激活处理，游戏走默认路径。
+    }
+    impl->voice_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+    return result;
+}
+
+bool MaydayAdapter::Impl::HandleShouldActivate(
+    void* self, bool intent, void* method) {
+    auto* const original = reinterpret_cast<bool (ANOMALY_CALL*)(void*, bool, void*)>(
+        voice_activate_original);
+    if (original == nullptr) return false;
+    // 注入活跃且流未耗尽时无条件激活传输（解除游戏的按键说话门控）；
+    // 其余时刻走游戏自己的判定，按键/VAD 行为完全还原。
+    if (injection_active.load(std::memory_order_acquire) &&
+        injection_pcm.load(std::memory_order_acquire) != nullptr &&
+        injection_pos.load(std::memory_order_acquire) <
+            injection_count.load(std::memory_order_acquire)) {
+        return true;
+    }
+    return original(self, intent, method);
+}
+
+void MaydayAdapter::Impl::EnsureInjectionTransmitting() {
+    // 游戏侧 PTT 的常见实现是每帧写 DissonanceComms.IsMuted=true：在 capture
+    // 回调（游戏写入之后、管线消费之前）覆盖回 false。解析失败时静默跳过，
+    // 此时只依赖 ShouldActivate 强制激活。
+    if (!injection_active.load(std::memory_order_acquire) ||
+        injection_pcm.load(std::memory_order_acquire) == nullptr ||
+        voice_set_muted_method == nullptr || voice_instance_field == nullptr ||
+        voice_comms_offset == 0 || runtime_invoke == nullptr) {
+        return;
+    }
+    void* instance = nullptr;
+    field_static_get_value(voice_instance_field, &instance);
+    if (instance == nullptr) return;
+    void* const comms = *reinterpret_cast<void**>(
+        reinterpret_cast<std::uintptr_t>(instance) + voice_comms_offset);
+    if (comms == nullptr) return;
+    std::uint8_t muted = 0;
+    void* params[] = {&muted};
+    void* exception = nullptr;
+    runtime_invoke(voice_set_muted_method, comms, params, &exception);
+}
+
+bool ANOMALY_CALL MaydayAdapter::Impl::VoicePttThunk(void* self, void* method) {
+    Impl* const impl = voice_capture_owner.load(std::memory_order_acquire);
+    if (impl == nullptr) return false;
+    impl->voice_hook_in_callback.fetch_add(1, std::memory_order_acq_rel);
+    bool result = false;
+    try {
+        result = impl->HandlePtt(self, method);
+    } catch (...) {
+        // 判定失败按不激活处理，游戏走默认输入。
+    }
+    impl->voice_hook_in_callback.fetch_sub(1, std::memory_order_acq_rel);
+    return result;
+}
+
+bool MaydayAdapter::Impl::HandlePtt(void* self, void* method) {
+    auto* const original = reinterpret_cast<bool (ANOMALY_CALL*)(void*, void*)>(
+        voice_ptt_original);
+    if (original == nullptr) return false;
+    // 注入活跃且流未耗尽时把按键说话输入固定为 true（替玩家按住语音键）；
+    // 其余时刻放行原输入，按键行为完全还原。
+    if (injection_active.load(std::memory_order_acquire) &&
+        injection_pcm.load(std::memory_order_acquire) != nullptr &&
+        injection_pos.load(std::memory_order_acquire) <
+            injection_count.load(std::memory_order_acquire)) {
+        return true;
+    }
+    return original(self, method);
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::VoiceSetInjection(
+    void* user, std::int32_t enabled, const void* samples,
+    std::int32_t sample_count, std::int32_t sample_rate) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    std::scoped_lock lock(impl->resolve_mutex);
+    if (enabled == 0) {
+        // 注销必须同时清指针：插件随后会释放缓冲，hook 不得再读。
+        impl->injection_active.store(false, std::memory_order_release);
+        impl->injection_pcm.store(nullptr, std::memory_order_release);
+        return {ANOMALY_STATUS_V1_OK, 0, {}};
+    }
+    if (!impl->ResolveVoice()) return VoiceStatus("status.voice_no_symbols");
+    if (!impl->EnsureVoiceCaptureHook()) return VoiceStatus("status.failed");
+    const void* const previous =
+        impl->injection_pcm.exchange(samples, std::memory_order_acq_rel);
+    if (previous != samples) {
+        impl->injection_pos.store(0, std::memory_order_release);
+    }
+    impl->injection_count.store(sample_count, std::memory_order_release);
+    if (sample_rate > 0) {
+        impl->injection_requested_rate.store(sample_rate, std::memory_order_release);
+    }
+    impl->injection_active.store(true, std::memory_order_release);
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
+AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::VoiceSetInjectionVolume(
+    void* user, float volume) {
+    auto* const impl = static_cast<Impl*>(user);
+    if (impl == nullptr) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
+    impl->injection_volume.store(
+        volume < 0.0f ? 0.0f : (volume > 2.0f ? 2.0f : volume),
+        std::memory_order_relaxed);
+    return {ANOMALY_STATUS_V1_OK, 0, {}};
+}
+
 void MaydayAdapter::Impl::PublishMoneyService() {
     money_service = {
         sizeof(AnomalyMaydayMoneyServiceV1), kMoneyServiceVersion, this,
@@ -1070,6 +1927,17 @@ void MaydayAdapter::Impl::PublishCombatService() {
     if (ProcessAdapterServices().Publish(
             kCombatServiceId, kCombatServiceVersion, &combat_service)) {
         combat_published.store(&combat_service, std::memory_order_release);
+    }
+}
+
+void MaydayAdapter::Impl::PublishVoiceService() {
+    voice_service = {
+        sizeof(AnomalyMaydayVoiceServiceV1), kVoiceServiceVersion, this,
+        VoiceGetState, VoiceRefreshState, VoiceSendFrame,
+        VoiceSetInjection, VoiceSetInjectionVolume};
+    if (ProcessAdapterServices().Publish(
+            kVoiceServiceId, kVoiceServiceVersion, &voice_service)) {
+        voice_published.store(&voice_service, std::memory_order_release);
     }
 }
 
@@ -2124,6 +2992,9 @@ AnomalyStatusV1 ANOMALY_CALL MaydayAdapter::Impl::FreecamSetInput(
 // 在服务端命中判定前临时把视角朝向目标（静默瞄准，渲染帧看不到旋转）。
 // ---------------------------------------------------------------------------
 std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::combat_owner{nullptr};
+
+// Dissonance capture 注入 hook 的当前宿主（thunk 与拆卸间的竞态兜底）。
+std::atomic<MaydayAdapter::Impl*> MaydayAdapter::Impl::voice_capture_owner{nullptr};
 
 void MaydayAdapter::Impl::UpdateCombat(void* self) {
     if (combat_shutdown.load(std::memory_order_acquire)) return;
@@ -3630,6 +4501,10 @@ void MaydayAdapter::Impl::RevokePublished() {
     if (combat != nullptr) {
         static_cast<void>(ProcessAdapterServices().Revoke(kCombatServiceId, combat));
     }
+    void* const voice = voice_published.exchange(nullptr, std::memory_order_acq_rel);
+    if (voice != nullptr) {
+        static_cast<void>(ProcessAdapterServices().Revoke(kVoiceServiceId, voice));
+    }
 }
 
 MaydayAdapter::MaydayAdapter() : impl_(std::make_unique<Impl>()) {
@@ -3658,6 +4533,7 @@ bool MaydayAdapter::Stop(std::chrono::milliseconds timeout) noexcept {
         impl_->TeardownPauseMenuHook();
         impl_->combat_shutdown.store(true, std::memory_order_release);
         impl_->TeardownCombatHooks();
+        impl_->TeardownVoiceCaptureHook();
     }
     // 等探测线程走完当前轮次（含全部 Publish）再回收服务表：旧的“只 sleep
     // 一次”兜底允许 RevokePublished 之后探测线程仍发布新服务，服务表会残留

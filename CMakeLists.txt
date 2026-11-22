@@ -1307,6 +1307,23 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
     # 按键 5-8 的边沿检测与前台窗口判定走 user32。
     target_link_libraries(anomaly_builtin_hotbar PRIVATE user32)
 
+    # Mayday 内建插件：音乐播放。本地 mp3/flac/wav 解码（miniaudio，vendor 于
+    # third_party/miniaudio）+ μ-law 编码，经宿主 mayday.voice 服务送入游戏
+    # 语音管线对全房间播放；自听走本机 WASAPI 回放，与发送链路独立。
+    anomaly_add_plugin(anomaly_builtin_music
+        SOURCES plugins/Music/plugin.cpp plugins/Music/miniaudio_impl.c
+        MANIFEST plugins/Music/manifest.json
+        PACKAGE_NAME Music
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Music")
+    target_compile_options(anomaly_builtin_music PRIVATE /utf-8)
+    # miniaudio WASAPI 后端需要 COM 初始化库。
+    target_link_libraries(anomaly_builtin_music PRIVATE ole32)
+    target_include_directories(anomaly_builtin_music
+        PRIVATE "${CMAKE_SOURCE_DIR}/third_party/miniaudio")
+    # vendor 的第三方单头不参与 /W4 告警治理。
+    set_source_files_properties(plugins/Music/miniaudio_impl.c
+        PROPERTIES COMPILE_OPTIONS "/w")
+
     if(ANOMALY_BUILD_TEST_FIXTURES)
         add_executable(anomaly_ui_overlay_fixture
             apps/test_host/ui_overlay_fixture.cpp src/plugin/plugin_manager.cpp)

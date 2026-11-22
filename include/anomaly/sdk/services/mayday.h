@@ -187,6 +187,86 @@ typedef struct AnomalyMaydayCombatServiceV1 {
         void* user, AnomalyMaydayCombatStateV1* out_state);
 } AnomalyMaydayCombatServiceV1;
 
+// Mayday Airways voice injection service (id="mayday.voice"). The host resolves
+// Mayday.Net.PlayerVoice (SendVoice), the VoiceCapture static constants, the
+// SpeakerRoute enum values and the VoiceBackend session flag by name at
+// runtime; plugins never touch il2cpp. send_frame submits one pre-encoded
+// mu-law frame through the game's own voice pipeline (PlayerVoice.SendVoice),
+// which handles sequencing and the Mirror broadcast to every session member.
+// Route ids are stable host semantics (0=proximity, 1=PA, 2=radio); the host
+// maps them onto the runtime SpeakerRoute values. PA/radio routes stay subject
+// to the game's own permission and loudness quota checks. Failures return
+// ANOMALY_STATUS_V1_UNAVAILABLE with stable diagnostic keys
+// ("status.unavailable", "status.voice_no_symbols", "status.attach_failed",
+// "status.failed") that the plugin localizes.
+
+#define ANOMALY_MAYDAY_VOICE_SERVICE_V1_ID "mayday.voice"
+#define ANOMALY_MAYDAY_VOICE_SERVICE_V1_VERSION 1u
+
+typedef struct AnomalyMaydayVoiceStateV1 {
+    uint32_t struct_size;
+    // 1 while the local player's voice pipeline is ready, 0 otherwise.
+    int32_t in_flight;
+    // 1 when the session negotiated the Dissonance backend, 0 for the legacy
+    // mu-law backend, -1 when the backend flag could not be read.
+    int32_t backend_dissonance;
+    // VoiceCapture.MuLawRate: PCM sample rate the mu-law frames represent.
+    int32_t sample_rate;
+    // VoiceCapture.MuLawPacketBytes: bytes per encoded voice packet.
+    int32_t frame_bytes;
+    // VoiceCapture.SendInterval in milliseconds: the game's frame cadence.
+    int32_t send_interval_ms;
+    // Runtime SpeakerRoute enum values resolved by name; -1 when unresolved.
+    int32_t route_proximity;
+    int32_t route_pa;
+    int32_t route_radio;
+    // 1 when this process hosts the Mirror server, 0 when joined.
+    int32_t host_mode;
+    // 1 when the Dissonance capture hook is installed (injection available),
+    // 0 otherwise. The hook replaces the microphone capture data with the
+    // registered PCM stream while it is registered.
+    int32_t injection_available;
+    // WaveFormat.SampleRate captured from the Dissonance capture callback;
+    // -1 until the first capture callback delivered a format.
+    int32_t injection_sample_rate;
+    // Consumption position (in samples) the capture hook reached inside the
+    // registered stream; only meaningful while injection is registered.
+    int32_t injection_position;
+} AnomalyMaydayVoiceStateV1;
+
+typedef struct AnomalyMaydayVoiceServiceV1 {
+    uint32_t struct_size;
+    uint32_t service_version;
+    void* user;
+    // Reads the latest snapshot; no game calls are made here, so it is safe
+    // from the render domain. Call refresh_state from the game domain to
+    // update the snapshot.
+    AnomalyStatusV1 (ANOMALY_CALL *get_state)(
+        void* user, AnomalyMaydayVoiceStateV1* out_state);
+    // Refreshes the snapshot (local player presence, session backend, host
+    // mode). Game domain only; cheap enough for every frame.
+    AnomalyStatusV1 (ANOMALY_CALL *refresh_state)(void* user);
+    // Submits one mu-law encoded frame on the given stable route id
+    // (0=proximity, 1=PA, 2=radio). frame/length hold codec bytes; the game
+    // handles sequencing and broadcast. Game domain only. Ineffective while
+    // the session negotiated the Dissonance backend.
+    AnomalyStatusV1 (ANOMALY_CALL *send_frame)(
+        void* user, int32_t route_id, const void* frame, int32_t length);
+    // Registers (enabled != 0) or releases (enabled == 0) the Dissonance
+    // capture injection: while registered, the capture hook replaces the
+    // microphone PCM with samples (mono float32, sample_rate) until sample_count
+    // samples were consumed. Re-registering with a different samples pointer
+    // restarts at zero; toggling enabled with the same pointer resumes. The
+    // plugin owns the buffer lifetime and must release it (enabled == 0)
+    // before freeing. Game domain only. Returns status.voice_no_symbols /
+    // status.failed when the capture symbols or hook are unavailable.
+    AnomalyStatusV1 (ANOMALY_CALL *set_injection)(
+        void* user, int32_t enabled, const void* samples,
+        int32_t sample_count, int32_t sample_rate);
+    // Injection volume multiplier applied by the capture hook, in [0, 2].
+    AnomalyStatusV1 (ANOMALY_CALL *set_injection_volume)(void* user, float volume);
+} AnomalyMaydayVoiceServiceV1;
+
 #ifdef __cplusplus
 }
 #endif
