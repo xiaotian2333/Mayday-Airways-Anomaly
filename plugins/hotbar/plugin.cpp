@@ -1,10 +1,10 @@
-// 物品栏扩展插件：把游戏的 4 槽物品栏扩到 8 槽。
+// 物品栏扩展插件：把游戏的 4 槽物品栏扩到 10 槽。
 // 全部改动点由兼容 Profile 的特征码定位并按入口字节校验，代码不持有任何地址：
 // 服务器侧三处补丁（物品栏生成槽位数、CmdSelect 服务端与分发两处选择上界）
 // 在宿主进程充当服务器时对全部玩家生效——未安装本插件的加入者无需安装任何
-// 额外内容即可携带 8 槽（Mirror SyncList 按列表整体同步，与客户端 UI 槽数无关）；
+// 额外内容即可携带 10 槽（Mirror SyncList 按列表整体同步，与客户端 UI 槽数无关）；
 // 客户端侧两处补丁与一个 hook（原生物品栏槽位数组、滚轮取模、HotbarDown
-// 检测按键 5-8）只影响本机进程。加入者不装插件时仍保持 4 槽界面与 1-4 按键，
+// 检测按键 5-9/0）只影响本机进程。加入者不装插件时仍保持 4 槽界面与 1-4 按键，
 // 属于向下兼容的降级语义（HotbarWidget.Tick 对 active 越界有边界检查，已核实）。
 #include "anomaly/sdk/cpp.hpp"
 #include "anomaly/sdk/localization.hpp"
@@ -33,7 +33,6 @@ constexpr std::string_view kProfileContract = "mayday.hotbar-slots";
 constexpr std::string_view kProfileLayoutMaxSlots = "maxSlotCount";
 constexpr std::string_view kProfileLayoutPivotMilli = "slotPivotXMilli";
 constexpr std::uint32_t kVanillaSlots = 4;
-// 插件不提供槽数配置：槽数量固定取 profile 兼容上限（本构建 10）。
 constexpr std::uint32_t kSlotCount = 10;
 
 // 与 profile/compatibility.profile.json 的 symbols[].name 一一对应。
@@ -113,7 +112,7 @@ std::string g_error;  // 稳定诊断 key（reason.*），由界面翻译。
 // 与游戏 1-4 键被宿主输入阻断保持一致。
 std::atomic<std::uint32_t> g_ui_frame_state{0};
 
-// 按键 5-8：与游戏 1-4 键同为「按住即选中」语义，按槽位顺序扫描。
+// 按键 5-9/0：与游戏 1-4 键同为「按住即选中」语义，按槽位顺序扫描。
 // HandleHotbar 已核实只对本地玩家执行（Update 开头 isLocalPlayer 门控），
 // Mirror 的 Command 所有权检查同时保证远程对象不会误发命令。
 std::int32_t ExtraKeySlot() {
@@ -145,7 +144,10 @@ std::int32_t ExtraKeySlot() {
 
 std::int32_t ANOMALY_CALL HotbarDownThunk(void* method) {
     AnomalyGenerationHandleV1 lease{};
-    // generation 失效（插件停止中）时不得触碰 trampoline。
+    // generation 失效（插件停止中）时不得触碰 trampoline。与本 detour 跨线程
+    // 共享的 g_hook_handle/g_original/g_slot_count 为普通读写：x64 对齐读写
+    // 实为原子，正确性由 begin_callback 的所有权校验与宿主 release 前排水
+    // 回调（RemoveHook 超时即 TIMEOUT）兜底。
     if (g_hook == nullptr || g_hook_handle.id == 0 ||
         !anomaly::sdk::Succeeded(
             g_hook->begin_callback(g_hook->user, g_hook_handle, &lease))) {
@@ -205,10 +207,8 @@ void ReleaseHook() {
     g_blocked_fn = nullptr;
 }
 
-// 按槽数 n 重新落补丁与 hook（仅 Lifecycle/Worker 域调用）。符号地址在 Load
-// 阶段已缓存并校验，释放后字节回到原状，可安全重用。
-// n = 0 表示「无槽位」：只落生成槽数（0 项）与 UI 槽位数组（0 格）两处补丁，
-// 滚轮/选择上界/按键 hook 不适用（原版代码对空物品栏无副作用，保留原样）。
+// 按槽数 n（≥1，Start 保证）重新落补丁与 hook（仅 Lifecycle/Worker 域调用）。
+// 符号地址在 Load 阶段已缓存并校验，释放后字节回到原状，可安全重用。
 void ApplyForCount(const std::uint32_t n) {
     ReleaseHook();
     ReleaseAppliedPatches();
@@ -233,39 +233,37 @@ void ApplyForCount(const std::uint32_t n) {
     requests[request_count++] = PatchRequest{
         PatchUi, g_symbol_ui_ctor + kCtorImmediateOffset, immediate, 1,
         "hotbar.ui_slots"};
+    const std::uint8_t select_bound[1] = {last};
+    // 滚轮取模：任意 N 用除法实现（rax 是存活寄存器，push/pop 保护；
+    // rcx 会被其后的 mov rcx,[rax+0F0h] 重写）。加 4N 而非 N：N<4 且
+    // active-steps+N 可能为负（div 对负数给错误余数），4N 保证恒为正，
+    // 且 4N ≤ 40 仍在 imm8 范围内。
+    const auto wheel_addend = static_cast<std::uint8_t>(n * 4);
     std::uint8_t wheel_bytes[kWheelSize]{};
-    if (n >= 1) {
-        const std::uint8_t select_bound[1] = {last};
-        // 滚轮取模：任意 N 用除法实现（rax 是存活寄存器，push/pop 保护；
-        // rcx 会被其后的 mov rcx,[rax+0F0h] 重写）。加 4N 而非 N：N<4 且
-        // active-steps+N 可能为负（div 对负数给错误余数），4N 保证恒为正，
-        // 且 4N ≤ 40 仍在 imm8 范围内。
-        const auto wheel_addend = static_cast<std::uint8_t>(n * 4);
-        wheel_bytes[0] = 0x83;
-        wheel_bytes[1] = 0xC2;
-        wheel_bytes[2] = wheel_addend;  // add edx, 4N
-        wheel_bytes[3] = 0x50;          // push rax
-        wheel_bytes[4] = 0x8B;
-        wheel_bytes[5] = 0xC2;          // mov eax, edx
-        wheel_bytes[6] = 0x33;
-        wheel_bytes[7] = 0xD2;          // xor edx, edx
-        wheel_bytes[8] = 0xB9;
-        wheel_bytes[9] = count;         // mov ecx, N（imm32 低字节）
-        wheel_bytes[13] = 0xF7;
-        wheel_bytes[14] = 0xF1;         // div ecx
-        wheel_bytes[15] = 0x58;         // pop rax
-        wheel_bytes[16] = 0x90;
-        wheel_bytes[17] = 0x90;         // 补齐 18 字节窗口
-        requests[request_count++] = PatchRequest{
-            PatchUserCode, g_symbol_user_code + kSelectUserCodeOffset,
-            select_bound, 1, "hotbar.select_usercode"};
-        requests[request_count++] = PatchRequest{
-            PatchInvoke, g_symbol_invoke + kSelectInvokeOffset, select_bound, 1,
-            "hotbar.select_invoke"};
-        requests[request_count++] = PatchRequest{
-            PatchWheel, g_symbol_wheel + kWheelOffset, wheel_bytes, kWheelSize,
-            "hotbar.wheel_modulo"};
-    }
+    wheel_bytes[0] = 0x83;
+    wheel_bytes[1] = 0xC2;
+    wheel_bytes[2] = wheel_addend;  // add edx, 4N
+    wheel_bytes[3] = 0x50;          // push rax
+    wheel_bytes[4] = 0x8B;
+    wheel_bytes[5] = 0xC2;          // mov eax, edx
+    wheel_bytes[6] = 0x33;
+    wheel_bytes[7] = 0xD2;          // xor edx, edx
+    wheel_bytes[8] = 0xB9;
+    wheel_bytes[9] = count;         // mov ecx, N（imm32 低字节）
+    wheel_bytes[13] = 0xF7;
+    wheel_bytes[14] = 0xF1;         // div ecx
+    wheel_bytes[15] = 0x58;         // pop rax
+    wheel_bytes[16] = 0x90;
+    wheel_bytes[17] = 0x90;         // 补齐 18 字节窗口
+    requests[request_count++] = PatchRequest{
+        PatchUserCode, g_symbol_user_code + kSelectUserCodeOffset,
+        select_bound, 1, "hotbar.select_usercode"};
+    requests[request_count++] = PatchRequest{
+        PatchInvoke, g_symbol_invoke + kSelectInvokeOffset, select_bound, 1,
+        "hotbar.select_invoke"};
+    requests[request_count++] = PatchRequest{
+        PatchWheel, g_symbol_wheel + kWheelOffset, wheel_bytes, kWheelSize,
+        "hotbar.wheel_modulo"};
     bool all_patched = true;
     for (std::size_t i = 0; i < request_count; ++i) {
         const PatchRequest& request = requests[i];
@@ -284,10 +282,12 @@ void ApplyForCount(const std::uint32_t n) {
     // 槽行居中：锚点函数在构造行 pivot 时从共享常量池加载 0.5（movss，池
     // 常量被 78 处引用不能改），经 unpcklps 构造出 Vector2 (0.5, 0.5)。10 槽
     // 行比原版 4 槽宽，行中心偏右；把 pivot.x 调高可让行回到屏幕中线（y 不
-    // 变）。实现上把 22 字节构造窗口整体改写为 movabs rdx, imm64 直接携带
-    // 目标 Vector2 (pivot_x, 0.5)，xor r8d（call 第三参数 0）与窗口后的
-    // movq rdx, xmm0、call 保持原样。
-    if (n >= 1 && g_core != nullptr && g_slot_pivot_milli >= 500) {
+    // 变）。实现上把 22 字节构造窗口（movss/xor r8d/movaps/unpcklps/movq，
+    // +13..+34）整体改写为 movabs rdx, imm64 直接携带目标 Vector2
+    // (pivot_x, 0.5) 并重发 xor r8d（call 第三参数 0）：原 movq rdx, xmm0
+    // 必须一并覆盖——若保留会用池常量构造的陈旧 xmm0 覆写 movabs 装好的
+    // rdx。窗口之后的 call 保持原样。
+    if (g_core != nullptr && g_slot_pivot_milli >= 500) {
         const float pivot_x = static_cast<float>(g_slot_pivot_milli) / 1000.0f;
         std::uint8_t row_patch[22]{};
         row_patch[0] = 0x48;
@@ -298,8 +298,9 @@ void ApplyForCount(const std::uint32_t n) {
         row_patch[11] = 0x33;
         row_patch[12] = 0xC0;  // xor r8d, r8d
         for (std::size_t i = 13; i < sizeof(row_patch); ++i) row_patch[i] = 0x90;
-        // 窗口尾部必须是被保留的 movq rdx, xmm0（66 48 0f 7e c2）；符号解析
-        // 已由 profile 入口字节校验，这里复核窗口边界防止落在错误位置。
+        // 窗口尾部（+17 起）必须是 movq rdx, xmm0（66 48 0f 7e c2）——它
+        // 本身会被改写，此处仅作定位锚点；符号解析已由 profile 入口字节
+        // 校验，这里复核窗口边界防止补丁落在错误位置。
         std::uint8_t window[22]{};
         const auto window_status = g_core->read_memory(
             g_core->user, g_symbol_slot_pivot + 13, {window, sizeof(window)});
@@ -316,27 +317,25 @@ void ApplyForCount(const std::uint32_t n) {
         }
     }
 
-    if (n >= 1) {
-        // 按键 hook：失败只影响 4 以上的按键，其余补丁保持生效。
-        AnomalyHookRequestV1 hook_request{};
-        hook_request.struct_size = sizeof(hook_request);
-        hook_request.kind = ANOMALY_HOOK_V1_FUNCTION;
-        hook_request.target = g_symbol_hotbar_down;
-        hook_request.detour = reinterpret_cast<void*>(&HotbarDownThunk);
-        hook_request.label = anomaly::sdk::StringView("hotbar.get_hotbar_down");
-        std::uintptr_t original{};
-        AnomalyGenerationHandleV1 hook_handle{};
-        const auto hook_status =
-            g_hook->create(g_hook->user, &hook_request, &original, &hook_handle);
-        if (anomaly::sdk::Succeeded(hook_status) && original != 0) {
-            g_original = original;
-            g_hook_handle = hook_handle;
-            g_blocked_fn = reinterpret_cast<InputBlockedFn>(g_symbol_blocked);
-            PluginLog("hotbar: hook installed");
-        } else {
-            if (g_error.empty()) g_error = "reason.hook";
-            PluginLog("hotbar: hook failed");
-        }
+    // 按键 hook：失败只影响 4 以上的按键，其余补丁保持生效。
+    AnomalyHookRequestV1 hook_request{};
+    hook_request.struct_size = sizeof(hook_request);
+    hook_request.kind = ANOMALY_HOOK_V1_FUNCTION;
+    hook_request.target = g_symbol_hotbar_down;
+    hook_request.detour = reinterpret_cast<void*>(&HotbarDownThunk);
+    hook_request.label = anomaly::sdk::StringView("hotbar.get_hotbar_down");
+    std::uintptr_t original{};
+    AnomalyGenerationHandleV1 hook_handle{};
+    const auto hook_status =
+        g_hook->create(g_hook->user, &hook_request, &original, &hook_handle);
+    if (anomaly::sdk::Succeeded(hook_status) && original != 0) {
+        g_original = original;
+        g_hook_handle = hook_handle;
+        g_blocked_fn = reinterpret_cast<InputBlockedFn>(g_symbol_blocked);
+        PluginLog("hotbar: hook installed");
+    } else {
+        if (g_error.empty()) g_error = "reason.hook";
+        PluginLog("hotbar: hook failed");
     }
 }
 
@@ -367,7 +366,8 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) 
         // 槽数量固定，取 profile 的兼容上限（本构建为 10）；缺失即视为不可用。
         try {
             g_max_slots = g_profile.Value(kProfileLayoutMaxSlots, 16);
-            g_slot_pivot_milli = g_profile.Value(kProfileLayoutPivotMilli, 100000);
+            // 上限 10.0：实调居中值为 4290，此处仅拦截损坏的超大值。
+            g_slot_pivot_milli = g_profile.Value(kProfileLayoutPivotMilli, 10000);
         } catch (...) {
             g_max_slots = 0;
         }
@@ -458,8 +458,7 @@ AnomalyStatusV1 ANOMALY_CALL Start(void*) {
 
     // 槽数量固定为 profile 兼容上限（本构建 10），启用即按该值应用全部补丁。
     const std::uint32_t configured =
-        g_max_slots != 0 && g_max_slots < kSlotCount ? g_max_slots : kSlotCount;
-    g_slot_count = configured;
+        g_max_slots < kSlotCount ? g_max_slots : kSlotCount;
     ApplyForCount(configured);
     return anomaly::sdk::Ok();
 }
@@ -526,16 +525,15 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
     anomaly::sdk::UiWindow window(ui, title, &open);
     if (!window) return;
 
-    // 状态行：失败（带原因）/ 部分生效 / 全部生效。N=0 只要求两处基础补丁。
+    // 状态行：失败（带原因）/ 部分生效 / 全部生效。
     const bool base_ready =
         g_patches[PatchSpawn].applied && g_patches[PatchUi].applied;
     const bool extras_ready = g_patches[PatchUserCode].applied &&
         g_patches[PatchInvoke].applied && g_patches[PatchWheel].applied;
     const bool hook_ready = g_hook_handle.id != 0;
     const bool center_ready = g_patches[PatchCenterPivot].applied;
-    const bool feature_ready = g_slot_count == 0
-        ? base_ready
-        : base_ready && extras_ready && hook_ready && center_ready;
+    const bool feature_ready =
+        base_ready && extras_ready && hook_ready && center_ready;
     if (!g_error.empty()) {
         // 原因是稳定诊断 key（reason.*），在这里翻译；未知 key 回退通用文案。
         const std::string reason =
@@ -565,14 +563,12 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) {
         DrawTargetRow(ui, "target.spawn", "Inventory spawn slots (server)",
                       g_patches[PatchSpawn].applied);
         DrawTargetRow(ui, "target.ui", "Native hotbar UI", g_patches[PatchUi].applied);
-        if (g_slot_count >= 1) {
-            DrawTargetRow(ui, "target.select", "Slot select bounds (server)",
-                          g_patches[PatchUserCode].applied && g_patches[PatchInvoke].applied);
-            DrawTargetRow(ui, "target.scroll", "Wheel cycling",
-                          g_patches[PatchWheel].applied);
-            DrawTargetRow(ui, "target.center", "Slot row centering", center_ready);
-            DrawTargetRow(ui, "target.keys", "Keys beyond 4 (hook)", hook_ready);
-        }
+        DrawTargetRow(ui, "target.select", "Slot select bounds (server)",
+                      g_patches[PatchUserCode].applied && g_patches[PatchInvoke].applied);
+        DrawTargetRow(ui, "target.scroll", "Wheel cycling",
+                      g_patches[PatchWheel].applied);
+        DrawTargetRow(ui, "target.center", "Slot row centering", center_ready);
+        DrawTargetRow(ui, "target.keys", "Keys beyond 4 (hook)", hook_ready);
         ui->end_table(ui->user);
     }
 

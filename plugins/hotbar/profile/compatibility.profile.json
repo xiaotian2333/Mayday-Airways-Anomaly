@@ -85,8 +85,8 @@
       "name": "hotbar_slot_pivot",
       "candidates": [
         {
-          "pattern": "48 8b 4f 10 48 85 c9 0f 84 ?? ?? ?? ?? f3 0f 10 0d ?? ?? ?? ?? 45 33 c0 0f 28 c1 0f 14 c1",
-          "entry": "48 8b 4f 10 48 85 c9 0f 84 42 0b 00 00 f3 0f 10 0d 77 97 c2 02 45 33 c0 0f 28 c1 0f 14 c1",
+          "pattern": "48 8B 4F 10 48 85 C9 0F 84 ?? ?? ?? ?? F3 0F 10 0D ?? ?? ?? ?? 45 33 C0 0F 28 C1 0F 14 C1",
+          "entry": "48 8B 4F 10 48 85 C9 0F 84 42 0B 00 00 F3 0F 10 0D 77 97 C2 02 45 33 C0 0F 28 C1 0F 14 C1",
           "values": {}
         }
       ]
