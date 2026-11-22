@@ -16,6 +16,8 @@ Agent 请在会话开始时手动引用本文件。它是仓库唯一的自动�
 - `docs/api-reference/`：完整的纯 C ABI v1 契约。
 - `.agents/architecture.md`：实现时使用的模块归属、依赖和线程边界速查。
 - `.agents/tooling.md`：构建、测试、发布和实时进程工具的命令与权限规则。
+- `docs/developer-guide/mayday-net-messages.md`：Mayday 联网协议与加入者消息包体分析
+  （frida 运行时枚举 GameAssembly 生成，含 Cmd/SyncVar/自定义消息的字节级结构与中文注释）。
 - `CMakePresets.json`：主仓库唯一受支持的构建配置。
 
 `.build/`、`data/`、`runtime/` 都是本机或生成状态，不能作为源码输入。不要修改生成的
@@ -211,5 +213,6 @@ ABI/线程/回调最外层 `catch (...)`、Dispatcher 锁外销毁 callback 等�
 | 插件 ABI 与热重载 | `include/anomaly/sdk/`、`src/plugin/`、`examples/` |
 | 插件文案与本地化 | `include/anomaly/sdk/localization.hpp`、`plugins/*/locales/`、`tools/check_plugin_i18n.ps1` |
 | Mayday/Unity 兼容 | `src/game/mayday/`、`include/anomaly/mayday_*.hpp`、`profiles/mayday/` |
+| Mayday 联网消息与包体 | `docs/developer-guide/mayday-net-messages.md` |
 | 渲染与 UI | `src/render/dx12/`、`src/ui/` |
 | 验证与发布门禁 | `CMakeLists.txt`、`.agents/tooling.md` |
