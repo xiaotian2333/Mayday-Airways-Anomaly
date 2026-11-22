@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "id": "mayday.hotbar",
+  "name": "Hotbar Slots",
+  "description": "Fix the hotbar at ten slots: server-side inventory capacity is shared with every player on the host, and the local client gets the native ten-slot HUD, wheel cycling and keys 5-9/0.",
+  "author": "Mayday Loader",
+  "license": "AGPL-3.0-only",
+  "version": "1.0.0",
+  "entry": "plugin.dll",
+  "api": {
+    "major": 1,
+    "minMinor": 0,
+    "maxMinor": 0
+  },
+  "games": [
+    "mayday"
+  ],
+  "builds": [
+    "mayday-*"
+  ],
+  "loadPhase": "game-ready",
+  "services": [
+    {
+      "id": "anomaly.ui",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.localization",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.core",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.json",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.profile",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.interop.signature",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.interop.hook",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.interop.patch",
+      "minVersion": 1
+    }
+  ],
+  "capabilities": [
+    "ui",
+    "json",
+    "memory-read",
+    "interop-signature",
+    "interop-hook",
+    "interop-patch"
+  ]
+}
